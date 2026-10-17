@@ -1,1 +1,2 @@
 mod distance;
+mod error;
