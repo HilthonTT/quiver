@@ -1,0 +1,21 @@
+[package]
+name = "vectordb-db"
+description = "Embeddable database engine tying together storage, indexing and snapshots."
+readme = "../../README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[dependencies]
+vectordb-types.workspace = true
+vectordb-storage.workspace = true
+vectordb-index.workspace = true
+vectordb-snapshot.workspace = true
+
+[lints]
+workspace = true

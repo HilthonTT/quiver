@@ -1,0 +1,24 @@
+[package]
+name = "vectordb-tui"
+description = "Terminal UI for inspecting and querying a VectorDB server."
+readme = "../../README.md"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[[bin]]
+name = "vectordb-tui"
+path = "src/main.rs"
+
+[dependencies]
+vectordb-types.workspace = true
+vectordb-client.workspace = true
+anyhow.workspace = true
+
+[lints]
+workspace = true

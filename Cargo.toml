@@ -1,0 +1,44 @@
+[workspace]
+resolver = "3"
+members = ["crates/*"]
+default-members = ["crates/server"]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.85"
+license = "MIT"
+repository = "https://github.com/HilthonTT/vector-db"
+homepage = "https://github.com/HilthonTT/vector-db"
+keywords = ["vector", "database", "embeddings", "ann", "search"]
+categories = ["database-implementations"]
+
+[workspace.dependencies]
+# Internal crates
+vectordb-client = { path = "crates/client" }
+vectordb-db = { path = "crates/db" }
+vectordb-grpc = { path = "crates/grpc" }
+vectordb-http = { path = "crates/http" }
+vectordb-index = { path = "crates/index" }
+vectordb-snapshot = { path = "crates/snapshot" }
+vectordb-storage = { path = "crates/storage" }
+vectordb-types = { path = "crates/types" }
+
+# External crates
+anyhow = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+uuid = { version = "1", features = ["v4", "serde"] }
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+missing_debug_implementations = "warn"
+unused_qualifications = "warn"
+
+[workspace.lints.clippy]
+all = { level = "warn", priority = -1 }
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
