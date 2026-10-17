@@ -1,0 +1,121 @@
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Metric {
+    #[default]
+    Cosine,
+    Euclidean,
+    #[serde(alias = "dot")]
+    DotProduct,
+    #[serde(alias = "l1")]
+    Manhattan,
+    Hamming,
+}
+
+impl Metric {
+    #[inline]
+    pub fn distance(self, a: &[f32], b: &[f32]) -> f32 {
+        match self {
+            Metric::Cosine => 1.0 - dot(a, b),
+            Metric::Euclidean => squared_euclidean(a, b).sqrt(),
+            Metric::DotProduct => -dot(a, b),
+            Metric::Manhattan => manhattan(a, b),
+            Metric::Hamming => hamming(a, b),
+        }
+    }
+
+    pub const ALL: [Metric; 5] = [
+        Metric::Cosine,
+        Metric::Euclidean,
+        Metric::DotProduct,
+        Metric::Manhattan,
+        Metric::Hamming,
+    ];
+
+    pub fn prepare(self, v: &mut [f32]) -> bool {
+        if self != Metric::Cosine {
+            return true;
+        }
+        let norm = dot(v, v).sqrt();
+        if norm == 0.0 || !norm.is_finite() {
+            return false;
+        }
+
+        let inv = 1.0 / norm;
+        v.iter_mut().for_each(|x| *x *= inv);
+        true
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Metric::Cosine => "cosine",
+            Metric::Euclidean => "euclidean",
+            Metric::DotProduct => "dot_product",
+            Metric::Manhattan => "manhattan",
+            Metric::Hamming => "hamming",
+        }
+    }
+}
+
+const LANES: usize = 8;
+
+#[inline]
+pub fn dot(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(a.len(), b.len());
+
+    let mut acc = [0.0f32; LANES];
+    let (ca, ra) = a.split_at(a.len() - a.len() % LANES);
+    let (cb, rb) = b.split_at(ca.len());
+    for (x, y) in ca.chunks_exact(LANES).zip(cb.chunks_exact(LANES)) {
+        for i in 0..LANES {
+            acc[i] += x[i] * y[i];
+        }
+    }
+    let tail: f32 = ra.iter().zip(rb).map(|(x, y)| x * y).sum();
+    acc.iter().sum::<f32>() + tail
+}
+
+#[inline]
+pub fn squared_euclidean(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(a.len(), b.len());
+    let mut acc = [0.0f32; LANES];
+    let (ca, ra) = a.split_at(a.len() - a.len() % LANES);
+    let (cb, rb) = b.split_at(ca.len());
+    for (x, y) in ca.chunks_exact(LANES).zip(cb.chunks_exact(LANES)) {
+        for i in 0..LANES {
+            let d = x[i] - y[i];
+            acc[i] += d * d;
+        }
+    }
+    let tail: f32 = ra
+        .iter()
+        .zip(rb)
+        .map(|(x, y)| {
+            let d = x - y;
+            d * d
+        })
+        .sum();
+    acc.iter().sum::<f32>() + tail
+}
+
+#[inline]
+pub fn manhattan(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(a.len(), b.len());
+    let mut acc = [0.0f32; LANES];
+    let (ca, ra) = a.split_at(a.len() - b.len() % LANES);
+    let (cb, rb) = b.split_at(ca.len());
+    for (x, y) in ca.chunks_exact(LANES).zip(cb.chunks_exact(LANES)) {
+        for i in 0..LANES {
+            acc[i] += (x[i] - y[i]).abs();
+        }
+    }
+    let tail: f32 = ra.iter().zip(rb).map(|(x, y)| (x - y).abs()).sum();
+    acc.iter().sum::<f32>() + tail
+}
+
+#[inline]
+pub fn hamming(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(a.len(), b.len());
+    a.iter().zip(b).filter(|(x, y)| x != y).count() as f32
+}
