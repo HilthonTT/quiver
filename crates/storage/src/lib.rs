@@ -12,7 +12,11 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 use vectordb_types::{Error, Point, Result};
 
-use crate::{file::FileEngine, memory::MemoryEngine, store::VectorStore};
+pub use file::FileEngine;
+pub use memory::MemoryEngine;
+#[cfg(feature = "rocksdb")]
+pub use rocks::RocksDbEngine;
+pub use store::VectorStore;
 
 /// A mutation, as handed to [`StorageEngine::log`].
 #[derive(Debug, Clone, Copy, Serialize)]
