@@ -2,6 +2,7 @@ use serde::{Deserialize, Serialize};
 use vectordb_types::{Error, Point, Result};
 
 pub mod codec;
+mod store;
 mod wal;
 
 /// A mutation, as handed to [`StorageEngine::log`].
