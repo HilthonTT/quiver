@@ -5,6 +5,8 @@ use crate::store::VectorStore;
 
 pub mod codec;
 mod memory;
+#[cfg(feature = "rocksdb")]
+mod rocks;
 mod state;
 mod store;
 mod wal;
@@ -110,5 +112,21 @@ impl std::str::FromStr for StorageKind {
 impl std::fmt::Display for StorageKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str(self.as_str())
+    }
+}
+
+/// Durability and maintenance settings for the file and RocksDB engines.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct StorageOptions {
+    pub fsync: bool,
+    pub wal_checkpoint_bytes: u64,
+}
+
+impl Default for StorageOptions {
+    fn default() -> Self {
+        Self {
+            fsync: false,
+            wal_checkpoint_bytes: 64 * 1024 * 1024,
+        }
     }
 }

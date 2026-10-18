@@ -11,12 +11,18 @@ homepage.workspace = true
 keywords.workspace = true
 categories.workspace = true
 
+[features]
+default = []
+## Enables the RocksDB storage engine (needs a C++ toolchain and libclang to build).
+rocksdb = ["dep:rocksdb"]
+
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
 crc32fast.workspace = true
 tracing.workspace = true
 vectordb-types.workspace = true
+rocksdb = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile.workspace = true
