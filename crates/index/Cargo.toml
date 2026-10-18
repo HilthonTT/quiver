@@ -13,6 +13,8 @@ categories.workspace = true
 
 [dependencies]
 vectordb-types.workspace = true
+vectordb-storage.workspace = true
+rayon.workspace = true
 
 [lints]
 workspace = true
