@@ -21,6 +21,8 @@ vectordb-db.workspace = true
 vectordb-grpc.workspace = true
 vectordb-http.workspace = true
 anyhow.workspace = true
+tracing = "0.1.44"
+crc32fast = "1.5.2"
 
 [lints]
 workspace = true
