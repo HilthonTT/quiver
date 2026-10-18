@@ -1,15 +1,18 @@
-use serde::{Deserialize, Serialize};
-use vectordb_types::{Error, Point, Result};
-
-use crate::store::VectorStore;
-
 pub mod codec;
+mod file;
 mod memory;
 #[cfg(feature = "rocksdb")]
 mod rocks;
-mod state;
+pub mod state;
 mod store;
 mod wal;
+
+use std::path::Path;
+
+use serde::{Deserialize, Serialize};
+use vectordb_types::{Error, Point, Result};
+
+use crate::{file::FileEngine, memory::MemoryEngine, store::VectorStore};
 
 /// A mutation, as handed to [`StorageEngine::log`].
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -128,5 +131,110 @@ impl Default for StorageOptions {
             fsync: false,
             wal_checkpoint_bytes: 64 * 1024 * 1024,
         }
+    }
+}
+
+/// Opens an engine of the given kind. `dir` is required for durable engines.
+pub fn open_engine(
+    kind: StorageKind,
+    dir: Option<&Path>,
+    options: StorageOptions,
+) -> Result<Box<dyn StorageEngine>> {
+    let need_dir = || {
+        dir.ok_or_else(|| Error::invalid(format!("the {kind} storage engine needs a directory")))
+    };
+    match kind {
+        StorageKind::Memory => Ok(Box::new(MemoryEngine)),
+        StorageKind::File => Ok(Box::new(FileEngine::open(need_dir()?, options)?)),
+        #[cfg(feature = "rocksdb")]
+        StorageKind::RocksDb => Ok(Box::new(RocksDbEngine::open(need_dir()?, options)?)),
+        #[cfg(not(feature = "rocksdb"))]
+        StorageKind::RocksDb => Err(Error::Unsupported(
+            "this build has no RocksDB support; rebuild with `--features rocksdb`".into(),
+        )),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn points(n: usize) -> Vec<Point> {
+        (0..n)
+            .map(|i| {
+                Point::new(format!("p{i}"), vec![i as f32, 1.0]).with_metadata(json!({"i": i}))
+            })
+            .collect()
+    }
+
+    /// Exercises the contract every durable engine must honour.
+    fn durable_engine_contract(kind: StorageKind) {
+        let dir = tempfile::tempdir().unwrap();
+        let open = || open_engine(kind, Some(dir.path()), StorageOptions::default()).unwrap();
+        {
+            let mut e = open();
+            assert_eq!(e.recover(2).unwrap().store.live(), 0);
+            e.log(Op::Upsert { points: &points(5) }).unwrap();
+            e.log(Op::Delete {
+                ids: &["p1".into()],
+            })
+            .unwrap();
+        }
+        // Rebuild the expected state the way the database would.
+        let mut e = open();
+        let rec = e.recover(2).unwrap();
+        let mut store = rec.store;
+        for m in rec.replay {
+            match m {
+                Mutation::Upsert { points } => {
+                    for p in points {
+                        store.push(p.id, &p.vector, p.metadata);
+                    }
+                }
+                Mutation::Delete { ids } => ids.iter().for_each(|id| {
+                    store.remove(id);
+                }),
+            }
+        }
+        assert_eq!(store.live(), 4);
+        assert!(store.slot_of("p1").is_none());
+        let p3 = store.slot_of("p3").unwrap();
+        assert_eq!(store.vector(p3), &[3.0, 1.0]);
+        assert_eq!(store.metadata(p3), Some(&json!({"i": 3})));
+
+        // Import replaces everything.
+        let mut fresh = VectorStore::new(2);
+        fresh.push("only".into(), &[9.0, 9.0], None);
+        e.import(&fresh, b"idx").unwrap();
+        drop(e);
+        let rec = open().recover(2).unwrap();
+        assert!(rec.replay.is_empty());
+        assert_eq!(rec.store.live(), 1);
+        assert!(rec.store.slot_of("only").is_some());
+    }
+
+    #[test]
+    fn file_engine_contract() {
+        durable_engine_contract(StorageKind::File);
+    }
+
+    #[cfg(feature = "rocksdb")]
+    #[test]
+    fn rocksdb_engine_contract() {
+        durable_engine_contract(StorageKind::RocksDb);
+    }
+
+    #[test]
+    fn storage_kind_parsing() {
+        assert_eq!(
+            "RocksDB".parse::<StorageKind>().unwrap(),
+            StorageKind::RocksDb
+        );
+        assert_eq!(
+            "inmemory".parse::<StorageKind>().unwrap(),
+            StorageKind::Memory
+        );
+        assert!("mongo".parse::<StorageKind>().is_err());
     }
 }

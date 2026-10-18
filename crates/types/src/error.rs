@@ -23,6 +23,9 @@ pub enum Error {
     #[error("invalid filter: {0}")]
     InvalidFilter(String),
 
+    #[error("unsupported: {0}")]
+    Unsupported(String),
+
     #[error("corrupt data: {0}")]
     Corrupt(String),
 
