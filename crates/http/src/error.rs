@@ -28,6 +28,16 @@ impl ApiError {
         Self::new(StatusCode::NOT_FOUND, "not_found", message)
     }
 
+    /// A missing point in an existing collection. Its own code lets clients
+    /// tell it apart from a missing collection, which is also a 404.
+    pub fn point_not_found(id: &str) -> Self {
+        Self::new(
+            StatusCode::NOT_FOUND,
+            "point_not_found",
+            format!("point `{id}` not found"),
+        )
+    }
+
     pub fn unauthorized() -> Self {
         Self::new(
             StatusCode::UNAUTHORIZED,
@@ -38,6 +48,19 @@ impl ApiError {
 
     pub fn forbidden() -> Self {
         Self::new(StatusCode::FORBIDDEN, "forbidden", "this API key is read-only")
+    }
+
+    pub fn payload_too_large(limit: usize) -> Self {
+        Self::new(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "payload_too_large",
+            format!("request body exceeds the limit of {limit} bytes"),
+        )
+    }
+
+    /// An uploaded snapshot archive that cannot be read.
+    pub fn invalid_snapshot(message: impl Into<String>) -> Self {
+        Self::new(StatusCode::BAD_REQUEST, "invalid_snapshot", message)
     }
 
     pub fn internal(message: impl Into<String>) -> Self {
@@ -67,7 +90,14 @@ impl From<quiver_db::Error> for ApiError {
 
 impl From<JsonRejection> for ApiError {
     fn from(rejection: JsonRejection) -> Self {
-        Self::new(rejection.status(), "invalid_body", rejection.body_text())
+        // Malformed JSON and bodies of the wrong shape (bad types, unknown
+        // fields) are plain invalid input: 400, like every other validation
+        // error. Size and content-type rejections keep their own status.
+        let status = match rejection {
+            JsonRejection::JsonDataError(_) | JsonRejection::JsonSyntaxError(_) => StatusCode::BAD_REQUEST,
+            _ => rejection.status(),
+        };
+        Self::new(status, "invalid_body", rejection.body_text())
     }
 }
 

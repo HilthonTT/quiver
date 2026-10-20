@@ -6,8 +6,10 @@ use tonic::{Request, Status};
 /// Resolves the caller's API key and attaches its [`Role`] to the request.
 ///
 /// Accepts `authorization: Bearer <key>` or `x-api-key: <key>` metadata.
-/// With no keys configured every caller gets [`Role::ReadWrite`]. Each RPC
-/// then checks the role it needs.
+/// With no keys configured every caller gets [`Role::ReadWrite`]. A caller
+/// that presents no key gets no role, which only public RPCs (`Health`)
+/// accept; a wrong key is rejected outright. Each RPC then checks the role
+/// it needs.
 #[derive(Debug, Clone)]
 pub struct Authenticator {
     keys: Arc<KeyStore>,
@@ -29,10 +31,14 @@ impl tonic::service::Interceptor for Authenticator {
             let presented = md
                 .get("authorization")
                 .and_then(|v| v.to_str().ok())
-                .and_then(|v| v.strip_prefix("Bearer "))
+                .and_then(bearer_token)
                 .or_else(|| md.get("x-api-key").and_then(|v| v.to_str().ok()));
-            presented
-                .and_then(|k| self.keys.find(k))
+            let Some(presented) = presented else {
+                // Left to `require`, so that `Health` stays public.
+                return Ok(req);
+            };
+            self.keys
+                .find(presented)
                 .map(|k| k.role)
                 .ok_or_else(|| Status::unauthenticated("missing or invalid API key"))?
         };
@@ -41,11 +47,34 @@ impl tonic::service::Interceptor for Authenticator {
     }
 }
 
+/// The token of an `authorization: Bearer <token>` value. The scheme is
+/// case-insensitive (RFC 7235) and whitespace around the token is ignored.
+fn bearer_token(value: &str) -> Option<&str> {
+    let (scheme, token) = value.trim().split_once(|c: char| c.is_ascii_whitespace())?;
+    let token = token.trim();
+    (scheme.eq_ignore_ascii_case("bearer") && !token.is_empty()).then_some(token)
+}
+
 /// Fails unless the request's key grants `needed`.
 pub(crate) fn require<T>(req: &Request<T>, needed: Role) -> Result<(), Status> {
     match req.extensions().get::<Role>() {
         Some(role) if role.allows(needed) => Ok(()),
         Some(_) => Err(Status::permission_denied("this API key is read-only")),
         None => Err(Status::unauthenticated("missing or invalid API key")),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bearer_token;
+
+    #[test]
+    fn bearer_scheme_is_case_insensitive_and_trimmed() {
+        assert_eq!(bearer_token("Bearer abc"), Some("abc"));
+        assert_eq!(bearer_token("bearer abc"), Some("abc"));
+        assert_eq!(bearer_token("BEARER   abc  "), Some("abc"));
+        assert_eq!(bearer_token("Basic abc"), None);
+        assert_eq!(bearer_token("Bearer "), None);
+        assert_eq!(bearer_token("Bearerabc"), None);
     }
 }

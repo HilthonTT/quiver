@@ -223,6 +223,23 @@ async fn point_crud() {
 }
 
 #[tokio::test]
+async fn missing_points_and_collections_have_distinct_codes() {
+    let app = TestApp::seeded().await;
+    let (status, body) = app.get("/collections/books/points/nope").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "point_not_found");
+    let (status, body) = app
+        .call(Method::DELETE, "/collections/books/points/nope", None)
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "point_not_found");
+
+    let (status, body) = app.get("/collections/typo/points/nope").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "not_found");
+}
+
+#[tokio::test]
 async fn validation_errors_are_json() {
     let app = TestApp::seeded().await;
     let cases = [
@@ -485,4 +502,277 @@ async fn new_metrics_and_kd_tree() {
     assert_eq!(res["results"][0]["id"], "b");
     assert_eq!(res["results"][0]["distance"], 1.0);
     assert_eq!(res["results"][1]["distance"], 6.0);
+}
+
+fn leftover_files(dir: &std::path::Path) -> Vec<String> {
+    std::fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+        .collect()
+}
+
+async fn status_and_json(res: axum::response::Response) -> (StatusCode, Value) {
+    let status = res.status();
+    let bytes = res.into_body().collect().await.unwrap().to_bytes();
+    (status, serde_json::from_slice(&bytes).unwrap_or(Value::Null))
+}
+
+#[tokio::test]
+async fn snapshot_upload_limit_is_enforced() {
+    let app = TestApp::with_options(HttpOptions {
+        max_upload_bytes: Some(1024),
+        ..Default::default()
+    });
+    // Declared too large up front.
+    let res = app
+        .raw(
+            Request::post("/snapshots")
+                .body(Body::from(vec![0u8; 1 << 20]))
+                .unwrap(),
+        )
+        .await;
+    let (status, body) = status_and_json(res).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    assert_eq!(body["error"]["code"], "payload_too_large");
+
+    // Streamed without a length, crossing the limit midway.
+    let chunks = (0..8).map(|_| Ok::<_, std::io::Error>(axum::body::Bytes::from(vec![0u8; 512])));
+    let res = app
+        .raw(
+            Request::post("/snapshots")
+                .body(Body::from_stream(futures_util::stream::iter(chunks)))
+                .unwrap(),
+        )
+        .await;
+    let (status, body) = status_and_json(res).await;
+    assert_eq!(status, StatusCode::PAYLOAD_TOO_LARGE, "{body}");
+    assert!(
+        leftover_files(app._dir.path()).is_empty(),
+        "staging files must be removed"
+    );
+}
+
+#[tokio::test]
+async fn invalid_snapshot_upload_is_a_client_error() {
+    let app = TestApp::new();
+    let res = app
+        .raw(Request::post("/snapshots").body(Body::from("garbage")).unwrap())
+        .await;
+    let (status, body) = status_and_json(res).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], "invalid_snapshot");
+    assert!(leftover_files(app._dir.path()).is_empty());
+}
+
+#[tokio::test]
+async fn duplicate_snapshot_upload_is_a_client_error() {
+    let app = TestApp::seeded().await;
+    let (_, snap) = app.post("/collections/books/snapshots", json!({})).await;
+    let id = snap["id"].as_str().unwrap();
+    let res = app
+        .raw(
+            Request::get(format!("/snapshots/{id}/download"))
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    let archive = res.into_body().collect().await.unwrap().to_bytes();
+    let res = app
+        .raw(Request::post("/snapshots").body(Body::from(archive)).unwrap())
+        .await;
+    let (status, body) = status_and_json(res).await;
+    assert!(status.is_client_error(), "{status} {body}");
+}
+
+#[tokio::test]
+async fn upload_staging_file_is_removed_when_the_request_is_dropped() {
+    let app = TestApp::new();
+    // One chunk, then the client stalls and the request future is dropped.
+    let stream = futures_util::StreamExt::chain(
+        futures_util::stream::once(async {
+            Ok::<_, std::io::Error>(axum::body::Bytes::from_static(b"partial archive"))
+        }),
+        futures_util::stream::pending(),
+    );
+    let req = Request::post("/snapshots")
+        .body(Body::from_stream(stream))
+        .unwrap();
+    let pending = app.app.clone().oneshot(req);
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(200), pending)
+            .await
+            .is_err()
+    );
+    assert!(leftover_files(app._dir.path()).is_empty());
+}
+
+#[tokio::test]
+async fn empty_snapshot_collection_filter_lists_everything() {
+    let app = TestApp::seeded().await;
+    app.post("/collections/books/snapshots", json!({})).await;
+    let (status, list) = app.get("/snapshots?collection=").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(list["snapshots"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn bearer_scheme_is_case_insensitive() {
+    let app = TestApp::with_options(HttpOptions {
+        keys: keys(),
+        ..Default::default()
+    });
+    let get = |auth: &'static str| {
+        app.raw(
+            Request::get("/collections")
+                .header("authorization", auth)
+                .body(Body::empty())
+                .unwrap(),
+        )
+    };
+    for auth in ["bearer ro-secret", "BEARER   ro-secret  ", "Bearer\tro-secret"] {
+        assert_eq!(get(auth).await.status(), StatusCode::OK, "{auth}");
+    }
+    for auth in ["Basic ro-secret", "Bearerro-secret", "bearer wrong"] {
+        assert_eq!(get(auth).await.status(), StatusCode::UNAUTHORIZED, "{auth}");
+    }
+}
+
+#[tokio::test]
+async fn id_lists_are_bounded() {
+    let app = TestApp::seeded().await;
+    let too_many: Vec<String> = (0..=quiver_http::handlers::MAX_IDS)
+        .map(|i| i.to_string())
+        .collect();
+    for uri in [
+        "/collections/books/points/lookup",
+        "/collections/books/points/delete",
+    ] {
+        let (status, body) = app.post(uri, json!({ "ids": too_many })).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{uri}: {body}");
+        assert_eq!(body["error"]["code"], "invalid_argument");
+        let (status, body) = app.post(uri, json!({ "ids": &too_many[1..] })).await;
+        assert_eq!(status, StatusCode::OK, "{uri}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn body_errors_have_consistent_statuses() {
+    let app = TestApp::seeded().await;
+    let send = |body: &'static str, content_type: Option<&'static str>| {
+        let mut req = Request::builder()
+            .method(Method::POST)
+            .uri("/collections/books/search");
+        if let Some(ct) = content_type {
+            req = req.header("content-type", ct);
+        }
+        app.raw(req.body(Body::from(body)).unwrap())
+    };
+
+    // Malformed JSON and the wrong shape are invalid input, like any other.
+    for body in [
+        "{\"vector\": [1.0,",
+        "{\"vectr\": [1.0, 1.0]}",
+        "{\"vector\": \"x\"}",
+    ] {
+        let res = send(body, Some("application/json")).await;
+        assert_eq!(res.status(), StatusCode::BAD_REQUEST, "{body}");
+    }
+    let res = send("{\"vector\": [1.0, 1.0]}", None).await;
+    assert_eq!(res.status(), StatusCode::UNSUPPORTED_MEDIA_TYPE);
+}
+
+#[tokio::test]
+async fn create_collection_rejects_unknown_fields() {
+    let app = TestApp::new();
+    let (status, body) = app
+        .post(
+            "/collections",
+            json!({"name": "a", "dimension": 2, "metrc": "euclidean"}),
+        )
+        .await;
+    // The same status as every other invalid input.
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], "invalid_body");
+
+    // Everything accepted before still is, with the same defaults.
+    let (status, body) = app
+        .post("/collections", json!({"name": "a", "dimension": 2}))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["metric"], "cosine");
+    assert_eq!(body["index"]["type"], "hnsw");
+    let (status, body) = app
+        .post(
+            "/collections",
+            json!({"name": "b", "dimension": 2, "metric": "manhattan", "index": {"type": "kd_tree"}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["index"]["balance_factor"], 3);
+}
+
+/// Holds a collection's read lock for `hold` on its first write, so that a
+/// writer queued behind it keeps new readers waiting for that long.
+struct SlowWriter(std::time::Duration);
+
+impl std::io::Write for SlowWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        std::thread::sleep(std::mem::take(&mut self.0));
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn point_reads_do_not_block_the_runtime() {
+    use std::time::{Duration, Instant};
+
+    let db = Arc::new(Database::in_memory());
+    let c = db
+        .create_collection("c", quiver_db::CollectionConfig::new(2))
+        .unwrap();
+    c.upsert([quiver_db::Point::new("a", vec![1.0, 0.0])]).unwrap();
+    let app = router(Arc::clone(&db), HttpOptions::default());
+
+    // A reader holding the lock, then a writer queued behind it: the lock is
+    // fair, so new readers now wait until both are done (~600ms).
+    let hold = Duration::from_millis(600);
+    let reader = {
+        let c = Arc::clone(&c);
+        std::thread::spawn(move || c.export_state(SlowWriter(hold)).unwrap())
+    };
+    std::thread::sleep(Duration::from_millis(50));
+    let writer = {
+        let c = Arc::clone(&c);
+        std::thread::spawn(move || c.upsert([quiver_db::Point::new("b", vec![0.0, 1.0])]).unwrap())
+    };
+    std::thread::sleep(Duration::from_millis(50));
+
+    let started = Instant::now();
+    let read = tokio::spawn(
+        app.clone().oneshot(
+            Request::get("/collections/c/points/a")
+                .body(Body::empty())
+                .unwrap(),
+        ),
+    );
+    tokio::task::yield_now().await;
+    let health = app
+        .clone()
+        .oneshot(Request::get("/health").body(Body::empty()).unwrap())
+        .await
+        .unwrap();
+    let waited = started.elapsed();
+    assert_eq!(health.status(), StatusCode::OK);
+    assert!(
+        waited < Duration::from_millis(250),
+        "the runtime was blocked for {waited:?}"
+    );
+
+    assert_eq!(read.await.unwrap().unwrap().status(), StatusCode::OK);
+    reader.join().unwrap();
+    writer.join().unwrap();
 }

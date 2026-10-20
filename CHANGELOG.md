@@ -6,6 +6,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Malformed or wrongly shaped JSON bodies (including unknown fields) now return 400 `invalid_body` instead of 422.
+- Uploaded snapshots are verified by streaming (manifest first, size and SHA-256 checked) instead of being decoded in memory,
+  so an upload that decompresses to far more than its size cannot exhaust memory.
+- Stale `*.partial` files in the snapshot directory are removed at startup once they are an hour old.
+
 ## [0.2.0] - 2026-10-16
 
 ### Changed

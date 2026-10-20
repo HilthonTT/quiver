@@ -19,7 +19,7 @@ pub(crate) async fn require(State((keys, required)): State<Guard>, req: Request,
     let presented = headers
         .get(AUTHORIZATION)
         .and_then(|v| v.to_str().ok())
-        .and_then(|v| v.strip_prefix("Bearer "))
+        .and_then(bearer_token)
         .or_else(|| headers.get("x-api-key").and_then(|v| v.to_str().ok()));
 
     match presented.and_then(|k| keys.find(k)) {
@@ -29,5 +29,30 @@ pub(crate) async fn require(State((keys, required)): State<Guard>, req: Request,
             ApiError::forbidden().into_response()
         }
         None => ApiError::unauthorized().into_response(),
+    }
+}
+
+/// The token of an `Authorization: Bearer <token>` value. The scheme is
+/// case-insensitive (RFC 7235) and whitespace around the token is ignored.
+pub(crate) fn bearer_token(value: &str) -> Option<&str> {
+    let (scheme, token) = value.trim().split_once(|c: char| c.is_ascii_whitespace())?;
+    let token = token.trim();
+    (scheme.eq_ignore_ascii_case("bearer") && !token.is_empty()).then_some(token)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bearer_token;
+
+    #[test]
+    fn bearer_scheme_is_case_insensitive_and_trimmed() {
+        assert_eq!(bearer_token("Bearer abc"), Some("abc"));
+        assert_eq!(bearer_token("bearer abc"), Some("abc"));
+        assert_eq!(bearer_token("BEARER   abc  "), Some("abc"));
+        assert_eq!(bearer_token("  Bearer\tabc"), Some("abc"));
+        assert_eq!(bearer_token("Basic abc"), None);
+        assert_eq!(bearer_token("Bearer"), None);
+        assert_eq!(bearer_token("Bearer   "), None);
+        assert_eq!(bearer_token("Bearerabc"), None);
     }
 }

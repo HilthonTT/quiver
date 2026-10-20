@@ -65,7 +65,7 @@ pub fn router(db: Arc<Database>, options: HttpOptions) -> Router {
         .route("/collections/{name}/snapshots", post(create_snapshot))
         .route(
             "/snapshots",
-            post(upload_snapshot).layer(DefaultBodyLimit::max(upload_limit)),
+            post(upload_snapshot).layer(axum::Extension(UploadLimit(upload_limit))),
         )
         .route("/snapshots/{id}", axum::routing::delete(delete_snapshot))
         .route("/snapshots/{id}/restore", post(restore_snapshot))

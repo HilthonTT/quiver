@@ -3,6 +3,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use clap::Parser;
+use clap::builder::BoolishValueParser;
 use quiver_db::auth::{ApiKey, KeyStore, Role};
 use quiver_db::{DbOptions, StorageKind};
 
@@ -23,11 +24,11 @@ pub struct Config {
     pub grpc_port: u16,
 
     /// Don't start the REST API.
-    #[arg(long, env = "QUIVER_DISABLE_HTTP")]
+    #[arg(long, env = "QUIVER_DISABLE_HTTP", value_parser = BoolishValueParser::new())]
     pub disable_http: bool,
 
     /// Don't start the gRPC API.
-    #[arg(long, env = "QUIVER_DISABLE_GRPC")]
+    #[arg(long, env = "QUIVER_DISABLE_GRPC", value_parser = BoolishValueParser::new())]
     pub disable_grpc: bool,
 
     /// Directory holding collections, snapshots and the lock file.
@@ -41,11 +42,11 @@ pub struct Config {
 
     /// Keep everything in memory and touch no disk at all (no snapshots
     /// unless --snapshot-dir is given).
-    #[arg(long, env = "QUIVER_IN_MEMORY")]
+    #[arg(long, env = "QUIVER_IN_MEMORY", value_parser = BoolishValueParser::new())]
     pub in_memory: bool,
 
     /// fsync after every write (slower, power-loss safe).
-    #[arg(long, env = "QUIVER_FSYNC")]
+    #[arg(long, env = "QUIVER_FSYNC", value_parser = BoolishValueParser::new())]
     pub fsync: bool,
 
     /// JSON file of API keys: `[{"name": "...", "role": "readwrite"|"readonly", "key": "..."}]`.
@@ -77,7 +78,7 @@ pub struct Config {
     pub max_body_mb: usize,
 
     /// Allow cross-origin REST requests from any origin.
-    #[arg(long, env = "QUIVER_CORS")]
+    #[arg(long, env = "QUIVER_CORS", value_parser = BoolishValueParser::new())]
     pub cors: bool,
 }
 
@@ -163,8 +164,41 @@ impl Config {
 mod tests {
     use super::*;
 
+    /// Serialises tests that read or change `QUIVER_*` environment variables.
+    static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+        ENV.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+    }
+
     fn parse(args: &[&str]) -> Config {
+        let _env = env_lock();
         Config::try_parse_from(std::iter::once("quiver").chain(args.iter().copied())).unwrap()
+    }
+
+    #[test]
+    fn boolean_env_vars_accept_common_spellings() {
+        let _env = env_lock();
+        let in_memory = |value: &str| {
+            // SAFETY: the variable is only read by tests holding `ENV`.
+            unsafe { std::env::set_var("QUIVER_IN_MEMORY", value) };
+            let parsed = Config::try_parse_from(["quiver"]).map(|c| c.in_memory);
+            // SAFETY: as above.
+            unsafe { std::env::remove_var("QUIVER_IN_MEMORY") };
+            parsed
+        };
+        for yes in ["1", "true", "TRUE", "yes", "on"] {
+            assert!(in_memory(yes).unwrap(), "{yes}");
+        }
+        for no in ["0", "false", "no", "off"] {
+            assert!(!in_memory(no).unwrap(), "{no}");
+        }
+        assert!(in_memory("maybe").is_err());
+
+        // The command-line flags stay plain switches.
+        let c = Config::try_parse_from(["quiver", "--in-memory", "--fsync", "--cors"]).unwrap();
+        assert!(c.in_memory && c.fsync && c.cors && !c.disable_http);
+        assert!(Config::try_parse_from(["quiver", "--in-memory=false"]).is_err());
     }
 
     #[test]

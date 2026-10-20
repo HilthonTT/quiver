@@ -16,6 +16,8 @@ const MAX_K: usize = 10_000;
 const MAX_BATCH: usize = 256;
 /// Upper bound on a scroll page.
 const MAX_SCROLL: usize = 10_000;
+/// Upper bound on ids in one GetPoints or DeletePoints request.
+const MAX_IDS: usize = 10_000;
 
 type Rpc<T> = Result<Response<T>, Status>;
 
@@ -45,6 +47,15 @@ impl QuiverService {
     }
 }
 
+fn check_ids(ids: &[String]) -> Result<(), Status> {
+    if ids.len() > MAX_IDS {
+        return Err(Status::invalid_argument(format!(
+            "at most {MAX_IDS} ids per request"
+        )));
+    }
+    Ok(())
+}
+
 fn search_options(req: &pb::SearchRequest) -> Result<(usize, SearchOptions), Status> {
     let k = if req.k == 0 { 10 } else { req.k as usize };
     if k > MAX_K {
@@ -52,7 +63,9 @@ fn search_options(req: &pb::SearchRequest) -> Result<(usize, SearchOptions), Sta
             "k must be between 1 and {MAX_K}"
         )));
     }
+    // JSON `null` means no filter, as in the REST API.
     let filter = json_from_pb(&req.filter_json, "filter_json")?
+        .filter(|f| !f.is_null())
         .map(|f| Filter::parse(&f))
         .transpose()
         .map_err(status)?;
@@ -81,7 +94,12 @@ impl pb::quiver_server::Quiver for QuiverService {
         req: Request<pb::ListCollectionsRequest>,
     ) -> Rpc<pb::ListCollectionsResponse> {
         require(&req, Role::ReadOnly)?;
-        let collections = self.db.list_collections().into_iter().map(info_to_pb).collect();
+        let collections = self
+            .blocking(|db| Ok(db.list_collections()))
+            .await?
+            .into_iter()
+            .map(info_to_pb)
+            .collect();
         Ok(Response::new(pb::ListCollectionsResponse { collections }))
     }
 
@@ -97,8 +115,9 @@ impl pb::quiver_server::Quiver for QuiverService {
 
     async fn get_collection(&self, req: Request<pb::GetCollectionRequest>) -> Rpc<pb::CollectionInfo> {
         require(&req, Role::ReadOnly)?;
-        let c = self.db.collection(&req.get_ref().name).map_err(status)?;
-        Ok(Response::new(info_to_pb(c.info())))
+        let name = req.into_inner().name;
+        let info = self.blocking(move |db| Ok(db.collection(&name)?.info())).await?;
+        Ok(Response::new(info_to_pb(info)))
     }
 
     async fn drop_collection(
@@ -152,11 +171,13 @@ impl pb::quiver_server::Quiver for QuiverService {
     async fn get_points(&self, req: Request<pb::GetPointsRequest>) -> Rpc<pb::GetPointsResponse> {
         require(&req, Role::ReadOnly)?;
         let req = req.into_inner();
-        let c = self.db.collection(&req.collection).map_err(status)?;
-        let points = c
-            .get_many(&req.ids)
+        check_ids(&req.ids)?;
+        let with_vectors = req.with_vectors;
+        let points = self
+            .blocking(move |db| Ok(db.collection(&req.collection)?.get_many(&req.ids)))
+            .await?
             .into_iter()
-            .map(|p| point_to_pb(p, req.with_vectors))
+            .map(|p| point_to_pb(p, with_vectors))
             .collect();
         Ok(Response::new(pb::GetPointsResponse { points }))
     }
@@ -164,6 +185,7 @@ impl pb::quiver_server::Quiver for QuiverService {
     async fn delete_points(&self, req: Request<pb::DeletePointsRequest>) -> Rpc<pb::DeletePointsResponse> {
         require(&req, Role::ReadWrite)?;
         let req = req.into_inner();
+        check_ids(&req.ids)?;
         let deleted = self
             .blocking(move |db| db.collection(&req.collection)?.delete(&req.ids))
             .await?;

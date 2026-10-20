@@ -1,6 +1,7 @@
 mod config;
 
 use std::sync::Arc;
+use std::time::Duration;
 
 use clap::Parser;
 use quiver_db::{Database, SnapshotScheduler};
@@ -11,6 +12,9 @@ use tracing_subscriber::EnvFilter;
 use crate::config::Config;
 
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
+
+/// How long in-flight requests get to finish once shutdown starts.
+const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 
 #[tokio::main]
 async fn main() {
@@ -99,10 +103,20 @@ async fn run(config: Config) -> Result<(), BoxError> {
     };
     tracing::info!("shutting down");
     let _ = stop_tx.send(true);
-    while let Some(res) = tasks.join_next().await {
-        if let Err(e) = res.map_err(BoxError::from).and_then(|r| r) {
-            tracing::error!(error = %e, "server task failed during shutdown");
+    let drain = async {
+        while let Some(res) = tasks.join_next().await {
+            if let Err(e) = res.map_err(BoxError::from).and_then(|r| r) {
+                tracing::error!(error = %e, "server task failed during shutdown");
+            }
         }
+    };
+    // A stalled client must not keep the server (and the final flush) waiting.
+    if tokio::time::timeout(SHUTDOWN_GRACE, drain).await.is_err() {
+        tracing::warn!(
+            grace_secs = SHUTDOWN_GRACE.as_secs(),
+            "requests still in flight after the grace period; closing them"
+        );
+        tasks.shutdown().await;
     }
     drop(scheduler);
 

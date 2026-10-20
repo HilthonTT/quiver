@@ -1,8 +1,8 @@
 use std::sync::Arc;
 
 use axum::body::Body;
-use axum::extract::{FromRequest, Path, Query, State};
-use axum::http::{StatusCode, header};
+use axum::extract::{Extension, FromRequest, Path, Query, State};
+use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use futures_util::StreamExt;
 use serde::{Deserialize, Serialize};
@@ -10,8 +10,8 @@ use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 
 use quiver_db::{
-    Collection, CollectionConfig, CollectionInfo, Database, Filter, Point, PointInput, RestoreOptions,
-    SearchOptions, SnapshotInfo,
+    Collection, CollectionConfig, CollectionInfo, Database, Filter, IndexConfig, Metric, Point, PointInput,
+    RestoreOptions, SearchOptions, SnapshotInfo,
 };
 
 use crate::error::ApiError;
@@ -22,6 +22,12 @@ pub const MAX_K: usize = 10_000;
 pub const MAX_BATCH: usize = 256;
 /// Upper bound on `limit` when scrolling.
 pub const MAX_SCROLL: usize = 10_000;
+/// Upper bound on ids in one lookup or delete request.
+pub const MAX_IDS: usize = 10_000;
+
+/// Maximum snapshot upload size in bytes, attached to the upload route.
+#[derive(Debug, Clone, Copy)]
+pub struct UploadLimit(pub usize);
 
 pub type AppState = Arc<Database>;
 type ApiResult<T> = Result<T, ApiError>;
@@ -64,34 +70,49 @@ pub async fn health() -> Json<Value> {
 }
 
 /// Server-wide statistics.
-pub async fn info(State(db): State<AppState>) -> Json<Value> {
-    let collections = db.list_collections();
+pub async fn info(State(db): State<AppState>) -> ApiResult<Json<Value>> {
+    let collections = {
+        let db = Arc::clone(&db);
+        blocking(move || Ok(db.list_collections())).await?
+    };
     let points: usize = collections.iter().map(|c| c.count).sum();
-    Json(json!({
+    Ok(Json(json!({
         "version": env!("CARGO_PKG_VERSION"),
         "storage": db.options().storage,
         "snapshots_enabled": db.snapshots().is_ok(),
         "collections": collections.len(),
         "points": points,
-    }))
+    })))
 }
 
+/// The fields of [`CollectionConfig`] spelled out (rather than flattened)
+/// so that unknown or misspelt fields are rejected.
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CreateCollection {
     name: String,
-    #[serde(flatten)]
-    config: CollectionConfig,
+    dimension: usize,
+    #[serde(default)]
+    metric: Metric,
+    #[serde(default)]
+    index: IndexConfig,
 }
 
-pub async fn list_collections(State(db): State<AppState>) -> Json<Value> {
-    Json(json!({ "collections": db.list_collections() }))
+pub async fn list_collections(State(db): State<AppState>) -> ApiResult<Json<Value>> {
+    let collections = blocking(move || Ok(db.list_collections())).await?;
+    Ok(Json(json!({ "collections": collections })))
 }
 
 pub async fn create_collection(
     State(db): State<AppState>,
     Json(req): Json<CreateCollection>,
 ) -> ApiResult<(StatusCode, Json<CollectionInfo>)> {
-    let info = blocking(move || Ok(db.create_collection(&req.name, req.config)?.info())).await?;
+    let config = CollectionConfig {
+        dimension: req.dimension,
+        metric: req.metric,
+        index: req.index,
+    };
+    let info = blocking(move || Ok(db.create_collection(&req.name, config)?.info())).await?;
     tracing::info!(collection = %info.name, dimension = info.config.dimension, "created collection");
     Ok((StatusCode::CREATED, Json(info)))
 }
@@ -100,7 +121,8 @@ pub async fn get_collection(
     State(db): State<AppState>,
     Path(name): Path<String>,
 ) -> ApiResult<Json<CollectionInfo>> {
-    Ok(Json(collection(&db, &name)?.info()))
+    let c = collection(&db, &name)?;
+    Ok(Json(blocking(move || Ok(c.info())).await?))
 }
 
 pub async fn drop_collection(State(db): State<AppState>, Path(name): Path<String>) -> ApiResult<StatusCode> {
@@ -153,6 +175,15 @@ pub struct ScrollQuery {
     with_vectors: bool,
 }
 
+fn check_ids(ids: &[String]) -> ApiResult<()> {
+    if ids.len() > MAX_IDS {
+        return Err(ApiError::bad_request(format!(
+            "at most {MAX_IDS} ids per request"
+        )));
+    }
+    Ok(())
+}
+
 fn yes() -> bool {
     true
 }
@@ -190,9 +221,12 @@ pub async fn get_point(
     query: Result<Query<PointQuery>, axum::extract::rejection::QueryRejection>,
 ) -> ApiResult<Json<Value>> {
     let Query(q) = query?;
-    let point = collection(&db, &name)?
-        .get(&id)
-        .ok_or_else(|| ApiError::not_found(format!("point `{id}` not found")))?;
+    let c = collection(&db, &name)?;
+    let point = {
+        let id = id.clone();
+        blocking(move || Ok(c.get(&id))).await?
+    };
+    let point = point.ok_or_else(|| ApiError::point_not_found(&id))?;
     Ok(Json(present(point, q.with_vectors)))
 }
 
@@ -201,11 +235,11 @@ pub async fn lookup_points(
     Path(name): Path<String>,
     Json(req): Json<IdsRequest>,
 ) -> ApiResult<Json<Value>> {
-    let points: Vec<Value> = collection(&db, &name)?
-        .get_many(&req.ids)
-        .into_iter()
-        .map(|p| present(p, req.with_vectors))
-        .collect();
+    check_ids(&req.ids)?;
+    let c = collection(&db, &name)?;
+    let with_vectors = req.with_vectors;
+    let points = blocking(move || Ok(c.get_many(&req.ids))).await?;
+    let points: Vec<Value> = points.into_iter().map(|p| present(p, with_vectors)).collect();
     Ok(Json(json!({ "points": points })))
 }
 
@@ -232,6 +266,7 @@ pub async fn delete_points(
     Path(name): Path<String>,
     Json(req): Json<IdsRequest>,
 ) -> ApiResult<Json<Value>> {
+    check_ids(&req.ids)?;
     let c = collection(&db, &name)?;
     let deleted = blocking(move || c.delete(&req.ids)).await?;
     Ok(Json(json!({ "deleted": deleted })))
@@ -242,8 +277,9 @@ pub async fn delete_point(
     Path((name, id)): Path<(String, String)>,
 ) -> ApiResult<StatusCode> {
     let c = collection(&db, &name)?;
-    match blocking(move || c.delete(&[id])).await? {
-        0 => Err(ApiError::not_found("point not found")),
+    let ids = [id.clone()];
+    match blocking(move || c.delete(&ids)).await? {
+        0 => Err(ApiError::point_not_found(&id)),
         _ => Ok(StatusCode::NO_CONTENT),
     }
 }
@@ -368,7 +404,9 @@ pub async fn list_snapshots(
     query: Result<Query<SnapshotQuery>, axum::extract::rejection::QueryRejection>,
 ) -> ApiResult<Json<Value>> {
     let Query(q) = query?;
-    let snapshots = blocking(move || db.list_snapshots(q.collection.as_deref())).await?;
+    // `?collection=` (empty) means no filter, as in the gRPC API.
+    let collection = q.collection.filter(|c| !c.is_empty());
+    let snapshots = blocking(move || db.list_snapshots(collection.as_deref())).await?;
     Ok(Json(json!({ "snapshots": snapshots })))
 }
 
@@ -441,16 +479,34 @@ pub async fn download_snapshot(State(db): State<AppState>, Path(id): Path<String
 /// Accepts a raw archive body (as produced by `download`) and adds it to the registry.
 pub async fn upload_snapshot(
     State(db): State<AppState>,
+    Extension(UploadLimit(limit)): Extension<UploadLimit>,
+    headers: HeaderMap,
     body: Body,
 ) -> ApiResult<(StatusCode, Json<SnapshotInfo>)> {
-    let staging = db.snapshots()?.staging_path();
+    let declared = headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok())
+        .and_then(|v| v.parse::<u64>().ok());
+    if declared.is_some_and(|len| len > limit as u64) {
+        return Err(ApiError::payload_too_large(limit));
+    }
+
+    // Removed on every early return, and also if the client goes away and
+    // this future is dropped mid-upload.
+    let path = db.snapshots()?.staging_path();
+    let mut staging = StagingFile(Some(path.clone()));
     let written: Result<(), ApiError> = async {
-        let mut file = tokio::fs::File::create(&staging)
+        let mut file = tokio::fs::File::create(&path)
             .await
             .map_err(|e| ApiError::internal(e.to_string()))?;
         let mut stream = body.into_data_stream();
+        let mut received = 0usize;
         while let Some(chunk) = stream.next().await {
             let chunk = chunk.map_err(|e| ApiError::bad_request(format!("upload failed: {e}")))?;
+            received = received.saturating_add(chunk.len());
+            if received > limit {
+                return Err(ApiError::payload_too_large(limit));
+            }
             file.write_all(&chunk)
                 .await
                 .map_err(|e| ApiError::internal(e.to_string()))?;
@@ -460,10 +516,29 @@ pub async fn upload_snapshot(
             .map_err(|e| ApiError::internal(e.to_string()))
     }
     .await;
-    if let Err(e) = written {
-        let _ = tokio::fs::remove_file(&staging).await;
-        return Err(e);
-    }
-    let info = blocking(move || db.snapshots()?.import_staged(&staging)).await?;
+    written?;
+    // `import_staged` removes the staging file itself from here on.
+    staging.0 = None;
+    let imported = tokio::task::spawn_blocking(move || db.snapshots()?.import_staged(&path))
+        .await
+        .map_err(|e| ApiError::internal(format!("task failed: {e}")))?;
+    // The archive came from the client: an unreadable one is its error.
+    let info = imported.map_err(|e| match e {
+        quiver_db::Error::Corrupt(_) | quiver_db::Error::Serde(_) | quiver_db::Error::Io(_) => {
+            ApiError::invalid_snapshot(e.to_string())
+        }
+        other => ApiError::from(other),
+    })?;
     Ok((StatusCode::CREATED, Json(info)))
+}
+
+/// A staging file that is deleted when dropped, unless taken.
+struct StagingFile(Option<std::path::PathBuf>);
+
+impl Drop for StagingFile {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
 }
