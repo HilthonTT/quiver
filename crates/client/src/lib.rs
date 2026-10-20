@@ -18,6 +18,7 @@ use reqwest::{Method, RequestBuilder, StatusCode, Url};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+use std::time::Duration;
 
 /// Errors returned by [`Client`].
 #[derive(Debug, thiserror::Error)]
@@ -38,6 +39,9 @@ pub enum ClientError {
 }
 
 pub type Result<T> = std::result::Result<T, ClientError>;
+
+/// Overall limit for one request, matching the Python client.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Server-wide statistics from `GET /info`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -116,7 +120,10 @@ pub struct Client {
 impl Client {
     /// Creates a client for the server at `base_url`, e.g. `http://localhost:6900`.
     pub fn new(base_url: impl AsRef<str>) -> Result<Self> {
-        let raw = base_url.as_ref();
+        Self::with_timeout(base_url.as_ref(), REQUEST_TIMEOUT)
+    }
+
+    fn with_timeout(raw: &str, timeout: Duration) -> Result<Self> {
         // A trailing slash makes `Url::join` append rather than replace the last segment.
         let base = Url::parse(&format!("{}/", raw.trim_end_matches('/')))
             .map_err(|_| ClientError::InvalidUrl(raw.to_owned()))?;
@@ -124,7 +131,8 @@ impl Client {
             return Err(ClientError::InvalidUrl(raw.to_owned()));
         }
         let http = reqwest::Client::builder()
-            .connect_timeout(std::time::Duration::from_secs(5))
+            .connect_timeout(Duration::from_secs(5))
+            .timeout(timeout)
             .build()?;
         Ok(Self {
             base,
@@ -217,10 +225,19 @@ impl Client {
 
     /// Fetches one point with its vector, or `None` if it does not exist.
     pub async fn get_point(&self, collection: &str, id: &str) -> Result<Option<Point>> {
+        if id == "." || id == ".." {
+            // URLs resolve these as dot-segments, even percent-encoded
+            // (`%2E%2E`), so they cannot appear in a path; look them up by body.
+            let path = format!("collections/{}/points/lookup", seg(collection));
+            let req = self.request(Method::POST, &path).json(&json!({ "ids": [id] }));
+            let mut points: Vec<Point> = Self::field(req, "points").await?;
+            return Ok(points.pop());
+        }
         let path = format!("collections/{}/points/{}", seg(collection), seg(id));
         match Self::json(self.request(Method::GET, &path)).await {
             Ok(point) => Ok(Some(point)),
-            Err(ClientError::Api { status, .. }) if status == StatusCode::NOT_FOUND => Ok(None),
+            // Only a missing point; a missing collection is still an error.
+            Err(ClientError::Api { ref code, .. }) if code == "point_not_found" => Ok(None),
             Err(e) => Err(e),
         }
     }
@@ -330,5 +347,23 @@ mod tests {
     fn segments_are_escaped() {
         assert_eq!(seg("a b/c"), "a%20b%2Fc");
         assert_eq!(seg("plain-id_1.x"), "plain-id_1.x");
+    }
+
+    #[tokio::test]
+    async fn stalled_requests_time_out() {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        // Accept connections but never answer.
+        tokio::spawn(async move {
+            let mut held = Vec::new();
+            while let Ok((socket, _)) = listener.accept().await {
+                held.push(socket);
+            }
+        });
+        let c = Client::with_timeout(&url, Duration::from_millis(200)).unwrap();
+        let res = tokio::time::timeout(Duration::from_secs(10), c.info())
+            .await
+            .expect("request should time out on its own");
+        assert!(matches!(res, Err(ClientError::Http(e)) if e.is_timeout()));
     }
 }

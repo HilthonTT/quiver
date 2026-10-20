@@ -43,8 +43,8 @@ class Call(Generic[T]):
     content_type: str | None = None
     # Hand the raw response bytes to `parse` instead of decoded JSON.
     raw: bool = False
-    # Statuses that are mapped to a value instead of raising.
-    allow: tuple[int, ...] = ()
+    # Error codes that are mapped to a value instead of raising.
+    allow_codes: tuple[str, ...] = ()
 
     def headers(self) -> dict[str, str] | None:
         return {"content-type": self.content_type} if self.content_type else None
@@ -55,18 +55,31 @@ def _none(_: Any) -> None:
 
 
 def _seg(value: str) -> str:
+    # `.` and `..` would be removed as dot-segments when the URL is normalised.
+    if value in (".", ".."):
+        return "%2E" * len(value)
     return quote(value, safe="")
+
+
+def error_code(body: Any) -> str | None:
+    if isinstance(body, dict) and isinstance(body.get("error"), dict):
+        code = body["error"].get("code")
+        return code if isinstance(code, str) else None
+    return None
+
+
+def is_allowed(call: Call[Any], status: int, body: Any) -> bool:
+    """Whether an error response means "no value" for this call."""
+    return status >= 400 and error_code(body) in call.allow_codes
 
 
 def raise_for_response(status: int, body: Any, text: str) -> None:
     if status < 400:
         return
-    code: str | None = None
     message = text or f"HTTP {status}"
     if isinstance(body, dict) and isinstance(body.get("error"), dict):
-        code = body["error"].get("code")
         message = body["error"].get("message", message)
-    raise error_for_status(status, code, message)
+    raise error_for_status(status, error_code(body), message)
 
 
 def health() -> Call[dict[str, Any]]:
@@ -137,7 +150,8 @@ def get_point(name: str, point_id: str, with_vectors: bool) -> Call[Point | None
         f"/collections/{_seg(name)}/points/{_seg(point_id)}",
         lambda b: None if b is None else Point.from_dict(b),
         params={"with_vectors": str(with_vectors).lower()},
-        allow=(404,),
+        # A missing point; a missing collection still raises NotFoundError.
+        allow_codes=("point_not_found",),
     )
 
 

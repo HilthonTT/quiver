@@ -269,8 +269,11 @@ fn draw_form(frame: &mut Frame, form: &Form) {
         let value = match &field.kind {
             FieldKind::Text(t) => {
                 if focused {
+                    // Columns, not characters: wide characters take two cells.
+                    let before: String = t.value().chars().take(t.cursor()).collect();
+                    let width = u16::try_from(Span::raw(before).width()).unwrap_or(u16::MAX);
                     cursor = Some((
-                        inner.x + label_width + t.cursor() as u16,
+                        inner.x.saturating_add(label_width).saturating_add(width),
                         inner.y + lines.len() as u16,
                     ));
                 }
@@ -380,6 +383,30 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn form_cursor_follows_wide_characters() {
+        let mut app = App::new("http://x", false);
+        app.screen = Screen::Collection;
+        app.current = Some("docs".into());
+        press(&mut app, KeyCode::Char('i'));
+        for c in "日本".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(110, 34)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buf = terminal.backend().buffer();
+        let last = (0..buf.area.height)
+            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+            .find(|&(x, y)| buf[(x, y)].symbol() == "本")
+            .unwrap();
+        let cursor = terminal.get_cursor_position().unwrap();
+        assert_eq!(
+            (cursor.x, cursor.y),
+            (last.0 + 2, last.1),
+            "cursor sits after the text"
+        );
     }
 
     #[test]

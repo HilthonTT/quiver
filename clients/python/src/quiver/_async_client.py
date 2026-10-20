@@ -71,11 +71,11 @@ class AsyncClient:
             )
         except httpx.TransportError as exc:
             raise QuiverConnectionError(f"could not reach Quiver: {exc}") from exc
-        if response.status_code in call.allow:
-            return call.parse(None)
         if call.raw and response.status_code < 400:
             return call.parse(response.content)
         body = _decode(response)
+        if proto.is_allowed(call, response.status_code, body):
+            return call.parse(None)
         proto.raise_for_response(response.status_code, body, response.text)
         return call.parse(body)
 

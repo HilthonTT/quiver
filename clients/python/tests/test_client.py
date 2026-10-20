@@ -132,13 +132,46 @@ def test_search_batch(client: Client, mock: Recorder) -> None:
 
 
 def test_get_returns_none_when_missing(client: Client, mock: Recorder) -> None:
+    body = {"error": {"code": "point_not_found", "message": "point `nope` not found"}}
+    mock.on("GET", "/collections/docs/points/nope", 404, body)
     assert client.collection("docs").get("nope") is None
+
+
+def test_get_on_missing_collection_raises(
+    client: Client, async_client: AsyncClient, mock: Recorder
+) -> None:
+    # The mock answers unknown routes with a plain `not_found`, like a missing collection.
+    with pytest.raises(NotFoundError):
+        client.collection("typo").get("a")
+
+    async def main() -> None:
+        async with async_client as c:
+            with pytest.raises(NotFoundError):
+                await (await c.collection("typo")).get("a")
+
+    asyncio.run(main())
 
 
 def test_ids_are_url_encoded(client: Client, mock: Recorder) -> None:
     mock.on("GET", "/collections/docs/points/a%2Fb%20c", 200, {"id": "a/b c", "vector": [1]})
     point = client.collection("docs").get("a/b c")
     assert point is not None and point.id == "a/b c"
+
+
+@pytest.mark.parametrize(("point_id", "path"), [(".", "%2E"), ("..", "%2E%2E")])
+def test_dot_ids_are_not_dropped_from_the_path(
+    client: Client, async_client: AsyncClient, mock: Recorder, point_id: str, path: str
+) -> None:
+    mock.on("GET", f"/collections/docs/points/{path}", 200, {"id": point_id, "vector": [1]})
+    point = client.collection("docs").get(point_id)
+    assert point is not None and point.id == point_id
+
+    async def main() -> None:
+        async with async_client as c:
+            p = await (await c.collection("docs")).get(point_id)
+            assert p is not None and p.id == point_id
+
+    asyncio.run(main())
 
 
 def test_scroll_follows_pages(client: Client, mock: Recorder) -> None:

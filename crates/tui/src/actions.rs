@@ -225,6 +225,7 @@ impl Executor {
                         });
                         if let ListMode::Results(hits) = &mut app.list {
                             hits.retain(|h| h.id != id);
+                            app.row = app.row.min(hits.len().saturating_sub(1));
                         }
                         return Some(Action::Refresh);
                     }

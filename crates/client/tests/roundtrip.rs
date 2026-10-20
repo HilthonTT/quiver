@@ -88,6 +88,11 @@ async fn full_lifecycle() {
         [0.0, 1.0]
     );
     assert!(c.get_point("docs", "missing").await.unwrap().is_none());
+    let err = c.get_point("typo", "missing").await.unwrap_err();
+    assert!(
+        matches!(err, ClientError::Api { status, .. } if status == 404),
+        "{err}"
+    );
 
     let snap = c.create_snapshot("docs").await.unwrap();
     assert_eq!(snap.manifest.points, 2);
@@ -111,6 +116,20 @@ async fn full_lifecycle() {
         matches!(err, ClientError::Api { ref code, .. } if code == "not_found"),
         "{err}"
     );
+}
+
+#[tokio::test]
+async fn dot_point_ids_round_trip() {
+    let server = start(KeyStore::default()).await;
+    let c = Client::new(&server.url).unwrap();
+    c.create_collection("docs", &CollectionConfig::new(2))
+        .await
+        .unwrap();
+    for id in [".", "..", "..."] {
+        c.upsert("docs", vec![point(id, vec![1.0, 0.0])]).await.unwrap();
+        let got = c.get_point("docs", id).await.unwrap();
+        assert_eq!(got.map(|p| p.id).as_deref(), Some(id));
+    }
 }
 
 #[tokio::test]
