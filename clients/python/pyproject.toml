@@ -1,0 +1,49 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+[project]
+name = "quiver-db"
+version = "0.2.0"
+description = "Python client for the Quiver vector database"
+readme = "README.md"
+license = "MIT OR Apache-2.0"
+authors = [{ name = "Quiver contributors" }]
+requires-python = ">=3.10"
+dependencies = ["httpx>=0.25,<1"]
+keywords = ["vector database", "embeddings", "similarity search", "hnsw"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Topic :: Database",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+    "Typing :: Typed",
+]
+
+[project.optional-dependencies]
+numpy = ["numpy>=1.22"]
+
+[dependency-groups]
+dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.10", "numpy>=1.22"]
+
+[project.urls]
+Homepage = "https://github.com/HilthonTT/vector-db"
+Documentation = "https://github.com/HilthonTT/vector-db/tree/main/clients/python"
+Issues = "https://github.com/HilthonTT/vector-db/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/quiver"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "B", "UP", "SIM", "RUF"]
+
+[tool.mypy]
+strict = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
