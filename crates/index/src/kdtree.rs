@@ -9,6 +9,9 @@ use crate::{Accept, Neighbor, TopK};
 const NIL: u32 = u32::MAX;
 /// Don't rebalance more often than every this many inserts.
 const MIN_INSERTS_BETWEEN_REBUILDS: usize = 32;
+/// Absorbs f32 rounding in `1 - dot(a, b)`, which can fall slightly below the
+/// exact `diff² / 2` plane bound (or below zero) for near-parallel vectors.
+const COSINE_BOUND_SLACK: f32 = 1e-6;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Node {
@@ -30,8 +33,9 @@ pub struct KdTreeIndex {
 fn plane_bound(metric: Metric, diff: f32) -> f32 {
     match metric {
         Metric::Euclidean | Metric::Manhattan => diff.abs(),
-        // Unit vectors: 1 - cos = ‖a - b‖² / 2 ≥ diff² / 2.
-        Metric::Cosine => diff * diff / 2.0,
+        // Unit vectors: 1 - cos = ‖a - b‖² / 2 ≥ diff² / 2. The computed
+        // distance can undershoot that by f32 rounding, so leave some slack.
+        Metric::Cosine => diff * diff / 2.0 - COSINE_BOUND_SLACK,
         // Far-side points differ from the query on this axis (unless the
         // query sits exactly on the plane).
         Metric::Hamming => {
@@ -152,8 +156,9 @@ impl KdTreeIndex {
         if self.root == NIL {
             return Vec::new();
         }
-        // (node, lower bound on the distance of anything in its subtree)
-        let mut stack: Vec<(u32, f32)> = vec![(self.root, 0.0)];
+        // (node, lower bound on the distance of anything in its subtree).
+        // Not 0.0: rounding can make computed cosine distances negative.
+        let mut stack: Vec<(u32, f32)> = vec![(self.root, f32::NEG_INFINITY)];
         while let Some((cur, bound)) = stack.pop() {
             if bound > top.worst() {
                 continue;
@@ -386,6 +391,28 @@ mod tests {
         let mut bad_axis = tree.clone();
         bad_axis.nodes[0].axis = 3;
         assert!(matches!(load(&bad_axis), Err(Error::Corrupt(_))));
+    }
+
+    #[test]
+    fn cosine_matches_brute_force_for_near_parallel_vectors() {
+        let mut store = VectorStore::new(2);
+        let base = random_store(300, 2, 7);
+        for s in 0..300u32 {
+            let b = base.vector(s);
+            let mut v = vec![1.0 + b[0] * 1e-3, 1.0 + b[1] * 1e-3];
+            assert!(Metric::Cosine.prepare(&mut v));
+            store.push(s.to_string(), &v, None);
+        }
+        let tree = build(&store, Metric::Cosine);
+        let flat = FlatIndex::new(Metric::Cosine);
+        for q in 0..300u32 {
+            let query = store.vector(q);
+            assert_eq!(
+                tree.search(query, 3, &store, &|_| true),
+                flat.search(query, 3, &store, &|_| true),
+                "query {q}"
+            );
+        }
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use std::cmp::Ordering;
 
-use serde_json::{Map, Value};
+use serde_json::{Map, Number, Value};
 
 use crate::error::{Error, Result};
 
@@ -211,15 +211,64 @@ fn any_elem(v: &Value, pred: impl Fn(&Value) -> bool) -> bool {
 
 fn json_eq(a: &Value, b: &Value) -> bool {
     match (a, b) {
-        (Value::Number(x), Value::Number(y)) => x.as_f64() == y.as_f64(),
+        (Value::Number(x), Value::Number(y)) => compare_numbers(x, y) == Some(Ordering::Equal),
+        (Value::Array(x), Value::Array(y)) => {
+            x.len() == y.len() && x.iter().zip(y).all(|(a, b)| json_eq(a, b))
+        }
+        (Value::Object(x), Value::Object(y)) => {
+            x.len() == y.len() && x.iter().all(|(k, a)| y.get(k).is_some_and(|b| json_eq(a, b)))
+        }
         _ => a == b,
     }
 }
 
 fn compare(a: &Value, b: &Value) -> Option<Ordering> {
     match (a, b) {
-        (Value::Number(x), Value::Number(y)) => x.as_f64()?.partial_cmp(&y.as_f64()?),
+        (Value::Number(x), Value::Number(y)) => compare_numbers(x, y),
         (Value::String(x), Value::String(y)) => Some(x.cmp(y)),
         _ => None,
+    }
+}
+
+/// Integers (i64 or u64, possibly mixed) compare exactly; f64 is only used
+/// when either side is a float, so ids above 2^53 stay distinct.
+fn compare_numbers(x: &Number, y: &Number) -> Option<Ordering> {
+    let int = |n: &Number| n.as_i64().map(i128::from).or_else(|| n.as_u64().map(i128::from));
+    match (int(x), int(y)) {
+        (Some(x), Some(y)) => Some(x.cmp(&y)),
+        _ => x.as_f64()?.partial_cmp(&y.as_f64()?),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    fn filter(v: Value) -> Filter {
+        Filter::parse(&v).unwrap()
+    }
+
+    #[test]
+    fn large_integers_compare_exactly() {
+        let md = json!({"id": 9_007_199_254_740_993u64});
+        assert!(!filter(json!({"id": 9_007_199_254_740_992u64})).matches(Some(&md)));
+        assert!(filter(json!({"id": 9_007_199_254_740_993u64})).matches(Some(&md)));
+        assert!(filter(json!({"id": {"$gt": 9_007_199_254_740_992u64}})).matches(Some(&md)));
+        assert!(!filter(json!({"id": {"$lt": 9_007_199_254_740_993u64}})).matches(Some(&md)));
+        // Mixed signed / unsigned and int / float still compare by value.
+        assert!(filter(json!({"n": {"$lt": u64::MAX}})).matches(Some(&json!({"n": -1}))));
+        assert!(filter(json!({"n": 1.0})).matches(Some(&json!({"n": 1}))));
+        assert!(filter(json!({"n": {"$gte": 1.5}})).matches(Some(&json!({"n": 2}))));
+    }
+
+    #[test]
+    fn nested_equality_ignores_integer_vs_float() {
+        let md = json!({"v": [1, 2], "o": {"a": 1, "b": [3]}});
+        assert!(filter(json!({"v": [1.0, 2.0]})).matches(Some(&md)));
+        assert!(!filter(json!({"v": [1.0]})).matches(Some(&md)));
+        assert!(filter(json!({"o": {"a": 1.0, "b": [3.0]}})).matches(Some(&md)));
+        assert!(!filter(json!({"o": {"a": 1.0}})).matches(Some(&md)));
+        assert!(!filter(json!({"o": {"a": 1.0, "c": [3.0]}})).matches(Some(&md)));
     }
 }

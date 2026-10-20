@@ -434,6 +434,12 @@ impl Collection {
                 "zero vectors cannot be used with the cosine metric",
             ));
         }
+        // Keeps every metric's distance between two valid vectors finite in
+        // f32. Checked after `prepare`, which already normalises cosine vectors.
+        let squared_norm: f64 = v.iter().map(|&x| f64::from(x) * f64::from(x)).sum();
+        if squared_norm > f64::from(f32::MAX) / 4.0 {
+            return Err(Error::invalid("vector magnitude too large"));
+        }
         Ok(())
     }
 

@@ -230,3 +230,25 @@ fn kd_tree_is_exact() {
         assert_eq!(a, b);
     }
 }
+
+#[test]
+fn vectors_whose_distances_would_overflow_are_rejected() {
+    let c = db_with(Metric::Euclidean, IndexConfig::Flat);
+    for v in [[3e19, 0.0], [-3e19, 0.0], [2e19, 0.0]] {
+        let err = c.upsert([Point::new("p", v.to_vec())]).unwrap_err();
+        assert!(err.to_string().contains("vector magnitude too large"), "{err}");
+        let err = c.search(&v, 1).unwrap_err();
+        assert!(err.to_string().contains("vector magnitude too large"), "{err}");
+    }
+    assert!(c.is_empty());
+    c.upsert([Point::new("ok", vec![1e18, -1e18])]).unwrap();
+    assert_eq!(
+        c.search(&[-1e18, 1e18], 1).unwrap()[0].distance,
+        2.0 * 2f32.sqrt() * 1e18
+    );
+
+    // Cosine normalises first, so large components are fine there.
+    let cosine = db_with(Metric::Cosine, IndexConfig::Flat);
+    cosine.upsert([Point::new("big", vec![2e19, 0.0])]).unwrap();
+    assert_eq!(cosine.search(&[3e19, 0.0], 1).unwrap()[0].id, "big");
+}

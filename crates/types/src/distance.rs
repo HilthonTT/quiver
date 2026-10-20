@@ -37,14 +37,15 @@ impl Metric {
         if self != Metric::Cosine {
             return true;
         }
-        let norm = dot(v, v).sqrt();
+        // In f64 so that tiny or huge (but finite, non-zero) vectors neither
+        // underflow to a zero norm nor overflow to an infinite one.
+        let norm = v.iter().map(|&x| f64::from(x) * f64::from(x)).sum::<f64>().sqrt();
         if norm == 0.0 || !norm.is_finite() {
             return false;
         }
 
-        let inv = 1.0 / norm;
-        v.iter_mut().for_each(|x| *x *= inv);
-        true
+        v.iter_mut().for_each(|x| *x = (f64::from(*x) / norm) as f32);
+        v.iter().all(|x| x.is_finite())
     }
 
     pub fn as_str(self) -> &'static str {
@@ -118,4 +119,20 @@ pub fn manhattan(a: &[f32], b: &[f32]) -> f32 {
 pub fn hamming(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
     a.iter().zip(b).filter(|(x, y)| x != y).count() as f32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cosine_prepare_accepts_tiny_and_huge_vectors() {
+        for scale in [1e-30f32, 1e-40, 2e19, 3e38] {
+            let mut v = vec![scale, 0.0, scale];
+            assert!(Metric::Cosine.prepare(&mut v), "{scale}");
+            assert!((dot(&v, &v) - 1.0).abs() < 1e-6, "{scale}: {v:?}");
+        }
+        let mut zero = vec![0.0f32; 3];
+        assert!(!Metric::Cosine.prepare(&mut zero));
+    }
 }

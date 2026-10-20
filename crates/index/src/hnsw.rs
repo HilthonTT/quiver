@@ -147,11 +147,17 @@ impl HnswIndex {
                 .all(|s| self.metric.distance(cv, store.vector(s.slot)) > c.dist);
             if diverse {
                 selected.push(c);
-            } else {
+            } else if !selected
+                .iter()
+                .any(|s| self.metric.distance(cv, store.vector(s.slot)) == 0.0)
+            {
+                // Exact duplicates of an already selected neighbour are dropped
+                // rather than kept for backfill: a list full of duplicates would
+                // otherwise crowd out every new node and disconnect the graph.
                 pruned.push(c);
             }
         }
-        let missing = m - selected.len();
+        let missing = m.saturating_sub(selected.len());
         selected.extend(pruned.into_iter().take(missing));
         selected
     }
@@ -478,6 +484,30 @@ mod tests {
             50,
         );
         assert!(matches!(res, Err(Error::Corrupt(_))));
+    }
+
+    #[test]
+    fn duplicate_vectors_do_not_disconnect_the_graph() {
+        // 1800 copies of one vector plus 200 distinct points.
+        let mut rng = SplitMix64(0);
+        let mut store = VectorStore::new(4);
+        let mut hnsw = HnswIndex::new(HnswParams::default(), Metric::Euclidean);
+        for i in 0..2_000u32 {
+            let v: Vec<f32> = if i % 10 != 0 {
+                vec![0.5; 4]
+            } else {
+                (0..4).map(|_| rng.next_f64() as f32).collect()
+            };
+            store.push(i.to_string(), &v, None);
+            hnsw.add(i, &store);
+        }
+        let filtered = hnsw.search(&[0.5; 4], 10, None, &store, &|s| s % 10 == 0);
+        assert_eq!(filtered.len(), 10);
+        let self_found = (0..2_000u32)
+            .step_by(10)
+            .filter(|&s| hnsw.search(store.vector(s), 1, Some(200), &store, &|_| true)[0].dist == 0.0)
+            .count();
+        assert_eq!(self_found, 200);
     }
 
     #[test]
