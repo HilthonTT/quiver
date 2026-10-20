@@ -1,0 +1,58 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 840 300" width="420" height="150" role="img" aria-label="Quiver">
+  <title>Quiver</title>
+  <style>
+    .word { font-family: 'Segoe UI', 'Helvetica Neue', Helvetica, Arial, sans-serif; font-size: 132px; font-weight: 700; letter-spacing: -3px; fill: url(#word); }
+  </style>
+  <defs>
+    <linearGradient id="word" x1="0" x2="1">
+      <stop offset="0" stop-color="#2dd4bf"/>
+      <stop offset="0.5" stop-color="#38bdf8"/>
+      <stop offset="1" stop-color="#818cf8"/>
+    </linearGradient>
+  </defs>
+  <rect x="0" y="0" width="300" height="300" rx="64" fill="#0b1324"/>
+  <rect x="87.0" y="35.0" width="22" height="22" rx="5" fill="#30cecd" fill-opacity="0.73"/>
+  <rect x="113.0" y="35.0" width="22" height="22" rx="5" fill="#31cbd4" fill-opacity="0.66"/>
+  <rect x="139.0" y="35.0" width="22" height="22" rx="5" fill="#32c8dc" fill-opacity="0.86"/>
+  <rect x="61.0" y="61.0" width="22" height="22" rx="5" fill="#30cecd" fill-opacity="0.63"/>
+  <rect x="87.0" y="61.0" width="22" height="22" rx="5" fill="#31cbd4" fill-opacity="0.81"/>
+  <rect x="113.0" y="61.0" width="22" height="22" rx="5" fill="#32c8dc" fill-opacity="0.75"/>
+  <rect x="139.0" y="61.0" width="22" height="22" rx="5" fill="#34c6e3" fill-opacity="0.62"/>
+  <rect x="165.0" y="61.0" width="22" height="22" rx="5" fill="#35c3ea" fill-opacity="0.8"/>
+  <rect x="35.0" y="87.0" width="22" height="22" rx="5" fill="#30cecd" fill-opacity="0.61"/>
+  <rect x="61.0" y="87.0" width="22" height="22" rx="5" fill="#31cbd4" fill-opacity="0.77"/>
+  <rect x="165.0" y="87.0" width="22" height="22" rx="5" fill="#37c0f1" fill-opacity="0.63"/>
+  <rect x="191.0" y="87.0" width="22" height="22" rx="5" fill="#38bdf8" fill-opacity="0.64"/>
+  <rect x="35.0" y="113.0" width="22" height="22" rx="5" fill="#31cbd4" fill-opacity="0.77"/>
+  <rect x="61.0" y="113.0" width="22" height="22" rx="5" fill="#32c8dc" fill-opacity="0.93"/>
+  <rect x="113.0" y="113.0" width="22" height="22" rx="5" fill="#f0fdfa" fill-opacity="1.0"/>
+  <rect x="165.0" y="113.0" width="22" height="22" rx="5" fill="#38bdf8" fill-opacity="0.65"/>
+  <rect x="191.0" y="113.0" width="22" height="22" rx="5" fill="#41b7f8" fill-opacity="0.69"/>
+  <rect x="35.0" y="139.0" width="22" height="22" rx="5" fill="#32c8dc" fill-opacity="0.85"/>
+  <rect x="61.0" y="139.0" width="22" height="22" rx="5" fill="#34c6e3" fill-opacity="0.98"/>
+  <rect x="139.0" y="139.0" width="22" height="22" rx="5" fill="#38bdf8" fill-opacity="1.0"/>
+  <rect x="165.0" y="139.0" width="22" height="22" rx="5" fill="#41b7f8" fill-opacity="0.83"/>
+  <rect x="191.0" y="139.0" width="22" height="22" rx="5" fill="#4ab1f8" fill-opacity="0.76"/>
+  <rect x="61.0" y="165.0" width="22" height="22" rx="5" fill="#35c3ea" fill-opacity="0.99"/>
+  <rect x="87.0" y="165.0" width="22" height="22" rx="5" fill="#37c0f1" fill-opacity="0.62"/>
+  <rect x="113.0" y="165.0" width="22" height="22" rx="5" fill="#38bdf8" fill-opacity="0.94"/>
+  <rect x="139.0" y="165.0" width="22" height="22" rx="5" fill="#41b7f8" fill-opacity="0.72"/>
+  <rect x="165.0" y="165.0" width="22" height="22" rx="5" fill="#4ab1f8" fill-opacity="1.0"/>
+  <rect x="87.0" y="191.0" width="22" height="22" rx="5" fill="#38bdf8" fill-opacity="0.66"/>
+  <rect x="113.0" y="191.0" width="22" height="22" rx="5" fill="#41b7f8" fill-opacity="0.65"/>
+  <rect x="139.0" y="191.0" width="22" height="22" rx="5" fill="#4ab1f8" fill-opacity="0.72"/>
+  <rect x="191.0" y="191.0" width="22" height="22" rx="5" fill="#5ca4f8" fill-opacity="1.0"/>
+  <rect x="243.0" y="191.0" width="22" height="22" rx="5" fill="#6f98f8" fill-opacity="1.0"/>
+  <rect x="217.0" y="217.0" width="22" height="22" rx="5" fill="#6f98f8" fill-opacity="1.0"/>
+  <rect x="243.0" y="217.0" width="22" height="22" rx="5" fill="#7892f8" fill-opacity="1.0"/>
+  <rect x="191.0" y="243.0" width="22" height="22" rx="5" fill="#6f98f8" fill-opacity="1.0"/>
+  <rect x="217.0" y="243.0" width="22" height="22" rx="5" fill="#7892f8" fill-opacity="1.0"/>
+  <rect x="243.0" y="243.0" width="22" height="22" rx="5" fill="#818cf8" fill-opacity="1.0"/>
+  <rect x="217.0" y="35.0" width="22" height="22" rx="5" fill="#37c0f1" fill-opacity="0.35"/>
+  <rect x="243.0" y="61.0" width="22" height="22" rx="5" fill="#41b7f8" fill-opacity="0.23"/>
+  <rect x="35.0" y="243.0" width="22" height="22" rx="5" fill="#38bdf8" fill-opacity="0.3"/>
+  <rect x="87.0" y="217.0" width="22" height="22" rx="5" fill="#41b7f8" fill-opacity="0.32"/>
+  <rect x="243.0" y="113.0" width="22" height="22" rx="5" fill="#53abf8" fill-opacity="0.27"/>
+  <rect x="139.0" y="243.0" width="22" height="22" rx="5" fill="#5ca4f8" fill-opacity="0.3"/>
+  <text class="word" x="340" y="196">Quiver</text>
+</svg>
