@@ -7,7 +7,7 @@ name = "quiver-db"
 version = "0.2.0"
 description = "Python client for the Quiver vector database"
 readme = "README.md"
-license = "MIT OR Apache-2.0"
+license = "MIT"
 authors = [{ name = "Quiver contributors" }]
 requires-python = ">=3.10"
 dependencies = ["httpx>=0.25,<1"]
