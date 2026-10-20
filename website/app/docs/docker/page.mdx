@@ -1,0 +1,78 @@
+export const metadata = { title: "Docker" };
+
+# Docker
+
+The repository's `Dockerfile` builds an image with the server, built with the RocksDB engine, and the terminal UI. `docker-compose.yml` runs it with a named volume.
+
+## Compose
+
+```bash
+docker compose up -d                       # builds the image on first run
+docker compose logs -f quiver
+docker compose exec quiver quiver-tui      # the terminal UI, inside the container
+docker compose down                        # the quiver-data volume is kept
+```
+
+The compose file:
+
+- builds `.` and tags it `quiver:latest`;
+- publishes 6900 (REST) and 6901 (gRPC);
+- mounts the `quiver-data` volume at `/data`;
+- passes `QUIVER_API_KEY` (empty by default), `QUIVER_STORAGE` (`file`), `QUIVER_SNAPSHOT_INTERVAL` (`3600`, hourly snapshots) and `RUST_LOG` (`info`), each overridable from your shell or a `.env` file next to it;
+- loads that `.env` into the container too, if it exists;
+- restarts the container unless you stopped it.
+
+Set a key before the ports are reachable from other machines:
+
+```bash
+QUIVER_API_KEY=$(openssl rand -hex 32) docker compose up -d
+```
+
+<Callout type="warn">
+`.env.example` is written for running the binary directly: it sets `QUIVER_HOST=127.0.0.1` and `QUIVER_DATA_DIR=./quiver-data`. Compose passes a `.env` file into the container, where those two values would override the image's `0.0.0.0` and `/data`. If you copy it for compose, remove or comment out those lines.
+</Callout>
+
+## The image
+
+```bash
+docker build -t quiver:latest .            # or: make docker
+docker run -d --name quiver -p 6900:6900 -p 6901:6901 -v quiver-data:/data \
+  -e QUIVER_API_KEY=change-me quiver:latest
+```
+
+| | |
+| --- | --- |
+| Build | `rust:1.99-slim-bookworm` with clang, libclang and g++ for RocksDB; `cargo build --release --locked -p quiver-server --features rocksdb` and `-p quiver-tui` |
+| Runtime | `debian:bookworm-slim`, running as the unprivileged `quiver` user (uid 10001) |
+| Binaries | `/usr/local/bin/quiver` (the entrypoint) and `/usr/local/bin/quiver-tui` |
+| Environment | `QUIVER_HOST=0.0.0.0`, `QUIVER_HTTP_PORT=6900`, `QUIVER_GRPC_PORT=6901`, `QUIVER_DATA_DIR=/data` |
+| Volume | `/data` |
+| Ports | 6900 (REST), 6901 (gRPC) |
+
+Arguments after the image name go to `quiver`, so any [flag](/docs/configuration/) works there, and every `QUIVER_*` variable can be set with `-e`:
+
+```bash
+docker run -d -p 6900:6900 -v quiver-data:/data quiver:latest \
+  --storage rocksdb --snapshot-interval 600 --snapshot-keep 12 --disable-grpc
+```
+
+With a keys file, mount it read-only and point the server at it:
+
+```bash
+docker run -d -p 6900:6900 -p 6901:6901 -v quiver-data:/data \
+  -v "$PWD/keys.json:/run/keys.json:ro" -e QUIVER_KEYS_FILE=/run/keys.json quiver:latest
+```
+
+The image declares a `HEALTHCHECK` that tries to open a TCP connection to port 6900 every 30 seconds.
+
+<Callout type="warn">
+The health check runs `exec 3<>/dev/tcp/127.0.0.1/6900` with `/bin/sh`, and `/dev/tcp` is a bash feature that the image's `/bin/sh` (dash) does not have. As shipped, Docker will report the container as unhealthy even while the server is serving; don't gate other services on it until that is fixed.
+</Callout>
+
+## Backups
+
+Snapshots are written inside the volume, at `/data/snapshots`. Download them over the API ([snapshots & backups](/docs/snapshots/)), or copy them out of the container:
+
+```bash
+docker cp quiver:/data/snapshots ./quiver-snapshots
+```

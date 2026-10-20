@@ -1,0 +1,67 @@
+export const metadata = { title: "Architecture" };
+
+# Architecture
+
+Quiver is a Cargo workspace of ten crates in `crates/`, plus the Python client in `clients/python`. The crates are layered: each depends only on crates below it.
+
+```text
+types → storage → index → snapshot → db → http / grpc → server
+                                  types → client → tui
+```
+
+| Crate | Holds |
+| --- | --- |
+| `quiver-types` | `Point`, `Metric` and the distance kernels, `CollectionConfig` and `IndexConfig`, `Filter`, `Error`, API keys and roles, snapshot manifests |
+| `quiver-storage` | `VectorStore`, the in-memory columns of a collection, and the `StorageEngine` trait with the file, RocksDB and memory engines |
+| `quiver-index` | the `Index` enum: `Flat`, `Hnsw` and `KdTree`, each able to serialise itself |
+| `quiver-snapshot` | writing, verifying and reading archives, and the `SnapshotRegistry` directory |
+| `quiver-db` | `Database` and `Collection`: validation, locking, search, recovery, compaction, snapshots and the `SnapshotScheduler` |
+| `quiver-http` | the axum router, handlers, auth middleware and error mapping |
+| `quiver-grpc` | the tonic service, the auth interceptor and the proto conversions |
+| `quiver-server` | the `quiver` binary: configuration, startup and shutdown |
+| `quiver-client` | the async REST client |
+| `quiver-tui` | the `quiver-tui` binary |
+
+## A collection
+
+A `Collection` owns, behind one `RwLock`:
+
+- a **`VectorStore`**: one flat `Vec<f32>` of all vectors, the ids, the metadata and a liveness flag per slot, and a `BTreeMap` from id to slot, which also serves pages in id order;
+- an **`Index`** over the store's slots;
+- a **`StorageEngine`** that makes changes durable.
+
+A point lives in a slot. Replacing a point tombstones its old slot and appends a new one; deleting tombstones it. Compaction copies the live slots into a fresh store and rebuilds the index.
+
+## A write
+
+An upsert over REST goes through:
+
+1. **`quiver-http`**: the auth middleware checks the key's role; the handler deserialises the body (unknown fields are rejected) and runs the rest on a blocking thread, off the async runtime.
+2. **`Collection::upsert`**: every point is validated first: id length, metadata depth, dimension, finite values; cosine vectors are normalised. Then the write lock is taken.
+3. **`StorageEngine::log`**: the file engine appends one checksummed frame to the WAL; RocksDB writes a batch.
+4. The points are applied to the store and added to the index.
+5. **Maintenance**: if enough slots are tombstoned, the collection compacts; if the WAL has grown past 64 MiB, it checkpoints.
+
+A metadata update is logged as an upsert of the whole points, so recovery needs nothing extra, but in memory it changes the metadata in place: the vectors, slots and index are untouched.
+
+## A search
+
+1. The handler validates `k` and parses the filter, then calls the collection on a blocking thread.
+2. The query is checked and, for cosine, normalised; the read lock is taken, so searches run in parallel with each other.
+3. The index searches with an **accept** predicate: a slot is a candidate only if it is alive, matches the filter, and is not excluded (the point itself in a search by id, the examples in a recommendation). Filtering happens inside the traversal, not after it.
+4. `max_distance` drops distant hits; ids, distances and, if asked, metadata and vectors are copied out.
+
+## Recovery
+
+`Database::new` locks the directory, opens the snapshot registry, then opens every collection under `collections/`: the engine returns the last checkpoint (store and serialised index) and the log records after it, which are replayed and folded into a fresh checkpoint. A directory without `collection.json`, as an interrupted drop leaves behind, is skipped.
+
+## The servers
+
+`quiver-server` parses the configuration (flags, environment, `.env`), builds the key store, opens the `Database` on a blocking thread, then serves REST and gRPC as two tasks sharing one `Arc<Database>`. On a signal it stops both, waits up to 10 seconds for requests in flight, stops the scheduler and flushes every collection.
+
+## Where a change goes
+
+- **A metric**: `crates/types/src/distance.rs`, and its k-d tree bound in `crates/index/src/kdtree.rs`.
+- **An index**: a module in `crates/index`, an `Index` variant, and an `IndexConfig` variant in `quiver-types`.
+- **A storage engine**: implement `StorageEngine` in `crates/storage`; it must pass the shared `durable_engine_contract` test.
+- **An endpoint**: a handler in `crates/http`, an RPC in `crates/grpc/proto/quiver.proto` and `service.rs`, a method in `crates/client`, a Python client method, and these docs.

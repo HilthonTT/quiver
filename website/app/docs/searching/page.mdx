@@ -1,0 +1,156 @@
+export const metadata = { title: "Searching" };
+
+# Searching
+
+A search returns the `k` points nearest to a query, closest first. The query is a vector, or the id of a point already in the collection. The examples use this collection:
+
+```bash
+curl -X POST localhost:6900/collections -H 'content-type: application/json' \
+  -d '{"name": "books", "dimension": 3}' > /dev/null
+curl -X POST localhost:6900/collections/books/points -H 'content-type: application/json' -d '{
+  "points": [
+    {"id": "dune",       "vector": [0.9, 0.1, 0.0], "metadata": {"genre": "sci-fi",  "year": 1965}},
+    {"id": "foundation", "vector": [0.8, 0.2, 0.1], "metadata": {"genre": "sci-fi",  "year": 1951}},
+    {"id": "hobbit",     "vector": [0.1, 0.9, 0.2], "metadata": {"genre": "fantasy", "year": 1937}},
+    {"id": "emma",       "vector": [0.0, 0.2, 0.9], "metadata": {"genre": "romance", "year": 1815}}
+  ]
+}'
+```
+
+```json
+{"ids":["dune","foundation","hobbit","emma"],"upserted":4}
+```
+
+## A search
+
+`POST /collections/{name}/search`:
+
+```bash
+curl -X POST localhost:6900/collections/books/search -H 'content-type: application/json' \
+  -d '{"vector": [1.0, 0.0, 0.0], "k": 2, "filter": {"genre": "sci-fi"}, "with_vectors": true}'
+```
+
+```json
+{
+  "results": [
+    {"distance": 0.006116271018981934, "id": "dune", "metadata": {"genre": "sci-fi", "year": 1965},
+     "vector": [0.9938837289810181, 0.11043152958154678, 0.0]},
+    {"distance": 0.036913156509399414, "id": "foundation", "metadata": {"genre": "sci-fi", "year": 1951},
+     "vector": [0.9630868434906006, 0.24077171087265015, 0.12038585543632507]}
+  ]
+}
+```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `vector` | | the query; give exactly one of `vector` and `id` |
+| `id` | | search with this point's stored vector; the point itself is left out |
+| `k` | 10 | how many results, 1 to 10,000 |
+| `filter` | none | a [filter](/docs/filtering/) on metadata |
+| `ef` | the collection's `ef_search` | HNSW beam width for this query; ignored by exact indexes |
+| `max_distance` | none | drop results farther than this |
+| `with_vectors` | `false` | include each result's stored vector |
+| `with_metadata` | `true` | include each result's metadata |
+
+Fewer than `k` results come back when fewer points match. Stored vectors are what you get back: with cosine, the normalised ones.
+
+### Recall and `ef`
+
+With an HNSW index the results are approximate. Raise `ef` to trade speed for recall on one query, or set `ef_search` on the collection for all of them; [indexes & metrics](/docs/indexes/) has measured numbers. `ef` is never narrower than `k`.
+
+## Search by id
+
+Give `id` instead of `vector` to find a stored point's neighbours. The point is excluded inside the index, so it does not use up one of the `k`:
+
+```bash
+curl -X POST localhost:6900/collections/books/search -H 'content-type: application/json' \
+  -d '{"id": "dune", "k": 2, "with_metadata": false}'
+```
+
+```json
+{"results":[{"distance":0.016214847564697266,"id":"foundation"},{"distance":0.7856534719467163,"id":"hobbit"}]}
+```
+
+An id that does not exist answers `404 point_not_found`.
+
+## Recommend
+
+`POST /collections/{name}/recommend` finds points like the `positive` examples and unlike the `negative` ones. The query is the mean of the positives; with negatives, it is pushed away from them: `2 · mean(positive) − mean(negative)`. The examples themselves never appear in the results.
+
+```bash
+curl -X POST localhost:6900/collections/books/recommend -H 'content-type: application/json' \
+  -d '{"positive": ["hobbit"], "negative": ["dune"], "k": 2}'
+```
+
+```json
+{"results":[{"distance":0.598021388053894,"id":"emma","metadata":{"genre":"romance","year":1815}},{"distance":1.1261796951293945,"id":"foundation","metadata":{"genre":"sci-fi","year":1951}}]}
+```
+
+It takes the same `k`, `filter`, `ef`, `max_distance`, `with_vectors` and `with_metadata` as a search. At least one positive is required, the examples together may number at most 10,000, and every example must exist (`404 point_not_found` names the first missing one).
+
+## Distance thresholds
+
+`max_distance` drops results farther than the threshold. The results are still capped at `k`, and with HNSW the threshold applies to the approximate top `k`: it filters what the search found rather than searching until it runs out of close points.
+
+```bash
+curl -X POST localhost:6900/collections/books/search -H 'content-type: application/json' \
+  -d '{"vector": [1.0, 0.0, 0.0], "k": 10, "max_distance": 0.1, "with_metadata": false}'
+```
+
+```json
+{"results":[{"distance":0.006116271018981934,"id":"dune"},{"distance":0.036913156509399414,"id":"foundation"}]}
+```
+
+## Batch search
+
+`POST /collections/{name}/search/batch` runs up to 256 searches in one request. Each entry takes every search field above, so entries can mix vectors and ids. Results come back as one list per search, in order:
+
+```bash
+curl -X POST localhost:6900/collections/books/search/batch -H 'content-type: application/json' -d '{
+  "searches": [
+    {"vector": [0.0, 1.0, 0.0], "k": 1, "with_metadata": false},
+    {"id": "emma", "k": 1, "with_metadata": false}
+  ]
+}'
+```
+
+```json
+{"results":[[{"distance":0.029505014419555664,"id":"hobbit"}],[{"distance":0.5789401531219482,"id":"hobbit"}]]}
+```
+
+If any entry is invalid, the whole batch fails.
+
+## From Python
+
+```python
+from quiver import Client
+
+books = Client("http://localhost:6900").collection("books")
+
+print([h.id for h in books.search([1.0, 0.0, 0.0], k=2, filter={"year": {"$lt": 1960}})])
+print([h.id for h in books.search_by_id("dune", k=1)])
+print([h.id for h in books.recommend(["hobbit"], negative=["dune"], k=1)])
+print([h.id for h in books.search([1.0, 0.0, 0.0], k=10, max_distance=0.1, ef=128)])
+print([[h.id for h in hits] for hits in books.search_batch([[0, 1, 0], [0, 0, 1]], k=1)])
+```
+
+```text
+['foundation', 'hobbit']
+['foundation']
+['emma']
+['dune', 'foundation']
+[['hobbit'], ['emma']]
+```
+
+`search_batch` sends the same `k`, filter and `ef` with every vector. The [Rust client](/docs/rust-client/) has `SearchRequest::new(vector, k)` and `SearchRequest::by_id(id, k)`.
+
+## Errors
+
+| Status | Code | When |
+| --- | --- | --- |
+| 400 | `invalid_argument` | `k` outside 1–10,000, both or neither of `vector` and `id`, more than 256 searches in a batch, no positive example |
+| 400 | `dimension_mismatch` | the query vector has the wrong length |
+| 400 | `invalid_filter` | the filter does not parse |
+| 400 | `invalid_body` | malformed JSON or an unknown field |
+| 404 | `not_found` | no such collection |
+| 404 | `point_not_found` | the `id`, or an example, does not exist |

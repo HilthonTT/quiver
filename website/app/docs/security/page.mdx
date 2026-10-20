@@ -1,0 +1,73 @@
+export const metadata = { title: "Security & API keys" };
+
+# Security & API keys
+
+With no API keys configured, authentication is off and anyone who can reach the ports can read and write. That is the default, and fine on `127.0.0.1`, which is also the default bind address. Set keys before the server is reachable from anywhere else; it logs a warning when it listens on a non-loopback address without any.
+
+## Roles
+
+| Role | May |
+| --- | --- |
+| `readonly` | every read: list and get collections and points, count, search, recommend, list and download snapshots, `/info` |
+| `readwrite` | everything, including creating and dropping collections, writes, snapshots, uploads and restores |
+
+`GET /`, `GET /health` and the gRPC `Health` call need no key. Give read-only keys to anything that only queries.
+
+## Configuring keys
+
+Three sources, which combine:
+
+```bash
+quiver --keys-file keys.json
+quiver --api-key "$WRITE_KEY" --readonly-api-key "$READ_KEY"
+QUIVER_API_KEY=... QUIVER_READONLY_API_KEY=... quiver
+```
+
+The keys file is a JSON array of named keys, like [`keys.example.json`](https://github.com/HilthonTT/quiver/blob/main/keys.example.json):
+
+```json
+[
+  { "name": "admin", "role": "readwrite", "key": "replace-with-a-long-random-secret" },
+  { "name": "dashboard", "role": "readonly", "key": "replace-with-another-secret" }
+]
+```
+
+`role` is `readwrite` or `readonly` (`read_write`/`write` and `read_only`/`read` work too). The name only appears in the server's debug log. The server refuses to start if a key is empty or two keys are the same, across all three sources. Use long random secrets, for example `openssl rand -hex 32`. Keys are compared in constant time.
+
+## Sending a key
+
+Over REST, in `Authorization: Bearer <key>` (the scheme is case-insensitive) or `x-api-key: <key>`; over gRPC, in the same names as metadata. The clients take an `api_key` and send it as a bearer token.
+
+```bash
+curl localhost:6900/collections
+curl -H "Authorization: Bearer replace-with-another-secret" localhost:6900/collections
+curl -X POST localhost:6900/collections -H 'x-api-key: replace-with-another-secret' \
+  -H 'content-type: application/json' -d '{"name": "docs", "dimension": 3}'
+curl -X POST localhost:6900/collections -H 'x-api-key: replace-with-a-long-random-secret' \
+  -H 'content-type: application/json' -d '{"name": "docs", "dimension": 3}'
+```
+
+```text
+{"error":{"code":"unauthorized","message":"missing or invalid API key"}}
+{"collections":[]}
+{"error":{"code":"forbidden","message":"this API key is read-only"}}
+{"name":"docs","dimension":3,"metric":"cosine","index":{"type":"hnsw","m":16,"ef_construction":128,"ef_search":64,"seed":6512614579346866177},"count":0,"tombstones":0}
+```
+
+No key or an unknown key answers `401 unauthorized` (`UNAUTHENTICATED` over gRPC); a read-only key on a write answers `403 forbidden` (`PERMISSION_DENIED`).
+
+## TLS
+
+Quiver speaks plain HTTP on both ports. Put a reverse proxy or load balancer that terminates TLS in front of it, or keep it on a private network; the proxy must speak HTTP/2 to the backend for gRPC. Keys sent over plain HTTP can be read by anyone on the path.
+
+## Deploying safely
+
+- **Set keys before exposing the ports.** The Docker image binds `0.0.0.0`; set `QUIVER_API_KEY` or a keys file there.
+- **Protect the keys file and the data.** Keys are stored in plain text, so restrict the file's permissions. The data and snapshot directories hold every vector and all metadata.
+- **Leave `--cors` off** unless a browser application on another origin needs direct access.
+- **Size limits.** JSON bodies are capped at 64 MiB; lower it with `--max-body-mb` if your workload allows. Snapshot uploads are capped at 16 GiB and need a read-write key. `k`, batch sizes and id lists have [limits](/docs/rest-api/#limits) too.
+- **Uploaded snapshots are untrusted.** Their manifest is checked first, their data is streamed through SHA-256 against it, and snapshot ids must be UUIDs, so they cannot name paths. A restore reads the archive in memory rather than extracting it to disk.
+
+## Reporting a vulnerability
+
+Please don't open a public issue. Report it privately through [GitHub Security Advisories](https://github.com/HilthonTT/quiver/security/advisories/new), with what you found, how to reproduce it, the version (`quiver --version` or the commit) and the impact you expect. Quiver is pre-1.0: only the latest release and `main` receive security fixes. The full policy is in [`SECURITY.md`](https://github.com/HilthonTT/quiver/blob/main/SECURITY.md).

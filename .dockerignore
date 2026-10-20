@@ -1,6 +1,7 @@
 target/
 clients/
 docs/
+website/
 assets/
 scripts/
 .git/

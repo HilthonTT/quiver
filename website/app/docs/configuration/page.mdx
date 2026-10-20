@@ -1,0 +1,88 @@
+export const metadata = { title: "Configuration" };
+
+# Configuration
+
+The server takes every setting as a command-line flag or a `QUIVER_*` environment variable. There is no config file, but it reads a `.env` file at startup.
+
+**Precedence:** flags, then environment variables, then `.env`, then the defaults. The `.env` file is looked for in the working directory and its parents; when one is loaded, the server logs `loaded environment file`. Copy [`.env.example`](https://github.com/HilthonTT/quiver/blob/main/.env.example) to start.
+
+```bash
+quiver --help
+QUIVER_HTTP_PORT=8080 quiver --data-dir /var/lib/quiver
+```
+
+## Network
+
+| Flag | Environment | Default | Meaning |
+| --- | --- | --- | --- |
+| `--host` | `QUIVER_HOST` | `127.0.0.1` | the address both APIs bind to |
+| `--http-port` (alias `--port`) | `QUIVER_HTTP_PORT` | `6900` | REST port |
+| `--grpc-port` | `QUIVER_GRPC_PORT` | `6901` | gRPC port |
+| `--disable-http` | `QUIVER_DISABLE_HTTP` | off | don't start the REST API |
+| `--disable-grpc` | `QUIVER_DISABLE_GRPC` | off | don't start the gRPC API |
+| `--max-body-mb` | `QUIVER_MAX_BODY_MB` | `64` | the largest REST JSON body, in MiB |
+| `--cors` | `QUIVER_CORS` | off | allow cross-origin REST requests from any origin |
+
+## Storage
+
+| Flag | Environment | Default | Meaning |
+| --- | --- | --- | --- |
+| `--data-dir` | `QUIVER_DATA_DIR` | `./quiver-data` | collections, snapshots and the lock file |
+| `--storage` | `QUIVER_STORAGE` | `file` | engine for new collections: `file`, `rocksdb` or `memory` |
+| `--in-memory` | `QUIVER_IN_MEMORY` | off | keep everything in memory and touch no disk at all |
+| `--fsync` | `QUIVER_FSYNC` | off | fsync after every write: slower, but safe against power loss |
+
+`--storage` picks the engine for collections created from now on; each collection remembers its own, so a data directory can mix engines. `--storage memory` still uses the data directory for its lock file and snapshots, while `--in-memory` uses no directory at all. See [storage & durability](/docs/storage/).
+
+## Authentication
+
+| Flag | Environment | Default | Meaning |
+| --- | --- | --- | --- |
+| `--keys-file` | `QUIVER_KEYS_FILE` | none | a JSON file of named keys with roles |
+| `--api-key` | `QUIVER_API_KEY` | none | one read-write key |
+| `--readonly-api-key` | `QUIVER_READONLY_API_KEY` | none | one read-only key |
+
+The three combine. With none of them, authentication is off. See [security & API keys](/docs/security/).
+
+## Snapshots
+
+| Flag | Environment | Default | Meaning |
+| --- | --- | --- | --- |
+| `--snapshot-dir` | `QUIVER_SNAPSHOT_DIR` | `DATA_DIR/snapshots` | where archives are kept |
+| `--snapshot-interval` | `QUIVER_SNAPSHOT_INTERVAL` | `0` (never) | snapshot every changed collection this often, in seconds |
+| `--snapshot-keep` | `QUIVER_SNAPSHOT_KEEP` | `5` | snapshots kept per collection; `0` keeps all |
+
+See [snapshots & backups](/docs/snapshots/).
+
+## Logging
+
+The log goes to standard output. `RUST_LOG` sets its filter, `info` by default: `RUST_LOG=debug`, or per module, such as `RUST_LOG=info,quiver_db=debug`. Requests are traced by `tower_http` at the `debug` level, and responses with a 5xx status are logged as errors.
+
+## Booleans
+
+On the command line, `--in-memory`, `--fsync`, `--cors`, `--disable-http` and `--disable-grpc` are plain switches. Their environment variables accept `1`, `true`, `yes` or `on` (in any case) and `0`, `false`, `no` or `off`; anything else stops the server:
+
+```text
+error: invalid value 'maybe' for '--fsync': value was not a boolean
+```
+
+## Checks at startup
+
+The server refuses to start, with a message, when:
+
+- `--disable-http` and `--disable-grpc` are both set;
+- `--storage rocksdb` is asked of a build without the `rocksdb` feature;
+- `--snapshot-interval` is set with `--in-memory` but without `--snapshot-dir`;
+- the keys file cannot be read, or two keys are the same, or one is empty;
+- the data directory is already open in another process;
+- a collection's files are corrupt (see [storage](/docs/storage/#when-something-is-wrong)).
+
+It warns, and carries on, when it listens on an address other than loopback without any API key, and when it runs `--in-memory`.
+
+## Shutting down
+
+On `SIGINT` (Ctrl+C) or `SIGTERM` the server stops accepting connections, gives requests in flight 10 seconds to finish, stops the snapshot scheduler, and checkpoints every collection before it exits.
+
+## The terminal UI
+
+`quiver-tui` has its own flags and variables, `QUIVER_URL`, `QUIVER_API_KEY` and `QUIVER_EMBEDDING_*`, listed on the [terminal UI](/docs/tui/#options) page. It does not read `.env`.

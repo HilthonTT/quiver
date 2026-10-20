@@ -1,0 +1,139 @@
+export const metadata = { title: "Data operations" };
+
+# Data operations
+
+Beyond upsert and search, Quiver can change metadata without resending vectors, and count and delete points by id or by filter. The examples use a small collection:
+
+```bash
+curl -X POST localhost:6900/collections -H 'content-type: application/json' \
+  -d '{"name": "movies", "dimension": 2}' > /dev/null
+curl -X POST localhost:6900/collections/movies/points -H 'content-type: application/json' -d '{
+  "points": [
+    {"id": "alien",   "vector": [0.9, 0.1], "metadata": {"genre": "sci-fi",  "year": 1979, "stats": {"views": 10, "likes": 4}}},
+    {"id": "arrival", "vector": [0.8, 0.3], "metadata": {"genre": "sci-fi",  "year": 2016}},
+    {"id": "amelie",  "vector": [0.1, 0.9], "metadata": {"genre": "romance", "year": 2001}}
+  ]
+}'
+```
+
+```json
+{"ids":["alien","arrival","amelie"],"upserted":3}
+```
+
+## Updating metadata
+
+`POST /collections/{name}/points/metadata` changes the metadata of the selected points and leaves their vectors and the index alone. Select points with exactly one of `ids` and `filter`; ids that do not exist are skipped. The answer is how many points changed.
+
+### Merge
+
+The default `mode` is `merge`, an [RFC 7386](https://www.rfc-editor.org/rfc/rfc7386) JSON Merge Patch: keys in the patch are set, nested objects merge recursively, and `null` removes a key.
+
+```bash
+curl -X POST localhost:6900/collections/movies/points/metadata -H 'content-type: application/json' \
+  -d '{"ids": ["alien", "nope"], "metadata": {"seen": true, "stats": {"views": 11, "likes": null}}}'
+curl localhost:6900/collections/movies/points/alien?with_vectors=false
+```
+
+```text
+{"updated":1}
+{"id":"alien","metadata":{"genre":"sci-fi","seen":true,"stats":{"views":11},"year":1979}}
+```
+
+`alien` kept `genre` and `year`, gained `seen`, and its `stats` object was merged: `views` changed and `likes` was removed. `nope` does not exist and was skipped. A point with no metadata, or with metadata that is not an object, starts from `{}`. A patch that is not an object replaces the value outright, as RFC 7386 says.
+
+### Replace
+
+`"mode": "replace"` swaps the whole value; `null` removes the metadata. Here for every point a filter matches:
+
+```bash
+curl -X POST localhost:6900/collections/movies/points/metadata -H 'content-type: application/json' \
+  -d '{"filter": {"genre": "sci-fi"}, "metadata": {"genre": "classic"}, "mode": "replace"}'
+curl localhost:6900/collections/movies/points/arrival?with_vectors=false
+```
+
+```text
+{"updated":2}
+{"id":"arrival","metadata":{"genre":"classic"}}
+```
+
+The new values are checked (the 64-level depth limit) before anything changes, so an update applies to every selected point or to none. Over gRPC the call is `UpdateMetadata`, with the metadata as a JSON string.
+
+## Counting
+
+`POST /collections/{name}/points/count` counts every point, or with a `filter`, the matching ones:
+
+```bash
+curl -X POST localhost:6900/collections/movies/points/count -H 'content-type: application/json' -d '{}'
+curl -X POST localhost:6900/collections/movies/points/count -H 'content-type: application/json' \
+  -d '{"filter": {"genre": "classic"}}'
+```
+
+```text
+{"count":3}
+{"count":2}
+```
+
+## Deleting
+
+`POST /collections/{name}/points/delete` deletes by `ids` (at most 10,000) or by `filter`, and answers how many points existed:
+
+```bash
+curl -X POST localhost:6900/collections/movies/points/delete -H 'content-type: application/json' \
+  -d '{"ids": ["amelie", "nope"]}'
+curl -X POST localhost:6900/collections/movies/points/delete -H 'content-type: application/json' \
+  -d '{"filter": {"genre": "classic"}}'
+```
+
+```text
+{"deleted":1}
+{"deleted":2}
+```
+
+`nope` did not exist, so the first delete counts one point; the second removes the two points the replace above turned into `classic`.
+
+<Callout type="warn">
+An empty filter would match every point, so a delete refuses it with `400 invalid_argument`. To delete everything, drop the collection with `DELETE /collections/{name}`.
+</Callout>
+
+```bash
+curl -X POST localhost:6900/collections/movies/points/delete -H 'content-type: application/json' \
+  -d '{"filter": {}}'
+```
+
+```json
+{"error":{"code":"invalid_argument","message":"an empty filter would delete every point; drop the collection to delete everything"}}
+```
+
+A single point can also go with `DELETE /collections/{name}/points/{id}`, which answers `204`, or `404 point_not_found`. Deleted slots are reclaimed by [compaction](/docs/collections/#deleting-and-compaction).
+
+## From Python
+
+```python
+from quiver import Client
+
+movies = Client("http://localhost:6900").collection("movies")
+movies.upsert([("alien", [0.9, 0.1], {"genre": "sci-fi", "year": 1979})])
+
+print(movies.update_metadata({"seen": True}, ids=["alien"]))
+print(movies.update_metadata({"genre": "classic"}, filter={"year": {"$lt": 1990}}, mode="replace"))
+print(movies.count(), movies.count({"genre": "classic"}))
+print(movies.delete_where({"genre": "classic"}), movies.delete(["alien"]), movies.count())
+```
+
+```text
+1
+1
+1 1
+1 0 0
+```
+
+`update_metadata` needs exactly one of `ids=` and `filter=` (a `ValueError` otherwise). In Rust, `Client::update_metadata` takes a `Selector::Ids` or `Selector::Filter`, and the embedded `Collection::update_metadata` a `PointSelector`.
+
+## Errors
+
+| Status | Code | When |
+| --- | --- | --- |
+| 400 | `invalid_argument` | both or neither of `ids` and `filter`, more than 10,000 ids, an empty delete filter, metadata nested too deep |
+| 400 | `invalid_filter` | the filter does not parse |
+| 400 | `invalid_body` | malformed JSON, an unknown field, a missing `metadata`, an unknown `mode` |
+| 404 | `not_found` | no such collection |

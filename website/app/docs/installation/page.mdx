@@ -1,0 +1,83 @@
+export const metadata = { title: "Installation" };
+
+# Installation
+
+Quiver is one server binary, `quiver`, plus an optional terminal UI, `quiver-tui`. Run them from the Docker image or build them from source. There are no prebuilt binaries yet.
+
+## Docker
+
+The repository's `docker-compose.yml` builds the image and starts the server with a named volume for its data:
+
+```bash
+git clone https://github.com/HilthonTT/quiver && cd quiver
+docker compose up -d          # REST on :6900, gRPC on :6901
+```
+
+Or build and run the image yourself:
+
+```bash
+docker build -t quiver:latest .     # or: make docker
+docker run -d -p 6900:6900 -p 6901:6901 -v quiver-data:/data \
+  -e QUIVER_API_KEY=change-me quiver:latest
+```
+
+The image is built with the RocksDB engine, binds `0.0.0.0` and keeps its data in `/data`. [Docker](/docs/docker/) has the details.
+
+<Callout type="warn">
+Inside the container the server listens on every interface. Set `QUIVER_API_KEY` (or a keys file) before you publish the ports anywhere but your own machine. See [security & API keys](/docs/security/).
+</Callout>
+
+## From source
+
+You need Rust **1.89** or newer (`rustup update stable`).
+
+```bash
+git clone https://github.com/HilthonTT/quiver && cd quiver
+cargo build --release -p quiver-server -p quiver-tui    # or: make build
+./target/release/quiver --data-dir ./quiver-data
+```
+
+`cargo run --release -p quiver-server` builds and starts the server in one step; it is the workspace's default member, so plain `cargo run --release` does the same. `make run` starts it with `--data-dir ./quiver-data`.
+
+The server binds `127.0.0.1` by default. `quiver --help` lists every option, and [configuration](/docs/configuration/) explains them.
+
+### The RocksDB engine
+
+The default file engine needs nothing but the Rust toolchain. To also build the RocksDB engine, install clang and libclang (they compile the bundled RocksDB), then enable the `rocksdb` feature:
+
+```bash
+sudo apt-get install -y clang libclang-dev        # Debian / Ubuntu
+cargo build --release -p quiver-server --features rocksdb    # or: make build-rocksdb
+./target/release/quiver --storage rocksdb
+```
+
+A build without the feature refuses `--storage rocksdb` at startup:
+
+```text
+the rocksdb storage engine is not included in this build (rebuild with `--features rocksdb`)
+```
+
+## The Python client
+
+The Python client needs Python 3.10 or newer. Install it from the repository:
+
+```bash
+pip install ./clients/python
+pip install "./clients/python[numpy]"   # optional: accept numpy arrays as vectors
+```
+
+The distribution is called `quiver-db`; you import it as `quiver`. See [Python client](/docs/python/).
+
+## The Rust crates
+
+The crates are not on crates.io yet. Depend on them from git:
+
+```toml
+[dependencies]
+quiver-db = { git = "https://github.com/HilthonTT/quiver" }      # the embedded database
+quiver-client = { git = "https://github.com/HilthonTT/quiver" }  # the REST client
+```
+
+`quiver-db` has a `rocksdb` feature too. See [embedding in Rust](/docs/embedding/) and [Rust client](/docs/rust-client/).
+
+Next: the [quick start](/docs/quick-start/).

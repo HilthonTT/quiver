@@ -1,0 +1,155 @@
+export const metadata = { title: "Snapshots & backups" };
+
+# Snapshots & backups
+
+A snapshot is a backup of one collection: a portable, checksummed `.tar.gz` archive with its configuration, its points and its index. Take them on demand or on a schedule, download them, upload them to another server, and restore them under any name.
+
+Archives live in the snapshot directory, `DATA_DIR/snapshots` unless `--snapshot-dir` says otherwise. A server started with `--in-memory` has none unless you pass `--snapshot-dir`; every snapshot route then answers `501 unsupported`, and `GET /info` reports `"snapshots_enabled": false`.
+
+## Create, list and inspect
+
+```bash
+curl -X POST localhost:6900/collections -H 'content-type: application/json' \
+  -d '{"name": "books", "dimension": 3}' > /dev/null
+curl -X POST localhost:6900/collections/books/points -H 'content-type: application/json' \
+  -d '{"points": [{"id": "dune", "vector": [0.9, 0.1, 0.0]}, {"id": "emma", "vector": [0.0, 0.2, 0.9]}]}' > /dev/null
+curl -X POST localhost:6900/collections/books/snapshots
+```
+
+```json
+{
+  "format_version": 1,
+  "id": "70f87aad-54a2-402d-b14d-5d0dc2be879c",
+  "collection": "books",
+  "created_at_ms": 1792524345113,
+  "quiver_version": "0.1.0",
+  "config": {
+    "dimension": 3,
+    "metric": "cosine",
+    "index": {"type": "hnsw", "m": 16, "ef_construction": 128, "ef_search": 64, "seed": 6512614579346866177}
+  },
+  "points": 2,
+  "data_bytes": 130,
+  "data_sha256": "959a0fe10fb56415bf244c462a99bfe7d95eeeba6169b739e5db2011e1dedd0e",
+  "archive_bytes": 527
+}
+```
+
+The answer is `201 Created` with the snapshot's manifest (your id, time and checksum will differ): its id (a UUID), the collection, when it was taken (milliseconds since the Unix epoch), the Quiver version, the collection's configuration, the number of points, and the size and SHA-256 of the data inside. `archive_bytes` is the compressed size on disk.
+
+| Route | Does |
+| --- | --- |
+| `POST /collections/{name}/snapshots` | snapshot a collection |
+| `GET /collections/{name}/snapshots` | that collection's snapshots, oldest first |
+| `GET /snapshots` | every snapshot; `?collection=books` filters, an empty value does not |
+| `GET /snapshots/{id}` | one snapshot's manifest |
+| `GET /snapshots/{id}/download` | the archive itself, `application/gzip` |
+| `POST /snapshots` | upload an archive |
+| `POST /snapshots/{id}/restore` | restore it as a collection |
+| `DELETE /snapshots/{id}` | delete it (`204`) |
+
+An id that is not a UUID, or no such snapshot, answers `404 not_found`.
+
+## Download and upload
+
+The download streams the archive, named after the collection and the snapshot:
+
+```bash
+ID=$(curl -s localhost:6900/collections/books/snapshots | python3 -c 'import json,sys; print(json.load(sys.stdin)["snapshots"][-1]["id"])')
+curl -s -o books.tar.gz -D - localhost:6900/snapshots/$ID/download | grep -i '^content-'
+tar tzf books.tar.gz
+```
+
+```text
+content-type: application/gzip
+content-length: 527
+content-disposition: attachment; filename="books-70f87aad-54a2-402d-b14d-5d0dc2be879c.tar.gz"
+manifest.json
+data.bin
+```
+
+Upload it to another server (or the same one, after deleting it there) as the raw request body. Uploads need a read-write key and are capped at 16 GiB:
+
+```bash
+curl -X DELETE localhost:6900/snapshots/$ID
+curl -X POST localhost:6900/snapshots --data-binary @books.tar.gz -H 'content-type: application/gzip' \
+  | python3 -c 'import json,sys; s=json.load(sys.stdin); print(s["collection"], s["points"])'
+```
+
+```text
+books 2
+```
+
+The archive is checked before it is accepted: the manifest must come first and be valid (format version, a UUID id, a valid collection name and configuration), and the data is streamed through SHA-256 and compared with the manifest's size and digest, so an upload that decompresses to far more than it claims cannot exhaust memory. A bad archive answers `400 invalid_snapshot`; a snapshot id that already exists, `400 invalid_argument`.
+
+## Restore
+
+`POST /snapshots/{id}/restore` loads the archive, checks its checksum and point count again, and creates the collection. The body is optional:
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `collection` | the original name | restore under this name instead |
+| `replace` | `false` | replace an existing collection of that name |
+
+```bash
+curl -X POST localhost:6900/snapshots/$ID/restore
+curl -X POST localhost:6900/snapshots/$ID/restore -H 'content-type: application/json' \
+  -d '{"collection": "books_copy"}'
+curl -X POST localhost:6900/snapshots/$ID/restore -H 'content-type: application/json' \
+  -d '{"replace": true}'
+```
+
+```text
+{"error":{"code":"already_exists","message":"collection `books` already exists"}}
+{"name":"books_copy","dimension":3,"metric":"cosine","index":{"type":"hnsw","m":16,"ef_construction":128,"ef_search":64,"seed":6512614579346866177},"count":2,"tombstones":0}
+{"name":"books","dimension":3,"metric":"cosine","index":{"type":"hnsw","m":16,"ef_construction":128,"ef_search":64,"seed":6512614579346866177},"count":2,"tombstones":0}
+```
+
+The index is verified before an existing collection is replaced, so a broken archive never costs you the collection it was meant to replace. The restored collection uses the server's current storage engine.
+
+## Retention
+
+After every snapshot of a collection, manual or scheduled, Quiver deletes that collection's oldest snapshots beyond `--snapshot-keep` (default 5). `0` keeps them all. Retention counts per collection, so a busy collection never pushes out another's backups.
+
+## Scheduled snapshots
+
+```bash
+quiver --snapshot-interval 3600 --snapshot-keep 24     # hourly, a day's worth
+```
+
+Every `--snapshot-interval` seconds (0, the default, means never), a background thread snapshots each collection that changed since its last scheduled snapshot; on its first round it snapshots every collection. A failed snapshot is logged and retried on the next round. `docker-compose.yml` sets the interval to 3600 by default.
+
+With `--in-memory`, `--snapshot-interval` needs `--snapshot-dir`, or the server refuses to start:
+
+```text
+--snapshot-interval needs a snapshot directory; set --snapshot-dir
+```
+
+## Housekeeping
+
+Snapshots and uploads are written to `*.partial` files and renamed into place when complete. Partial files left behind by a crash are removed at startup once they are an hour old. Unreadable archives in the directory are skipped when listing, with a warning in the log, and can still be deleted.
+
+## From Python
+
+```python
+from quiver import Client
+
+client = Client("http://localhost:6900")
+books = client.collection("books")
+
+snap = books.create_snapshot()
+print(snap.collection, snap.points, len(books.snapshots()) >= 1)
+path = client.download_snapshot(snap.id, "books-backup.tar.gz")
+client.delete_snapshot(snap.id)
+print(client.upload_snapshot(path).id == snap.id)
+restored = client.restore_snapshot(snap.id, collection="books_restored")
+print(restored.info().count)
+```
+
+```text
+books 2 True
+True
+2
+```
+
+gRPC has `CreateSnapshot`, `ListSnapshots`, `DeleteSnapshot` and `RestoreSnapshot`; downloads and uploads are REST only.

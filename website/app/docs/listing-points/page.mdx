@@ -1,0 +1,66 @@
+export const metadata = { title: "Listing points" };
+
+# Listing points
+
+`GET /collections/{name}/points` pages through a collection in ascending id order. Each page carries a `next_cursor`: pass it back as `cursor` for the next page.
+
+```bash
+curl -X POST localhost:6900/collections -H 'content-type: application/json' \
+  -d '{"name": "letters", "dimension": 1, "metric": "euclidean"}' > /dev/null
+curl -X POST localhost:6900/collections/letters/points -H 'content-type: application/json' -d '{
+  "points": [{"id": "d", "vector": [4]}, {"id": "b", "vector": [2]}, {"id": "e", "vector": [5]},
+             {"id": "a", "vector": [1]}, {"id": "c", "vector": [3]}]
+}' > /dev/null
+curl 'localhost:6900/collections/letters/points?limit=2'
+curl 'localhost:6900/collections/letters/points?limit=2&cursor=b'
+curl 'localhost:6900/collections/letters/points?limit=2&cursor=d&with_vectors=true'
+```
+
+```text
+{"next_cursor":"b","points":[{"id":"a"},{"id":"b"}]}
+{"next_cursor":"d","points":[{"id":"c"},{"id":"d"}]}
+{"next_cursor":null,"points":[{"id":"e","vector":[5.0]}]}
+```
+
+| Parameter | Default | Meaning |
+| --- | --- | --- |
+| `cursor` | none (from the start) | exclusive: the page starts after this id |
+| `limit` | 100 | points per page, at most 10,000 |
+| `with_vectors` | `false` | include the vectors |
+
+`next_cursor` is `null` on the last page. It is only handed out when at least one more point follows, so you never fetch an empty page at the end.
+
+## Why it is stable
+
+Ids are compared byte-wise, and the cursor is simply the last id you saw, not a position. Points inserted, updated or deleted between two requests therefore never make a page skip or repeat a point: a page always continues right after the last id of the previous one. A point inserted behind the cursor shows up on a later page if its id sorts after the cursor, and not at all if it sorts before.
+
+Byte-wise order means `"10"` comes before `"9"`, and uppercase before lowercase. Pad numeric ids (`"0009"`) if you want them in numeric order.
+
+<Callout>
+Paging used to be by offset. That changed in an unreleased breaking change: `offset` and `next_offset` are now `cursor` and `next_cursor`, and an `offset` parameter is rejected with `400 invalid_argument`.
+</Callout>
+
+## From the clients
+
+The Python client returns one `ScrollPage` per call, or follows the cursors for you with `iter_points`:
+
+```python
+from quiver import Client
+
+letters = Client("http://localhost:6900").collection("letters")
+
+page = letters.scroll(limit=2)
+print([p.id for p in page.points], page.next_cursor)
+page = letters.scroll(page.next_cursor, limit=2)
+print([p.id for p in page.points], page.next_cursor)
+
+print([p.id for p in letters.iter_points(page_size=2)])
+```
+
+```text
+['a', 'b'] b
+['c', 'd'] d
+['a', 'b', 'c', 'd', 'e']
+```
+
+The Rust client has `client.scroll(collection, cursor, limit, with_vectors)`, the embedded crate `collection.scroll(cursor, limit)`, and gRPC the `Scroll` RPC, whose `next_cursor` is unset after the last page and whose `limit` of 0 means 100.

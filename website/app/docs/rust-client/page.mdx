@@ -1,0 +1,122 @@
+export const metadata = { title: "Rust client" };
+
+# Rust client
+
+`quiver-client` is an async client for the REST API, built on [reqwest](https://docs.rs/reqwest) with rustls. The terminal UI uses it. It takes and returns the types from `quiver-types`, so depend on both:
+
+```toml
+[dependencies]
+quiver-client = { git = "https://github.com/HilthonTT/quiver" }
+quiver-types = { git = "https://github.com/HilthonTT/quiver" }
+serde_json = "1"
+tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+```
+
+## Example
+
+```rust
+use quiver_client::{Client, ClientError, RecommendRequest, SearchRequest, Selector};
+use quiver_types::{CollectionConfig, MetadataMode, Metric, PointInput};
+use serde_json::json;
+
+#[tokio::main]
+async fn main() -> Result<(), ClientError> {
+    // An empty key (no QUIVER_API_KEY) sends no Authorization header.
+    let key = std::env::var("QUIVER_API_KEY").unwrap_or_default();
+    let client = Client::new("http://localhost:6900")?.with_api_key(key);
+
+    let config = CollectionConfig::new(3).metric(Metric::Cosine);
+    client.create_collection("books", &config).await?;
+
+    let point = |id: &str, vector: Vec<f32>, year: u32| PointInput {
+        id: Some(id.into()),
+        vector,
+        metadata: Some(json!({ "year": year })),
+    };
+    let written = client
+        .upsert(
+            "books",
+            vec![
+                point("dune", vec![0.9, 0.1, 0.0], 1965),
+                point("foundation", vec![0.8, 0.2, 0.1], 1951),
+                point("hobbit", vec![0.1, 0.9, 0.2], 1937),
+            ],
+        )
+        .await?;
+    println!("upserted {} points: {:?}", written.upserted, written.ids);
+
+    let mut query = SearchRequest::new(vec![1.0, 0.0, 0.0], 2);
+    query.filter = Some(json!({ "year": { "$lt": 1960 } }));
+    for hit in client.search("books", &query).await? {
+        println!("{} {:.4}", hit.id, hit.distance);
+    }
+
+    let near_dune = client.search("books", &SearchRequest::by_id("dune", 1)).await?;
+    let liked = RecommendRequest::new(vec!["hobbit".into()], 1);
+    let recommended = client.recommend("books", &liked).await?;
+    println!("near dune: {}, like hobbit: {}", near_dune[0].id, recommended[0].id);
+
+    let updated = client
+        .update_metadata("books", &Selector::Ids(vec!["dune".into()]), &json!({ "seen": true }), MetadataMode::Merge)
+        .await?;
+    let old = client.count("books", Some(&json!({ "year": { "$lt": 1960 } }))).await?;
+    println!("updated {updated}, {old} published before 1960");
+
+    let page = client.scroll("books", None, 2, false).await?;
+    println!("first page: {:?}, next cursor {:?}", page.points.iter().map(|p| &p.id).collect::<Vec<_>>(), page.next_cursor);
+
+    match client.get_point("books", "nope").await? {
+        Some(p) => println!("found {}", p.id),
+        None => println!("no point `nope`"),
+    }
+    if let Err(ClientError::Api { status, code, .. }) = client.create_collection("books", &config).await {
+        println!("{status} {code}");
+    }
+    Ok(())
+}
+```
+
+```text
+upserted 3 points: ["dune", "foundation", "hobbit"]
+foundation 0.0369
+hobbit 0.8922
+near dune: foundation, like hobbit: foundation
+updated 1, 2 published before 1960
+first page: ["dune", "foundation"], next cursor Some("foundation")
+no point `nope`
+409 Conflict already_exists
+```
+
+## The API
+
+`Client::new(url)` checks the URL (`http` or `https`) and sets a 30-second request timeout and a 5-second connect timeout. `with_api_key(key)` sends `Authorization: Bearer <key>` with every request; an empty key sends none. A `Client` is cheap to clone.
+
+| Method | Route |
+| --- | --- |
+| `info()` | `GET /info`, as a `ServerInfo` |
+| `list_collections()`, `get_collection(name)` | `GET /collections`, `GET /collections/{name}` |
+| `create_collection(name, &config)`, `drop_collection(name)` | `POST /collections`, `DELETE /collections/{name}` |
+| `upsert(collection, points)` | `POST …/points`; returns an `UpsertResult` with `upserted` and `ids` |
+| `get_point(collection, id)` | `GET …/points/{id}`; `Ok(None)` if the point is missing |
+| `scroll(collection, cursor, limit, with_vectors)` | `GET …/points`; a `ScrollPage` |
+| `delete_points(collection, ids)`, `delete_where(collection, filter)` | `POST …/points/delete` |
+| `count(collection, filter)` | `POST …/points/count` |
+| `update_metadata(collection, selector, metadata, mode)` | `POST …/points/metadata` |
+| `search(collection, &SearchRequest)` | `POST …/search` |
+| `recommend(collection, &RecommendRequest)` | `POST …/recommend` |
+| `create_snapshot(collection)`, `list_snapshots(collection)` | `POST …/snapshots`, `GET /snapshots` |
+| `restore_snapshot(id, name, replace)`, `delete_snapshot(id)` | `POST /snapshots/{id}/restore`, `DELETE /snapshots/{id}` |
+
+`SearchRequest::new(vector, k)` and `SearchRequest::by_id(id, k)` return metadata and no vectors; their public fields (`filter`, `ef`, `max_distance`, `with_vectors`, `with_metadata`) change the rest. `RecommendRequest::new(positive, k)` works the same way, with a `negative` field. Filters are `serde_json::Value`s in the [filter syntax](/docs/filtering/).
+
+The ids `.`, `..`, `lookup`, `delete`, `count` and `metadata` cannot be addressed with `GET …/points/{id}`, so `get_point` looks those up with `POST …/points/lookup` instead.
+
+## Errors
+
+`ClientError` has three variants:
+
+- `Api { status, code, message }` — the server answered with an error; `code` is the server's [error code](/docs/rest-api/#errors), such as `not_found` or `dimension_mismatch`.
+- `Http(reqwest::Error)` — no usable answer: connection refused, a timeout, a body that does not decode.
+- `InvalidUrl(String)` — `Client::new` could not use the URL.
+
+The Rust client does not cover batch search, multi-point lookup, flush, compaction, or snapshot download and upload; use the REST API or the [Python client](/docs/python/) for those.

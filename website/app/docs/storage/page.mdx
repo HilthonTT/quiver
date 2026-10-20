@@ -1,0 +1,92 @@
+export const metadata = { title: "Storage & durability" };
+
+# Storage & durability
+
+Every collection is held in memory: its vectors, metadata and index. A storage engine makes it durable. The engine is chosen per collection when it is created (`--storage`, default `file`) and recorded with it, so one data directory can mix engines.
+
+| Engine | Durable | Restart | Needs |
+| --- | --- | --- | --- |
+| `file` (default) | yes | loads the last checkpoint, including the index, then replays the log | nothing |
+| `rocksdb` | yes | reads every point and rebuilds the index | a build with `--features rocksdb` |
+| `memory` | no | starts empty | nothing |
+
+## The data directory
+
+```text
+quiver-data/
+├── LOCK                       held while the server runs
+├── collections/
+│   └── books/
+│       ├── collection.json    configuration and engine
+│       ├── state.bin          last checkpoint (file engine)
+│       ├── wal.log            write-ahead log since then (file engine)
+│       └── rocksdb/           the RocksDB database (rocksdb engine)
+└── snapshots/                 snapshot archives (unless --snapshot-dir)
+```
+
+Only one process can open a data directory: the `LOCK` file is locked while it is open, and a second server fails with `database at … is already open in another process`.
+
+## The file engine
+
+### The write-ahead log
+
+Every write (an upsert, a delete, a metadata update) is appended to `wal.log` **before** it changes anything in memory or is acknowledged. Each record is a frame: its length, a CRC-32 of the payload, and the payload. One request is one record, so a batch is recovered whole or not at all.
+
+Without `--fsync`, the record is written to the operating system before the request returns. It survives the server crashing or being killed, but data the OS has not flushed yet can be lost if the machine loses power. With `--fsync`, each record is synced to disk before the request returns: safe against power loss, and slower.
+
+### Checkpoints
+
+A checkpoint writes the whole collection, the index included, to `state.bin`, then empties the log. It happens:
+
+- when the log reaches 64 MiB;
+- on `POST /collections/{name}/flush` (or `flush()` in a client) and after `POST /collections/{name}/compact`;
+- when a collection is opened and had log records to replay;
+- for every collection when the server shuts down cleanly.
+
+The checkpoint is written to a temporary file, synced, renamed over `state.bin`, and the directory is synced; only then is the log truncated. A crash at any point leaves either the old checkpoint and its log, or the new checkpoint.
+
+`state.bin` ends with a CRC-32 of its contents, and records its format version and the collection's dimension. Because it stores the serialised HNSW graph, a restart does not rebuild the index.
+
+### When something is wrong
+
+On open, Quiver reads the log frame by frame:
+
+- **A torn final write** (a partial or bad frame at the very end, or a tail of zeros a crash can leave behind) is cut off, with a warning, and the collection opens:
+
+  ```text
+  WARN quiver_storage::wal: truncating torn write-ahead log tail path=…/collections/books/wal.log discarded_bytes=6
+  ```
+
+- **A bad frame with records after it** is corruption, not a torn write. Quiver refuses to open rather than silently discard the later records, and the server exits:
+
+  ```text
+  ERROR quiver: corrupt data: write-ahead log …/collections/books/wal.log is corrupt at byte 0 with 200 bytes of later records; move it aside to discard them and open anyway
+  ```
+
+  Move `wal.log` aside to start from the last checkpoint, or restore the collection from a [snapshot](/docs/snapshots/).
+
+- **A `state.bin` that fails its checksum**, or has the wrong format or dimension, also stops the server with a `corrupt data` error naming the file.
+
+A single write may not exceed 1 GiB once encoded (`write batch too large … split it up`); with the 64 MiB request limit, a REST or gRPC request never comes close.
+
+## The RocksDB engine
+
+Build the server with `--features rocksdb` (it needs clang and libclang; see [installation](/docs/installation/#the-rocksdb-engine)) and start it with `--storage rocksdb`. The Docker image includes it.
+
+Each collection gets its own RocksDB database in `collections/<name>/rocksdb`, with one key per point holding its vector and metadata, compressed with LZ4. Every write is a RocksDB write batch, synced when `--fsync` is on. RocksDB keeps no copy of the index, so opening a collection reads every point and rebuilds the index; a flush flushes RocksDB's memtables.
+
+A collection created with the RocksDB engine cannot be opened by a build without the feature: the server stops with an `unsupported` error naming the collection.
+
+## The memory engine
+
+`--storage memory` creates collections that never touch the disk, while the data directory still holds the lock file and snapshots; snapshots are the way to keep such a collection. `--in-memory` goes further and uses no directory at all, and no snapshots unless `--snapshot-dir` is given. Either way the data is gone when the server stops.
+
+## Memory use
+
+Whatever the engine, every collection lives in memory:
+
+- each vector takes `4 × dimension` bytes (32-bit floats), plus its id and its metadata;
+- the HNSW index adds each node's neighbour lists: up to `2 × m` links on the bottom layer and `m` on each layer above, at 4 bytes per link; the flat index adds nothing;
+- deleted points keep their slot until [compaction](/docs/collections/#deleting-and-compaction).
+
+A million 768-dimensional vectors are about 3 GB of floats before ids, metadata and the index. Size the machine for the collections you keep open: they are all loaded at startup.

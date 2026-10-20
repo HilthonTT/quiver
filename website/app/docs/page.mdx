@@ -1,0 +1,40 @@
+export const metadata = { title: "Introduction" };
+
+# Introduction
+
+Quiver is a vector database written from scratch in Rust. It stores vectors with JSON metadata in named collections and finds their nearest neighbours, with metadata filters applied while it searches. Run it as a server with REST and gRPC APIs, or link the `quiver-db` crate and keep everything in your own process.
+
+<Callout type="warn">
+Quiver is pre-1.0. Formats and APIs can still change between releases; the [changelog](https://github.com/HilthonTT/quiver/blob/main/CHANGELOG.md) calls out breaking changes. Only the latest release and `main` get security fixes.
+</Callout>
+
+## What you get
+
+- **Three indexes** — HNSW for approximate search over large collections, exact flat search, and an exact k-d tree for low dimensions. See [indexes & metrics](/docs/indexes/).
+- **Five metrics** — cosine, Euclidean, dot product, Manhattan and Hamming. Distances are always lower = closer.
+- **Filtered search** — MongoDB-style filters on metadata (`$gte`, `$in`, `$or`, nested fields, …), evaluated during the index traversal rather than after it. See [filtering](/docs/filtering/).
+- **Data operations** — update metadata in place (merge or replace), count and delete by filter, search by an existing point, recommend from positive and negative examples, and distance thresholds.
+- **Storage** — a checksummed write-ahead log with checkpoints by default, RocksDB behind a cargo feature, or memory only. See [storage & durability](/docs/storage/).
+- **Snapshots** — SHA-256-verified `.tar.gz` backups of a collection, with retention, a scheduler, download, upload and restore. See [snapshots & backups](/docs/snapshots/).
+- **Access** — REST on port 6900 and gRPC on 6901, with read-only and read-write API keys. Clients for [Python](/docs/python/) and [Rust](/docs/rust-client/), a [terminal UI](/docs/tui/), or the crate [embedded](/docs/embedding/) in-process.
+
+## How it is built
+
+Quiver is a Cargo workspace of ten crates, layered so each one only depends on the ones below it:
+
+| Crate | What it does |
+| --- | --- |
+| `quiver-types` | points, metrics, collection configs, filters, errors and API keys |
+| `quiver-storage` | the in-memory vector store and the storage engines: file (WAL + checkpoints), RocksDB, memory |
+| `quiver-index` | the flat, HNSW and k-d tree indexes |
+| `quiver-snapshot` | snapshot archives and the snapshot directory |
+| `quiver-db` | the embeddable database: collections, search, snapshots, the scheduler |
+| `quiver-http` | the REST API, on [axum](https://github.com/tokio-rs/axum) |
+| `quiver-grpc` | the gRPC API, on [tonic](https://github.com/hyperium/tonic) |
+| `quiver-server` | the `quiver` server binary |
+| `quiver-client` | an async Rust client for the REST API |
+| `quiver-tui` | the `quiver-tui` terminal UI, on [ratatui](https://ratatui.rs) |
+
+The Python client lives in `clients/python`. [Architecture](/docs/architecture/) follows a request through the layers.
+
+Ready? Head to [installation](/docs/installation/).

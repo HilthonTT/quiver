@@ -1,0 +1,108 @@
+export const metadata = { title: "gRPC API" };
+
+# gRPC API
+
+The server also speaks gRPC, on port 6901 by default: the `quiver.v1.Quiver` service, defined in [`crates/grpc/proto/quiver.proto`](https://github.com/HilthonTT/quiver/blob/main/crates/grpc/proto/quiver.proto). It mirrors the REST API. Metadata and filters travel as JSON strings, so any nested document round-trips exactly. The proto is compiled with protox at build time, so building Quiver needs no `protoc`.
+
+## Calling it
+
+The server does not offer gRPC reflection, so point your tool at the proto file. With [grpcurl](https://github.com/fullstorydev/grpcurl), from the repository root:
+
+```bash
+grpcurl -plaintext -import-path crates/grpc/proto -proto quiver.proto \
+  -d '{"name": "places", "dimension": 2, "metric": "METRIC_EUCLIDEAN"}' \
+  localhost:6901 quiver.v1.Quiver/CreateCollection
+```
+
+```json
+{
+  "name": "places",
+  "dimension": 2,
+  "metric": "METRIC_EUCLIDEAN",
+  "index": {
+    "hnsw": {
+      "m": 16,
+      "efConstruction": 128,
+      "efSearch": 64,
+      "seed": "6512614579346866177"
+    }
+  }
+}
+```
+
+```bash
+grpcurl -plaintext -import-path crates/grpc/proto -proto quiver.proto \
+  -d '{"collection": "places", "points": [{"id": "brussels", "vector": [4.35, 50.85], "metadata_json": "{\"country\": \"BE\"}"}]}' \
+  localhost:6901 quiver.v1.Quiver/Upsert
+grpcurl -plaintext -import-path crates/grpc/proto -proto quiver.proto \
+  -d '{"collection": "places", "vector": [5.5, 50.5], "k": 1, "filter_json": "{\"country\": \"BE\"}"}' \
+  localhost:6901 quiver.v1.Quiver/Search
+```
+
+```text
+{
+  "upserted": "1",
+  "ids": [
+    "brussels"
+  ]
+}
+{
+  "hits": [
+    {
+      "id": "brussels",
+      "distance": 1.2020812,
+      "metadataJson": "{\"country\":\"BE\"}"
+    }
+  ]
+}
+```
+
+grpcurl prints proto3 JSON: 64-bit integers as strings, field names in camelCase, and fields at their default value (such as a `count` of 0) left out. To generate a client, compile the same proto with your language's gRPC tooling.
+
+## Authentication
+
+Send the key as `authorization: Bearer <key>` or `x-api-key: <key>` metadata:
+
+```bash
+grpcurl -plaintext -import-path crates/grpc/proto -proto quiver.proto \
+  -H "authorization: Bearer $QUIVER_API_KEY" localhost:6901 quiver.v1.Quiver/ListCollections
+```
+
+With keys configured, a call with no key may only use `Health`; any other RPC answers `UNAUTHENTICATED`. A wrong key is rejected with `UNAUTHENTICATED` on every RPC, `Health` included. A read-only key calling a write RPC gets `PERMISSION_DENIED`. With no keys configured, everything is open.
+
+## RPCs
+
+| RPC | Role | Notes |
+| --- | --- | --- |
+| `Health` | public | `{status, version}` |
+| `ListCollections`, `GetCollection` | read | |
+| `CreateCollection` | write | `metric` unset means cosine; `index` unset means HNSW with defaults |
+| `DropCollection`, `Flush` | write | |
+| `Compact` | write | returns the collection's info |
+| `Upsert` | write | an empty `id` gets a generated UUID; returns `upserted` and `ids` |
+| `GetPoints` | read | `ids`, `with_vectors`; missing ids are skipped |
+| `DeletePoints` | write | `ids` or `filter_json`; `{}` is refused |
+| `Scroll` | read | `cursor`, `limit` (0 means 100), `with_vectors`; `next_cursor` unset at the end |
+| `Count` | read | `filter_json`, empty counts all |
+| `UpdateMetadata` | write | `ids` or `filter_json`, `metadata_json` (required; `null` allowed), `mode` |
+| `Search` | read | `vector` or `id`; `k` (0 means 10), `filter_json`, `ef`, `max_distance`, `with_vectors`, `with_metadata` (unset means true) |
+| `SearchBatch` | read | up to 256 `SearchRequest`s, each naming its collection |
+| `Recommend` | read | `positive`, `negative`, and the search options |
+| `CreateSnapshot`, `DeleteSnapshot`, `RestoreSnapshot` | write | `RestoreSnapshot` takes `id`, `collection` (empty: the original) and `replace` |
+| `ListSnapshots` | read | `collection`, empty for all |
+
+Snapshot download and upload, and fetching one snapshot's manifest, are REST only.
+
+## Status codes
+
+| Status | When |
+| --- | --- |
+| `INVALID_ARGUMENT` | invalid input, a bad filter, a dimension mismatch, JSON that does not parse, an unknown metric or metadata mode |
+| `NOT_FOUND` | no such collection, point or snapshot |
+| `ALREADY_EXISTS` | the collection exists |
+| `UNAUTHENTICATED` | a missing or unknown key |
+| `PERMISSION_DENIED` | a read-only key on a write RPC |
+| `UNIMPLEMENTED` | snapshots without a snapshot directory |
+| `INTERNAL` | an I/O or storage failure |
+
+Messages may be up to 64 MiB in either direction, so large upserts fit in one call. The REST [limits](/docs/rest-api/#limits) on `k`, batch size, ids and scroll `limit` apply here too.

@@ -1,0 +1,127 @@
+export const metadata = { title: "Quick start" };
+
+# Quick start
+
+Five minutes from an empty directory to a filtered search: start the server, make a collection, add a few points, and query them over REST and from Python.
+
+## 1. Start the server
+
+```bash
+git clone https://github.com/HilthonTT/quiver && cd quiver
+cargo run --release -p quiver-server        # or: docker compose up -d
+```
+
+It logs where it is listening, then `Quiver ready`:
+
+```text
+INFO quiver_db::db: opened database path=./quiver-data storage=file collections=0
+INFO quiver: REST API listening addr=127.0.0.1:6900
+INFO quiver: gRPC API listening addr=127.0.0.1:6901
+INFO quiver: Quiver ready version="0.1.0" storage=file collections=0 auth="disabled"
+```
+
+With no API keys configured, authentication is off, which is fine on `127.0.0.1`. The examples below leave the key out; add `-H "Authorization: Bearer $KEY"` once you [set one](/docs/security/).
+
+## 2. Create a collection
+
+A collection holds vectors of one dimension, compared with one metric. This one uses the defaults: cosine distance and an HNSW index.
+
+```bash
+curl -X POST localhost:6900/collections -H 'content-type: application/json' \
+  -d '{"name": "books", "dimension": 3}'
+```
+
+```json
+{"name":"books","dimension":3,"metric":"cosine","index":{"type":"hnsw","m":16,"ef_construction":128,"ef_search":64,"seed":6512614579346866177},"count":0,"tombstones":0}
+```
+
+## 3. Add points
+
+A point is an id, a vector and optional JSON metadata. Upserting an id that exists replaces that point.
+
+```bash
+curl -X POST localhost:6900/collections/books/points -H 'content-type: application/json' -d '{
+  "points": [
+    {"id": "dune",       "vector": [0.9, 0.1, 0.0], "metadata": {"genre": "sci-fi",  "year": 1965}},
+    {"id": "foundation", "vector": [0.8, 0.2, 0.1], "metadata": {"genre": "sci-fi",  "year": 1951}},
+    {"id": "hobbit",     "vector": [0.1, 0.9, 0.2], "metadata": {"genre": "fantasy", "year": 1937}},
+    {"id": "emma",       "vector": [0.0, 0.2, 0.9], "metadata": {"genre": "romance", "year": 1815}}
+  ]
+}'
+```
+
+```json
+{"ids":["dune","foundation","hobbit","emma"],"upserted":4}
+```
+
+## 4. Search
+
+Ask for the three points nearest to `[1, 0, 0]`. Results come closest first; a smaller distance means a closer match.
+
+```bash
+curl -X POST localhost:6900/collections/books/search -H 'content-type: application/json' \
+  -d '{"vector": [1.0, 0.0, 0.0], "k": 3}'
+```
+
+```json
+{
+  "results": [
+    {"distance": 0.006116271018981934, "id": "dune", "metadata": {"genre": "sci-fi", "year": 1965}},
+    {"distance": 0.036913156509399414, "id": "foundation", "metadata": {"genre": "sci-fi", "year": 1951}},
+    {"distance": 0.8921672105789185, "id": "hobbit", "metadata": {"genre": "fantasy", "year": 1937}}
+  ]
+}
+```
+
+Add a filter and only matching points are considered. `dune` (1965) drops out, and `emma` takes the third place:
+
+```bash
+curl -X POST localhost:6900/collections/books/search -H 'content-type: application/json' \
+  -d '{"vector": [1.0, 0.0, 0.0], "k": 3, "filter": {"year": {"$lt": 1960}}}'
+```
+
+```json
+{
+  "results": [
+    {"distance": 0.036913156509399414, "id": "foundation", "metadata": {"genre": "sci-fi", "year": 1951}},
+    {"distance": 0.8921672105789185, "id": "hobbit", "metadata": {"genre": "fantasy", "year": 1937}},
+    {"distance": 1.0, "id": "emma", "metadata": {"genre": "romance", "year": 1815}}
+  ]
+}
+```
+
+## 5. From Python
+
+Install the client with `pip install ./clients/python` from the repository, then:
+
+```python
+from quiver import Client
+
+client = Client("http://localhost:6900")
+books = client.get_or_create_collection("books", dimension=3)
+
+for hit in books.search([1.0, 0.0, 0.0], k=2, filter={"genre": "sci-fi"}):
+    print(hit.id, round(hit.distance, 4), hit.metadata)
+```
+
+```text
+dune 0.0061 {'genre': 'sci-fi', 'year': 1965}
+foundation 0.0369 {'genre': 'sci-fi', 'year': 1951}
+```
+
+`get_or_create_collection` returns the existing `books` collection here. The [Python client](/docs/python/) page covers the rest of its API.
+
+## 6. Look around
+
+The terminal UI shows the same collection: open it with <Kbd>Enter</Kbd>, search with <Kbd>/</Kbd>, and press <Kbd>?</Kbd> for every key.
+
+```bash
+cargo run --release -p quiver-tui
+```
+
+## Where next
+
+- [Collections & points](/docs/collections/) — ids, dimensions, metadata and the limits on them.
+- [Indexes & metrics](/docs/indexes/) — when to pick HNSW, flat or the k-d tree.
+- [Filtering](/docs/filtering/) — the whole filter syntax.
+- [Security & API keys](/docs/security/) — before the server leaves `127.0.0.1`.

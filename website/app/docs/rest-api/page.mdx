@@ -1,0 +1,152 @@
+export const metadata = { title: "REST API" };
+
+# REST API
+
+JSON over HTTP, on port 6900 by default. Request bodies must be sent with `content-type: application/json` (except snapshot uploads), and may not contain unknown fields. With API keys configured, every route except `/` and `/health` needs one, in `Authorization: Bearer <key>` or `x-api-key: <key>`: read routes take any key, write routes a read-write key. See [security](/docs/security/).
+
+## Server
+
+| Method and route | Role | Answers |
+| --- | --- | --- |
+| `GET /` | public | `{"name", "version", "docs"}` |
+| `GET /health` | public | `{"status": "ok", "version"}` |
+| `GET /info` | read | `{"version", "storage", "snapshots_enabled", "collections", "points"}` |
+
+```bash
+curl localhost:6900/health
+curl localhost:6900/info
+```
+
+```text
+{"status":"ok","version":"0.1.0"}
+{"collections":0,"points":0,"snapshots_enabled":true,"storage":"file","version":"0.1.0"}
+```
+
+## Collections
+
+| Method and route | Role | Body | Answers |
+| --- | --- | --- | --- |
+| `GET /collections` | read | | `{"collections": [CollectionInfo]}` |
+| `POST /collections` | write | `{"name", "dimension", "metric"?, "index"?}` | `201` CollectionInfo |
+| `GET /collections/{name}` | read | | CollectionInfo |
+| `DELETE /collections/{name}` | write | | `204` |
+| `POST /collections/{name}/flush` | write | | `204`: checkpoint now |
+| `POST /collections/{name}/compact` | write | | CollectionInfo, after reclaiming deleted slots |
+
+A **CollectionInfo** is `{"name", "dimension", "metric", "index", "count", "tombstones"}`, where `index` is `{"type": "hnsw", "m", "ef_construction", "ef_search", "seed"}`, `{"type": "flat"}` or `{"type": "kd_tree", "balance_factor"}`. See [collections & points](/docs/collections/) and [indexes & metrics](/docs/indexes/).
+
+## Points
+
+| Method and route | Role | Body or query | Answers |
+| --- | --- | --- | --- |
+| `POST /collections/{name}/points` | write | `{"points": [{"id"?, "vector", "metadata"?}]}` | `{"upserted", "ids"}` |
+| `GET /collections/{name}/points` | read | `?cursor=&limit=100&with_vectors=false` | `{"points", "next_cursor"}` |
+| `GET /collections/{name}/points/{id}` | read | `?with_vectors=true` | a point |
+| `POST /collections/{name}/points/lookup` | read | `{"ids", "with_vectors"?: true}` | `{"points"}`: the ids that exist, in request order |
+| `POST /collections/{name}/points/count` | read | `{"filter"?}` | `{"count"}` |
+| `POST /collections/{name}/points/metadata` | write | `{"ids"` or `"filter", "metadata", "mode"?: "merge"}` | `{"updated"}` |
+| `POST /collections/{name}/points/delete` | write | `{"ids"` or `"filter"}` | `{"deleted"}` |
+| `DELETE /collections/{name}/points/{id}` | write | | `204`, or `404 point_not_found` |
+
+A **point** is `{"id", "vector", "metadata"}`; `metadata` is left out when the point has none, and `vector` when `with_vectors` is false. Lookups and deletes take at most 10,000 ids, and `limit` is at most 10,000. See [data operations](/docs/data-operations/) and [listing points](/docs/listing-points/).
+
+```bash
+curl -X POST localhost:6900/collections -H 'content-type: application/json' \
+  -d '{"name": "places", "dimension": 2, "metric": "euclidean"}' > /dev/null
+curl -X POST localhost:6900/collections/places/points -H 'content-type: application/json' \
+  -d '{"points": [{"id": "brussels", "vector": [4.35, 50.85]}, {"id": "lille", "vector": [3.06, 50.63]}]}'
+curl -X POST localhost:6900/collections/places/points/lookup -H 'content-type: application/json' \
+  -d '{"ids": ["lille", "paris", "brussels"], "with_vectors": false}'
+```
+
+```text
+{"ids":["brussels","lille"],"upserted":2}
+{"points":[{"id":"lille"},{"id":"brussels"}]}
+```
+
+## Search
+
+| Method and route | Role | Body | Answers |
+| --- | --- | --- | --- |
+| `POST /collections/{name}/search` | read | `{"vector"` or `"id", "k"?: 10, "filter"?, "ef"?, "max_distance"?, "with_vectors"?: false, "with_metadata"?: true}` | `{"results": [hit]}` |
+| `POST /collections/{name}/search/batch` | read | `{"searches": [search body]}`, at most 256 | `{"results": [[hit]]}` |
+| `POST /collections/{name}/recommend` | read | `{"positive", "negative"?, "k"?, "filter"?, "ef"?, "max_distance"?, "with_vectors"?, "with_metadata"?}` | `{"results": [hit]}` |
+
+A **hit** is `{"id", "distance", "metadata"?, "vector"?}`, closest first. See [searching](/docs/searching/).
+
+```bash
+curl -X POST localhost:6900/collections/places/search -H 'content-type: application/json' \
+  -d '{"vector": [5.5, 50.5], "k": 1}'
+```
+
+```json
+{"results":[{"distance":1.2020812034606934,"id":"brussels"}]}
+```
+
+## Snapshots
+
+| Method and route | Role | Body or query | Answers |
+| --- | --- | --- | --- |
+| `POST /collections/{name}/snapshots` | write | | `201` SnapshotInfo |
+| `GET /collections/{name}/snapshots` | read | | `{"snapshots": [SnapshotInfo]}`, oldest first |
+| `GET /snapshots` | read | `?collection=` | `{"snapshots": [SnapshotInfo]}` |
+| `GET /snapshots/{id}` | read | | SnapshotInfo |
+| `GET /snapshots/{id}/download` | read | | the archive, `application/gzip` |
+| `POST /snapshots` | write | the raw archive, up to 16 GiB | `201` SnapshotInfo |
+| `POST /snapshots/{id}/restore` | write | `{"collection"?, "replace"?: false}`, or empty | CollectionInfo |
+| `DELETE /snapshots/{id}` | write | | `204` |
+
+A **SnapshotInfo** is `{"format_version", "id", "collection", "created_at_ms", "quiver_version", "config": {"dimension", "metric", "index"}, "points", "data_bytes", "data_sha256", "archive_bytes"}`. See [snapshots & backups](/docs/snapshots/).
+
+## Errors
+
+Every error has the same shape:
+
+```json
+{"error": {"code": "not_found", "message": "collection `nope` not found"}}
+```
+
+| Status | Code | Meaning |
+| --- | --- | --- |
+| 400 | `invalid_argument` | a value is out of range or the request is inconsistent: a bad name or dimension, `k` out of range, both or neither of `vector`/`id` or `ids`/`filter`, an empty delete filter, a point that fails validation, a bad query string |
+| 400 | `invalid_body` | malformed JSON, a wrongly typed or unknown field, a missing required field |
+| 400 | `invalid_filter` | the filter does not parse |
+| 400 | `dimension_mismatch` | a query vector of the wrong length |
+| 400 | `invalid_snapshot` | an uploaded archive that cannot be read or fails its checks |
+| 401 | `unauthorized` | no API key, or an unknown one |
+| 403 | `forbidden` | a read-only key on a write route |
+| 404 | `not_found` | no such collection, snapshot or route |
+| 404 | `point_not_found` | no such point (a get, a single delete, search by id, a recommend example) |
+| 409 | `already_exists` | the collection exists (create, or restore without `replace`) |
+| 413 | `invalid_body` | a JSON body over `--max-body-mb` |
+| 413 | `payload_too_large` | a snapshot upload over 16 GiB |
+| 415 | `invalid_body` | a JSON route without `content-type: application/json` |
+| 500 | `internal` | an I/O or storage failure; the server logs it |
+| 501 | `unsupported` | snapshots on a server without a snapshot directory |
+
+A route that exists but not for that method answers `405` with an empty body.
+
+```bash
+curl localhost:6900/collections/nope
+curl -X POST localhost:6900/collections/places/search -H 'content-type: application/json' -d '{"vector": [1.0]}'
+curl -X POST localhost:6900/collections/places/search -H 'content-type: application/json' -d '{"vector": [1.0, 2.0], "top_k": 3}'
+```
+
+```text
+{"error":{"code":"not_found","message":"collection `nope` not found"}}
+{"error":{"code":"dimension_mismatch","message":"dimension mismatch: expected 2, got 1"}}
+{"error":{"code":"invalid_body","message":"Failed to deserialize the JSON body into the target type: top_k: unknown field `top_k`, expected one of `vector`, `id`, `k`, `filter`, `ef`, `max_distance`, `with_vectors`, `with_metadata` at line 1 column 30"}}
+```
+
+## Limits
+
+| Limit | Value |
+| --- | --- |
+| JSON request body | 64 MiB, `--max-body-mb` |
+| Snapshot upload | 16 GiB |
+| `k` | 1–10,000 |
+| Searches per batch | 256 |
+| Ids per lookup or delete, examples per recommend | 10,000 |
+| `limit` when listing | 10,000 |
+
+`--cors` allows cross-origin requests from any origin; leave it off unless a browser application on another origin needs the API.

@@ -1,0 +1,133 @@
+export const metadata = { title: "Indexes & metrics" };
+
+# Indexes & metrics
+
+Each collection has one index and one metric, chosen when it is created. The index decides how a search finds candidates; the metric decides what "near" means.
+
+## Metrics
+
+Distances are always **lower = closer**, whatever the metric, so results always sort the same way.
+
+| Metric | Distance | Notes |
+| --- | --- | --- |
+| `cosine` (default) | `1 − cos(a, b)` | 0 for the same direction, 2 for opposite ones. Vectors are normalised when stored, and zero vectors are rejected. |
+| `euclidean` | L2: `‖a − b‖` | |
+| `dot_product` (alias `dot`) | `−(a · b)` | Negative for similar vectors. Vectors are not normalised. |
+| `manhattan` (alias `l1`) | L1: `Σ |aᵢ − bᵢ|` | |
+| `hamming` | the number of components that differ | For binary or categorical vectors. |
+
+The same point and query under each metric:
+
+```bash
+for m in cosine euclidean dot_product manhattan hamming; do
+  curl -s -X POST localhost:6900/collections -H 'content-type: application/json' \
+    -d "{\"name\": \"m-$m\", \"dimension\": 2, \"metric\": \"$m\", \"index\": {\"type\": \"flat\"}}" > /dev/null
+  curl -s -X POST localhost:6900/collections/m-$m/points -H 'content-type: application/json' \
+    -d '{"points": [{"id": "a", "vector": [1, 0]}]}' > /dev/null
+  curl -s -X POST localhost:6900/collections/m-$m/search -H 'content-type: application/json' \
+    -d '{"vector": [3, 4], "k": 1}'; echo
+done
+```
+
+```text
+{"results":[{"distance":0.3999999761581421,"id":"a"}]}
+{"results":[{"distance":4.4721360206604,"id":"a"}]}
+{"results":[{"distance":-3.0,"id":"a"}]}
+{"results":[{"distance":6.0,"id":"a"}]}
+{"results":[{"distance":2.0,"id":"a"}]}
+```
+
+## Indexes
+
+| Index | Search | Best for |
+| --- | --- | --- |
+| `hnsw` (default) | approximate | large, high-dimensional collections |
+| `flat` | exact | small collections, or when recall must be perfect |
+| `kd_tree` | exact | low dimensions, roughly under 20 |
+
+All three apply [filters](/docs/filtering/) while they search, not afterwards: points that fail the filter are skipped as results, so a filtered search returns up to `k` matching points rather than `k` points minus the ones that failed.
+
+### HNSW
+
+A layered proximity graph (Hierarchical Navigable Small World). Searches walk the graph from the top layer down, keeping a beam of the best candidates; a wider beam finds more of the true neighbours and costs more time.
+
+```json
+{"type": "hnsw", "m": 16, "ef_construction": 128, "ef_search": 64}
+```
+
+| Parameter | Default | Range | Effect |
+| --- | --- | --- | --- |
+| `m` | 16 | 2–256 | neighbours per node on the upper layers (layer 0 keeps `2 × m`). Higher: better recall, more memory. Typical: 8–48. |
+| `ef_construction` | 128 | > 0 | beam width while inserting. Higher: a better graph, slower inserts. |
+| `ef_search` | 64 | > 0 | default beam width while searching. |
+| `seed` | `6512614579346866177` | any `u64` | seeds level assignment, so the same inserts build the same graph |
+
+Every search can override the beam with `ef`. The beam is never narrower than `k` and never wider than the collection. Exact indexes ignore `ef`.
+
+```bash
+curl -X POST localhost:6900/collections -H 'content-type: application/json' \
+  -d '{"name": "docs", "dimension": 3, "index": {"type": "hnsw", "m": 32, "ef_search": 128}}'
+```
+
+```json
+{"name":"docs","dimension":3,"metric":"cosine","index":{"type":"hnsw","m":32,"ef_construction":128,"ef_search":128,"seed":6512614579346866177},"count":0,"tombstones":0}
+```
+
+### Flat
+
+```json
+{"type": "flat"}
+```
+
+Compares the query with every point. It has no parameters and no build cost, and its results are exact. Above 16,384 points the scan is split across threads.
+
+### k-d tree
+
+```json
+{"type": "kd_tree", "balance_factor": 3}
+```
+
+A binary space-partitioning tree that prunes branches that cannot hold a closer point, so results are exact. It shines in a few dimensions and degrades towards a flat scan as dimensions grow.
+
+Inserts can unbalance the tree. Once its depth exceeds `balance_factor × log2(n)` (`balance_factor` is 2–64, default 3), it is rebuilt around per-axis medians, at most once every 32 inserts.
+
+<Callout type="warn">
+The k-d tree does not support `dot_product`: inner products give no distance bound to prune the tree with, so creating that combination fails with `invalid_argument`.
+</Callout>
+
+## Persistence
+
+The file engine saves the index with each checkpoint, so a restart loads the HNSW graph instead of rebuilding it. The RocksDB engine stores only the points and rebuilds the index when it opens a collection. Snapshots carry the index too. See [storage & durability](/docs/storage/).
+
+## Benchmark
+
+`make bench` runs `crates/db/examples/benchmark.rs`: it inserts clustered random points into in-memory collections with the Euclidean metric, then runs the same queries against each index and measures recall@10 against the exact (flat) results.
+
+```bash
+cargo run --release -p quiver-db --example benchmark -- 100000 128 1000
+```
+
+Measured on an Intel Core i7-9700K (8 cores, 3.6 GHz) under WSL 2. Queries run one after another on one thread, except the flat index, which splits each scan across all cores above 16,384 points.
+
+**100,000 points, 128 dimensions**, 1,000 queries. HNSW build: 47.5 s (2,106 inserts/s).
+
+| Index | Queries/s | Recall@10 |
+| --- | ---: | ---: |
+| flat (exact) | 441 | 1.0000 |
+| hnsw `ef=16` | 8,861 | 0.6770 |
+| hnsw `ef=32` | 5,805 | 0.8505 |
+| hnsw `ef=64` (default) | 3,637 | 0.9586 |
+| hnsw `ef=128` | 2,633 | 0.9930 |
+| hnsw `ef=256` | 1,764 | 0.9979 |
+
+**100,000 points, 8 dimensions**, 1,000 queries (`-- 100000 8 1000`). HNSW build: 14.2 s (7,020 inserts/s).
+
+| Index | Queries/s | Recall@10 |
+| --- | ---: | ---: |
+| flat (exact) | 1,084 | 1.0000 |
+| kd_tree | 9,411 | 1.0000 |
+| hnsw `ef=16` | 35,116 | 0.9967 |
+| hnsw `ef=64` (default) | 13,544 | 0.9987 |
+| hnsw `ef=256` | 4,610 | 0.9987 |
+
+The k-d tree only runs at 32 dimensions or fewer. Your numbers will differ with hardware and data; the benchmark's `uniform` argument draws points from the unit hypercube instead, a much harder case for every graph index.

@@ -1,0 +1,83 @@
+export const metadata = { title: "Terminal UI" };
+
+# Terminal UI
+
+`quiver-tui` browses and manages a running server from the terminal: a dashboard of collections, the points in each, insert and search forms, and snapshots. It talks to the REST API through the [Rust client](/docs/rust-client/).
+
+```bash
+cargo run --release -p quiver-tui                 # against http://localhost:6900
+./target/release/quiver-tui --url http://db.internal:6900 --api-key "$KEY"
+```
+
+The Docker image includes it too: `docker compose exec quiver quiver-tui`.
+
+## Options
+
+| Flag | Environment | Default | Meaning |
+| --- | --- | --- | --- |
+| `--url` | `QUIVER_URL` | `http://localhost:6900` | the server's REST address |
+| `--api-key` | `QUIVER_API_KEY` | none | sent as `Authorization: Bearer <key>` |
+| `--embedding-url` | `QUIVER_EMBEDDING_URL` | none | an OpenAI-compatible embeddings endpoint; enables text input |
+| `--embedding-model` | `QUIVER_EMBEDDING_MODEL` | none | the model name to send |
+| `--embedding-api-key` | `QUIVER_EMBEDDING_API_KEY` | none | a bearer token for the embeddings endpoint |
+
+<Callout>
+Unlike the server, `quiver-tui` does not read a `.env` file. Export the variables, or pass the flags.
+</Callout>
+
+## Screens
+
+- **Dashboard** — the server's address, version, storage engine, whether snapshots are on, and its totals; below, every collection with its dimension, metric, index, points and tombstones.
+- **Collection** — the collection's points, 50 to a page, in id order, with a preview of their metadata. After a search, the results with their distances; <Kbd>Esc</Kbd> goes back to the points.
+- **Snapshots** — every snapshot, with its collection, point count, creation time and size.
+
+<Kbd>Enter</Kbd> on a point or a result opens its vector and metadata. Destructive actions (dropping a collection, deleting a point or a snapshot) ask for <Kbd>y</Kbd> first.
+
+## Key bindings
+
+<Kbd>?</Kbd> shows them all.
+
+| Where | Key | Does |
+| --- | --- | --- |
+| Anywhere | <Kbd>?</Kbd> | help |
+| | <Kbd>r</Kbd> | refresh |
+| | <Kbd>q</Kbd> / <Kbd>Ctrl</Kbd>+<Kbd>C</Kbd> | quit |
+| | <Kbd>Esc</Kbd> | back, or close a dialog (quits from the dashboard) |
+| Dashboard | <Kbd>↑</Kbd> <Kbd>↓</Kbd> / <Kbd>k</Kbd> <Kbd>j</Kbd> | select a collection |
+| | <Kbd>Enter</Kbd> | open it |
+| | <Kbd>n</Kbd> | new collection |
+| | <Kbd>d</Kbd> | drop the selected collection |
+| | <Kbd>s</Kbd> | snapshots |
+| Collection | <Kbd>PgDn</Kbd> / <Kbd>→</Kbd>, <Kbd>PgUp</Kbd> / <Kbd>←</Kbd> | next / previous page |
+| | <Kbd>Enter</Kbd> | point details |
+| | <Kbd>i</Kbd> | insert a point |
+| | <Kbd>/</Kbd> | search |
+| | <Kbd>x</Kbd> | delete the selected point |
+| | <Kbd>S</Kbd> | snapshot this collection |
+| Snapshots | <Kbd>c</Kbd> | snapshot the collection selected on the dashboard |
+| | <Kbd>R</Kbd> | restore the selected snapshot |
+| | <Kbd>D</Kbd> | delete it |
+| Forms | <Kbd>Tab</Kbd> / <Kbd>↓</Kbd>, <Kbd>Shift</Kbd>+<Kbd>Tab</Kbd> / <Kbd>↑</Kbd> | next / previous field |
+| | <Kbd>←</Kbd> <Kbd>→</Kbd> / <Kbd>Space</Kbd> | change a choice; <Kbd>Space</Kbd> flips a toggle |
+| | <Kbd>Ctrl</Kbd>+<Kbd>T</Kbd> | switch between vector and text input |
+| | <Kbd>Enter</Kbd> / <Kbd>Esc</Kbd> | submit / cancel |
+
+## Forms
+
+- **New collection** — name, dimension, metric and index (`hnsw`, `flat` or `kd_tree`, with default parameters).
+- **Insert** — an id (blank for a generated UUID), the vector as comma-separated numbers or text to embed, and metadata as a JSON object.
+- **Search** — the query, `k` (default 10) and an optional JSON [filter](/docs/filtering/).
+- **Restore** — a new name (blank for the original) and whether to replace an existing collection.
+
+Invalid input, such as a non-number in a vector or metadata that is not a JSON object, is reported in the form before anything is sent; server errors are shown in the status line.
+
+## Text embeddings
+
+With `--embedding-url`, the insert and search forms also accept text: <Kbd>Ctrl</Kbd>+<Kbd>T</Kbd> switches the input to text, and the TUI turns it into a vector with the endpoint before inserting or searching. It sends `{"input": "<text>", "model": "<model>"}` and reads `data[0].embedding` from the answer, the OpenAI embeddings format, so OpenAI, Ollama and other compatible servers work. With [Ollama](https://ollama.com):
+
+```bash
+ollama pull nomic-embed-text
+quiver-tui --embedding-url http://localhost:11434/v1/embeddings --embedding-model nomic-embed-text
+```
+
+The collection's dimension must match the model's: `nomic-embed-text` returns 768 numbers, so create the collection with dimension 768. Without `--embedding-url`, <Kbd>Ctrl</Kbd>+<Kbd>T</Kbd> only explains how to enable it.

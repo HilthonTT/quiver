@@ -1,0 +1,170 @@
+export const metadata = { title: "Filtering" };
+
+# Filtering
+
+Filters select points by their metadata, in a MongoDB-style JSON syntax. The same filter works in a search, a recommendation, a count, a delete and a metadata update, over REST, gRPC and every client. During a search the index applies the filter as it goes, so you get up to `k` matching points.
+
+## A collection to filter
+
+The examples on this page use four films and a helper that lists which ones a filter matches:
+
+```python
+from quiver import Client, Flat
+
+client = Client("http://localhost:6900")
+films = client.create_collection("films", dimension=2, metric="euclidean", index=Flat())
+films.upsert([
+    ("alien", [0.0, 1.0], {"genre": "sci-fi", "year": 1979, "rating": 8.5,
+                           "tags": ["classic", "horror"], "director": {"country": "UK"}}),
+    ("arrival", [1.0, 0.0], {"genre": "sci-fi", "year": 2016, "rating": 7.9,
+                             "tags": ["drama"], "director": {"country": "CA"}}),
+    ("amelie", [1.0, 1.0], {"genre": "romance", "year": 2001, "award": "César",
+                            "tags": ["classic"], "director": {"country": "FR"}}),
+    ("heat", [2.0, 2.0], {"genre": "crime", "year": 1995, "rating": 8.3}),
+])
+
+def matching(filter):
+    """Ids of every film that matches `filter`, alphabetically."""
+    return sorted(hit.id for hit in films.search([0.0, 0.0], k=10, filter=filter))
+```
+
+Over REST, the same filter goes in the request body's `filter` field:
+
+```bash
+curl -X POST localhost:6900/collections/films/points/count -H 'content-type: application/json' \
+  -d '{"filter": {"genre": "sci-fi", "year": {"$gt": 2000}}}'
+```
+
+```json
+{"count":1}
+```
+
+## Equality and comparison
+
+A bare value means equality. An object whose keys all start with `$` is a set of operators, and all of them must hold. Several fields in one filter must all match.
+
+```python
+print(matching({"genre": "sci-fi"}))
+print(matching({"year": {"$gte": 1990, "$lt": 2010}}))
+print(matching({"genre": {"$ne": "sci-fi"}, "year": {"$gt": 2000}}))
+print(matching({"rating": {"$lt": 8}}))
+```
+
+```text
+['alien', 'arrival']
+['amelie', 'heat']
+['amelie']
+['arrival']
+```
+
+| Operator | Matches when the field | Argument |
+| --- | --- | --- |
+| `$eq` | equals the value (same as a bare value) | any JSON |
+| `$ne` | does not equal it, **or is missing** | any JSON |
+| `$gt`, `$gte`, `$lt`, `$lte` | is greater / greater or equal / less / less or equal | a number or a string |
+| `$in` | equals any of the values | an array |
+| `$nin` | equals none of them, **or is missing** | an array |
+| `$exists` | is present (`true`) or absent (`false`) | a boolean |
+
+```python
+print(matching({"genre": {"$in": ["crime", "romance"]}}))
+print(matching({"genre": {"$nin": ["sci-fi"]}}))
+print(matching({"award": {"$exists": True}}))
+print(matching({"rating": {"$exists": False}}))
+```
+
+```text
+['amelie', 'heat']
+['amelie', 'heat']
+['amelie']
+['amelie']
+```
+
+## Logic
+
+`$and` and `$or` take a non-empty array of filters; `$not` takes one filter.
+
+```python
+print(matching({"$or": [{"genre": "crime"}, {"rating": {"$gt": 8.4}}]}))
+print(matching({"$not": {"genre": "sci-fi"}}))
+print(matching({"$and": [{"tags": "classic"}, {"year": {"$lt": 2000}}]}))
+```
+
+```text
+['alien', 'heat']
+['amelie', 'heat']
+['alien']
+```
+
+## Nested fields and arrays
+
+A dotted name walks into nested objects: `director.country` is the `country` key of the `director` object.
+
+When the field holds an **array**, a condition matches if the whole array satisfies it or **any element** does. So `{"tags": "classic"}` matches every film tagged `classic`, while an array value asks for that exact array:
+
+```python
+print(matching({"director.country": "UK"}))
+print(matching({"tags": "classic"}))
+print(matching({"tags": ["classic"]}))
+```
+
+```text
+['alien']
+['alien', 'amelie']
+['amelie']
+```
+
+`$ne` and `$nin` are the negations: on an array they match only when no element (and not the array itself) equals the value.
+
+## Types and numbers
+
+- Range operators compare numbers with numbers and strings with strings (byte-wise, so `"sci-fi" > "r"`). A number never compares with a string, so the condition fails.
+- Integers compare exactly, even beyond 2⁵³; floating point is used only when either side is a float. `2016` and `2016.0` are equal.
+- Nested arrays and objects compare by value with the same number rules.
+
+```python
+print(matching({"genre": {"$gt": "r"}}))
+print(matching({"year": {"$gt": "2000"}}))
+print(matching({"year": 2016.0}))
+```
+
+```text
+['alien', 'amelie', 'arrival']
+[]
+['arrival']
+```
+
+Exact integers matter for ids stored in metadata. 9007199254740992 and 9007199254740993 are the same double, but not the same filter value:
+
+```python
+ids = client.create_collection("ids", dimension=1, metric="euclidean")
+ids.upsert([("p", [1.0], {"user": 9007199254740993})])
+print(ids.count({"user": 9007199254740993}), ids.count({"user": 9007199254740992}))
+```
+
+```text
+1 0
+```
+
+## Missing fields, empty and invalid filters
+
+- A missing field fails every condition except `$ne`, `$nin` and `{"$exists": false}`.
+- `{}` matches every point; a JSON `null` filter means no filter. A delete refuses `{}` (see [data operations](/docs/data-operations/)).
+- A filter must be a JSON object. Unknown operators, a wrongly typed argument, an empty `$and`/`$or` or an empty field name fail with `400 invalid_filter`:
+
+```bash
+curl -X POST localhost:6900/collections/films/points/count -H 'content-type: application/json' \
+  -d '{"filter": {"year": {"$between": [1990, 2000]}}}'
+```
+
+```json
+{"error":{"code":"invalid_filter","message":"invalid filter: unknown operator `$between`"}}
+```
+
+```python
+print(matching({}))
+```
+
+```text
+['alien', 'amelie', 'arrival', 'heat']
+```

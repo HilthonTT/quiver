@@ -1,0 +1,120 @@
+export const metadata = { title: "Collections & points" };
+
+# Collections & points
+
+Everything in Quiver lives in a **collection**: a named set of points that share a vector dimension, a distance metric and an index. A **point** is an id, a vector and optional JSON metadata.
+
+## Collections
+
+Create one with a name and a dimension. The metric defaults to `cosine` and the index to HNSW; both are covered in [indexes & metrics](/docs/indexes/).
+
+```bash
+curl -X POST localhost:6900/collections -H 'content-type: application/json' \
+  -d '{"name": "articles", "dimension": 4, "metric": "euclidean", "index": {"type": "flat"}}'
+```
+
+```json
+{"name":"articles","dimension":4,"metric":"euclidean","index":{"type":"flat"},"count":0,"tombstones":0}
+```
+
+| Setting | Rule |
+| --- | --- |
+| `name` | 1–64 characters from `[A-Za-z0-9_-]`, not starting with `-` |
+| `dimension` | 1 to 65,536 |
+| `metric` | `cosine` (default), `euclidean`, `dot_product` (or `dot`), `manhattan` (or `l1`), `hamming` |
+| `index` | `{"type": "hnsw"}` (default), `{"type": "flat"}` or `{"type": "kd_tree"}`, with optional parameters |
+
+The configuration is fixed once the collection exists. Creating a name that is taken answers `409 already_exists`; the Python and Rust `get_or_create_collection` return the existing collection instead. In the embedded crate, `get_or_create_collection` with a different configuration is an error.
+
+`count` is the number of live points. `tombstones` counts deleted points whose slots have not been reclaimed yet; see [compaction](#deleting-and-compaction).
+
+## Points
+
+```bash
+curl -X POST localhost:6900/collections/articles/points -H 'content-type: application/json' -d '{
+  "points": [
+    {"id": "intro", "vector": [0.1, 0.2, 0.3, 0.4], "metadata": {"lang": "en", "tags": ["guide"]}},
+    {"vector": [0.4, 0.3, 0.2, 0.1], "metadata": {"lang": "fr"}}
+  ]
+}'
+```
+
+```json
+{"ids":["intro","3068766d-961b-4c37-9155-02c829012e5e"],"upserted":2}
+```
+
+**Ids** are strings of 1 to 512 bytes. Leave the id out and the server generates a UUID v4 (yours will differ from the one above); the response lists every id in request order, generated ones included.
+
+**Upsert** inserts new ids and replaces existing ones: the whole point, vector and metadata both. To change only the metadata, use a [metadata update](/docs/data-operations/). A batch is validated before anything is written, so one bad point rejects the whole request.
+
+**Metadata** is any JSON value, usually an object. Filters look inside objects, so use one if you want to filter. `null` metadata is the same as none. It may nest at most **64 levels** deep.
+
+Fetch a point by id; `with_vectors=false` leaves the vector out:
+
+```bash
+curl localhost:6900/collections/articles/points/intro
+```
+
+```json
+{"id":"intro","metadata":{"lang":"en","tags":["guide"]},"vector":[0.10000000149011612,0.20000000298023224,0.30000001192092896,0.4000000059604645]}
+```
+
+Vectors are stored as 32-bit floats, which is why `0.1` reads back as `0.10000000149011612`.
+
+<Callout>
+The ids `.`, `..`, `lookup`, `delete`, `count` and `metadata` cannot be fetched with `GET /collections/{name}/points/{id}`: URLs collapse the first two, and the others are routes of their own. Fetch them with `POST /collections/{name}/points/lookup`, which the Python and Rust clients do for you.
+</Callout>
+
+## Vector rules
+
+Every vector, stored or used as a query, must:
+
+- have exactly the collection's dimension (`dimension_mismatch` for a query; an upsert names the point in an `invalid_argument` error);
+- contain only finite numbers (JSON cannot carry NaN or infinity anyway, but the embedded API and gRPC check);
+- not be all zeros, with the cosine metric;
+- have a squared length of at most `f32::MAX / 4` (about 8.5 × 10³⁷), so that every distance between two valid vectors stays finite. Larger vectors fail with `vector magnitude too large`.
+
+With the **cosine** metric, vectors are normalised to unit length when they are stored, and queries are normalised too. A point you read back has the normalised vector:
+
+```bash
+curl -X POST localhost:6900/collections -H 'content-type: application/json' \
+  -d '{"name": "unit", "dimension": 2}'
+curl -X POST localhost:6900/collections/unit/points -H 'content-type: application/json' \
+  -d '{"points": [{"id": "a", "vector": [3, 4]}]}'
+curl localhost:6900/collections/unit/points/a
+```
+
+```text
+{"name":"unit","dimension":2,"metric":"cosine","index":{"type":"hnsw","m":16,"ef_construction":128,"ef_search":64,"seed":6512614579346866177},"count":0,"tombstones":0}
+{"ids":["a"],"upserted":1}
+{"id":"a","vector":[0.6000000238418579,0.800000011920929]}
+```
+
+## Deleting and compaction
+
+Delete by id with `DELETE /collections/{name}/points/{id}`, or several at once, or by filter, with `POST /collections/{name}/points/delete` (see [data operations](/docs/data-operations/)). Drop a whole collection, its points and its files, with `DELETE /collections/{name}`.
+
+A delete leaves a tombstone behind. Once a collection has at least 1,024 tombstones and they make up at least 30% of its slots, Quiver compacts it: it copies the live points into a fresh store and rebuilds the index. `POST /collections/{name}/compact` does it now and returns the collection's info.
+
+```bash
+curl -X DELETE localhost:6900/collections/articles/points/intro
+curl -X POST localhost:6900/collections/articles/compact
+```
+
+```json
+{"name":"articles","dimension":4,"metric":"euclidean","index":{"type":"flat"},"count":1,"tombstones":0}
+```
+
+The delete answers `204 No Content` with an empty body, or `404 point_not_found` if there was no such point; the compaction answers the collection's info.
+
+## Limits
+
+| Limit | Value |
+| --- | --- |
+| Collection name | 1–64 characters, `[A-Za-z0-9_-]` |
+| Dimension | 1–65,536 |
+| Point id | 1–512 bytes |
+| Metadata depth | 64 levels |
+| Ids per lookup or delete request | 10,000 |
+| REST request body | 64 MiB (`--max-body-mb`) |
+| gRPC message | 64 MiB |

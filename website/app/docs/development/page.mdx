@@ -1,0 +1,95 @@
+export const metadata = { title: "Development" };
+
+# Development
+
+You need Rust **1.89** or newer, [uv](https://docs.astral.sh/uv/) for the Python client, and optionally clang and libclang to build the RocksDB engine. `make` is a convenience: every target wraps `cargo` or `uv`.
+
+## The checks
+
+One command runs what CI runs:
+
+```bash
+make check
+```
+
+That is `make lint` (`cargo fmt --check` and `cargo clippy --workspace --all-targets -- -D warnings`), `make test` (`cargo test --workspace --all-targets`, then the doc tests), and the Python client's lint and tests. **Clippy runs with `-D warnings`**, and CI builds with `RUSTFLAGS=-D warnings`: the workspace stays warning-free.
+
+```bash
+cargo test -p quiver-db                          # one crate
+cargo test -p quiver-types filter                # one area
+make test-rocksdb                                # storage, db and server tests against RocksDB too
+```
+
+## Make targets
+
+| Target | Runs |
+| --- | --- |
+| `make build` | the server and the TUI, release mode |
+| `make build-rocksdb` | the server with the RocksDB engine |
+| `make test` / `make test-rocksdb` | the Rust tests / again with `--features rocksdb` |
+| `make lint` / `make fmt` | rustfmt and clippy checks / format Rust and Python |
+| `make bench` | the recall and throughput [benchmark](/docs/indexes/#benchmark) |
+| `make run` | the server, with `--data-dir ./quiver-data` |
+| `make tui` | the terminal UI against a local server |
+| `make docker` | `docker build -t quiver:latest .` |
+| `make py-test` / `make py-lint` | the Python unit tests / ruff and mypy |
+| `make check` | lint, test, py-lint and py-test |
+| `make help` | this list |
+
+## The Python client
+
+The client in `clients/python` is managed with uv, and its lock file is committed:
+
+```bash
+cd clients/python
+uv sync                                          # a .venv with the dev dependencies
+uv run pytest                                    # unit tests, no server needed
+uv run ruff check . && uv run ruff format --check . && uv run mypy src tests
+```
+
+`ruff check`, `ruff format` and `mypy --strict` must pass. `_client.py` and `_async_client.py` mirror each other; requests are built and responses parsed in `_protocol.py`, so a new endpoint is usually one function there and a thin method on each client.
+
+The integration tests run when `QUIVER_URL` is set, against a live server, with `QUIVER_API_KEY` if it needs one:
+
+```bash
+cargo run --release -p quiver-server -- --in-memory &
+cd clients/python && QUIVER_URL=http://localhost:6900 uv run pytest
+```
+
+## CI
+
+`.github/workflows/ci.yml` runs on pushes to `main` and on pull requests:
+
+| Job | Runs |
+| --- | --- |
+| Rust lint | `cargo fmt --check`, clippy with `-D warnings`, and `cargo doc` with warnings denied |
+| Rust test | the workspace tests and doc tests, on Ubuntu and macOS |
+| RocksDB storage engine | the storage, db and server tests with `--features rocksdb` |
+| MSRV (1.89) | `cargo check --workspace` on Rust 1.89, the `rust-version` in `Cargo.toml` |
+| Python client | ruff, the format check, mypy and pytest on Python 3.10, 3.11, 3.12 and 3.13 |
+| End-to-end | builds the server, starts it with an API key and scheduled snapshots, and runs the Python integration tests against it |
+| Docker build | builds the image |
+
+`.github/workflows/website.yml` builds this site and deploys it to GitHub Pages. Dependabot keeps cargo, uv, npm, GitHub Actions and Docker dependencies current.
+
+## Conventions
+
+- Open an issue first for anything non-trivial; keep pull requests focused, with tests for behaviour changes.
+- Add a line under **Unreleased** in `CHANGELOG.md` for user-facing changes.
+- Use [Conventional Commits](https://www.conventionalcommits.org/) in titles where you can: `feat:`, `fix:`, `docs:`, `perf:`, `refactor:`, `test:`, `chore:`.
+- Return errors for bad input; panic only on broken internal invariants.
+- Performance changes need numbers: run `make bench` before and after and put both in the pull request.
+- On-disk formats are versioned: the checkpoint (`state.bin`) and snapshot archives carry a format version. Bump it when you change one, and call it out in the changelog.
+
+## This site
+
+The documentation lives in `website/`, a Next.js static site:
+
+```bash
+cd website
+npm install
+npm run dev        # http://localhost:3000
+npm run build      # static site in out/
+```
+
+Pages are MDX files in `app/docs/<page>/page.mdx`, and the sidebar order is in `lib/docs.ts`.
