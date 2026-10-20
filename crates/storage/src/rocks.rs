@@ -4,7 +4,7 @@ use quiver_types::{Error, Result};
 use rocksdb::{DB, Direction, IteratorMode, Options, WriteBatch, WriteOptions};
 
 use crate::codec::{Reader, WriteExt};
-use crate::{Op, Recovered, StorageEngine, StorageKind, StorageOptions, VectorStore, rocks};
+use crate::{Op, Recovered, StorageEngine, StorageKind, StorageOptions, VectorStore};
 
 const PREFIX: &[u8] = b"p/";
 
