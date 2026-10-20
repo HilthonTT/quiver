@@ -13,6 +13,16 @@ categories.workspace = true
 
 [dependencies]
 quiver-types.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+
+[dev-dependencies]
+quiver-db.workspace = true
+quiver-http.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true
