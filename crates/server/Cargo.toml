@@ -12,17 +12,27 @@ keywords.workspace = true
 categories.workspace = true
 
 [[bin]]
-name = "quiver-server"
+name = "quiver"
 path = "src/main.rs"
+
+[features]
+default = []
+## Enables the RocksDB storage engine (`--storage rocksdb`).
+rocksdb = ["quiver-db/rocksdb"]
 
 [dependencies]
 quiver-types.workspace = true
 quiver-db.workspace = true
 quiver-grpc.workspace = true
 quiver-http.workspace = true
-anyhow.workspace = true
-tracing = "0.1.44"
-crc32fast = "1.5.2"
+tokio.workspace = true
+clap.workspace = true
+dotenvy.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
 
 [lints]
 workspace = true
