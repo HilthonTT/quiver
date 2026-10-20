@@ -168,6 +168,18 @@ impl Collection {
         Ok(collection)
     }
 
+    pub(crate) fn snapshot_index(
+        config: &CollectionConfig,
+        store: &VectorStore,
+        index: Option<&[u8]>,
+    ) -> Result<Index> {
+        config.validate()?;
+        match index {
+            Some(bytes) => Index::from_bytes(bytes, &config.index, config.metric, store),
+            None => Ok(Index::build(&config.index, config.metric, store)),
+        }
+    }
+
     pub(crate) fn restore(
         name: &str,
         config: CollectionConfig,
