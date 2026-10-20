@@ -20,7 +20,7 @@ impl SnapshotScheduler {
         let handle = std::thread::Builder::new()
             .name("quiver-snapshots".into())
             .spawn(move || {
-                let mut seen: HashMap<String, u64> = HashMap::new();
+                let mut seen = HashMap::new();
                 loop {
                     {
                         let (lock, cv) = &*signal;
@@ -63,18 +63,18 @@ impl Drop for SnapshotScheduler {
     }
 }
 
-pub(crate) fn snapshot_changed(db: &Database, seen: &mut HashMap<String, u64>) {
+pub(crate) fn snapshot_changed(db: &Database, seen: &mut HashMap<String, (u64, u64)>) {
     let collections = db.collections();
     seen.retain(|name, _| collections.iter().any(|c| c.name() == name));
     for c in collections {
-        let generation = c.generation();
-        if seen.get(c.name()) == Some(&generation) {
+        let version = c.version();
+        if seen.get(c.name()) == Some(&version) {
             continue;
         }
         match c.create_snapshot() {
             Ok(info) => {
                 tracing::debug!(collection = c.name(), snapshot = %info.manifest.id, "scheduled snapshot");
-                seen.insert(c.name().to_owned(), generation);
+                seen.insert(c.name().to_owned(), version);
             }
             Err(e) => {
                 tracing::warn!(collection = c.name(), error = %e, "scheduled snapshot failed")
@@ -107,6 +107,24 @@ mod tests {
         snapshot_changed(&db, &mut seen);
         assert_eq!(db.list_snapshots(Some("a")).unwrap().len(), 2);
         assert_eq!(db.list_snapshots(Some("b")).unwrap().len(), 1);
+    }
+
+    #[test]
+    fn recreated_collection_is_snapshotted() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = Database::open_with(dir.path(), DbOptions::default()).unwrap();
+        let a = db.create_collection("a", CollectionConfig::new(2)).unwrap();
+        a.upsert([Point::new("old", vec![1.0, 0.0])]).unwrap();
+        let mut seen = HashMap::new();
+        snapshot_changed(&db, &mut seen);
+
+        // Same name, same number of changes: a different collection all the same.
+        drop(a);
+        db.drop_collection("a").unwrap();
+        let a = db.create_collection("a", CollectionConfig::new(2)).unwrap();
+        a.upsert([Point::new("new", vec![0.0, 1.0])]).unwrap();
+        snapshot_changed(&db, &mut seen);
+        assert_eq!(db.list_snapshots(Some("a")).unwrap().len(), 2);
     }
 
     #[test]

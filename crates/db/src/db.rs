@@ -250,7 +250,7 @@ impl Database {
         self.snapshots()?.list(collection)
     }
 
-    pub fn delete_snapshot(&self, id: &str) -> Result<SnapshotInfo> {
+    pub fn delete_snapshot(&self, id: &str) -> Result<()> {
         self.snapshots()?.delete(id)
     }
 

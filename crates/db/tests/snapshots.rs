@@ -177,3 +177,27 @@ fn rocksdb_collections_survive_restart() {
     assert_eq!(docs.len(), 199);
     assert_eq!(docs.search(&[150.0, 0.5, -1.0], 1).unwrap()[0].id, "p150");
 }
+
+#[test]
+fn concurrent_snapshots_with_retention_all_succeed() {
+    let dir = tempfile::tempdir().unwrap();
+    let options = DbOptions {
+        snapshot_keep: 1,
+        fsync: false,
+        ..DbOptions::default()
+    };
+    let db = std::sync::Arc::new(Database::open_with(dir.path(), options).unwrap());
+    seed(&db, "docs", 10);
+    let workers: Vec<_> = (0..8)
+        .map(|_| {
+            let db = std::sync::Arc::clone(&db);
+            std::thread::spawn(move || {
+                let c = db.collection("docs").unwrap();
+                (0..20).filter_map(|_| c.create_snapshot().err()).count()
+            })
+        })
+        .collect();
+    let failures: usize = workers.into_iter().map(|w| w.join().unwrap()).sum();
+    assert_eq!(failures, 0);
+    assert_eq!(db.list_snapshots(Some("docs")).unwrap().len(), 1);
+}

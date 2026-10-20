@@ -1,7 +1,8 @@
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use flate2::Compression;
 use flate2::bufread::GzDecoder;
@@ -22,6 +23,11 @@ const EXTENSION: &str = ".tar.gz";
 const MAX_DATA_BYTES: u64 = 64 << 30;
 /// Reserve at most this much for `data.bin` before reading it.
 const PREALLOCATE_MAX: u64 = 64 << 20;
+/// Real manifests are well under a kilobyte.
+const MAX_MANIFEST_BYTES: u64 = 1 << 20;
+/// Partial files untouched for this long are left over from a crash, not
+/// an upload or snapshot still in progress (those keep writing).
+const STALE_PARTIAL_AGE: Duration = Duration::from_secs(60 * 60);
 
 #[derive(Debug)]
 pub struct Loaded {
@@ -41,7 +47,11 @@ fn now_ms() -> u64 {
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
+    hex(&Sha256::digest(bytes))
+}
+
+fn hex(digest: &[u8]) -> String {
+    digest.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 fn append(builder: &mut tar::Builder<impl Write>, name: &str, bytes: &[u8], mtime: u64) -> Result<()> {
@@ -61,13 +71,14 @@ pub fn write_archive(
     config: &CollectionConfig,
     store: &VectorStore,
     index: Option<&[u8]>,
+    created_at_ms: u64,
 ) -> Result<Manifest> {
     let data = state::encode(Vec::new(), store, index)?;
     let manifest = Manifest {
         format_version: FORMAT_VERSION,
         id: id.to_owned(),
         collection: collection.to_owned(),
-        created_at_ms: now_ms(),
+        created_at_ms,
         quiver_version: env!("CARGO_PKG_VERSION").to_owned(),
         config: config.clone(),
         points: store.live(),
@@ -76,28 +87,31 @@ pub fn write_archive(
     };
 
     let tmp = path.with_extension("partial");
-    let file = BufWriter::new(File::create(&tmp)?);
-    let mut builder = tar::Builder::new(GzEncoder::new(file, Compression::fast()));
-    let mtime = manifest.created_at_ms / 1000;
-
-    append(
-        &mut builder,
-        MANIFEST,
-        &serde_json::to_vec_pretty(&manifest)?,
-        mtime,
-    )?;
-
-    append(&mut builder, DATA, &data, mtime)?;
-    let file = builder
-        .into_inner()?
-        .finish()?
-        .into_inner()
-        .map_err(|e| e.into_error())?;
-    file.sync_all()?;
-    drop(file);
-    fs::rename(&tmp, path)?;
-    state::sync_parent(path)?;
-    Ok(manifest)
+    let written = (|| {
+        let file = BufWriter::new(File::create(&tmp)?);
+        let mut builder = tar::Builder::new(GzEncoder::new(file, Compression::fast()));
+        let mtime = manifest.created_at_ms / 1000;
+        append(
+            &mut builder,
+            MANIFEST,
+            &serde_json::to_vec_pretty(&manifest)?,
+            mtime,
+        )?;
+        append(&mut builder, DATA, &data, mtime)?;
+        let file = builder
+            .into_inner()?
+            .finish()?
+            .into_inner()
+            .map_err(|e| e.into_error())?;
+        file.sync_all()?;
+        drop(file);
+        fs::rename(&tmp, path)?;
+        state::sync_parent(path)
+    })();
+    if written.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    written.map(|()| manifest)
 }
 
 fn check_manifest(manifest: &Manifest) -> Result<()> {
@@ -135,10 +149,17 @@ pub fn read_manifest(path: &Path) -> Result<Manifest> {
     Err(Error::Corrupt(format!("{} has no manifest", path.display())))
 }
 
-pub fn read_archive(path: &Path) -> Result<Loaded> {
+/// Walks an archive's entries. The manifest must come first and be valid;
+/// `on_data` then gets a reader over exactly the `data_bytes` it declares.
+/// Checking this before touching the data keeps a hostile archive from
+/// making us decompress or buffer more than its manifest admits to.
+fn walk_archive(
+    path: &Path,
+    mut on_data: impl FnMut(&Manifest, &mut dyn Read) -> Result<()>,
+) -> Result<Manifest> {
     let mut archive = tar::Archive::new(GzDecoder::new(BufReader::new(File::open(path)?)));
     let mut manifest: Option<Manifest> = None;
-    let mut data: Option<Vec<u8>> = None;
+    let mut seen_data = false;
 
     for entry in archive.entries()? {
         let mut entry = entry?;
@@ -152,28 +173,91 @@ pub fn read_archive(path: &Path) -> Result<Loaded> {
                 if manifest.is_some() {
                     return Err(duplicate());
                 }
-                manifest = Some(serde_json::from_reader(&mut entry)?);
+                if entry.size() > MAX_MANIFEST_BYTES {
+                    return Err(Error::Corrupt("snapshot manifest is implausibly large".into()));
+                }
+                let parsed: Manifest = serde_json::from_reader((&mut entry).take(MAX_MANIFEST_BYTES))?;
+                check_manifest(&parsed)?;
+                manifest = Some(parsed);
             }
             DATA => {
-                if data.is_some() {
+                if seen_data {
                     return Err(duplicate());
                 }
-                if entry.size() > MAX_DATA_BYTES {
+                let m = manifest
+                    .as_ref()
+                    .ok_or_else(|| Error::Corrupt("snapshot data comes before its manifest".into()))?;
+                if m.data_bytes > MAX_DATA_BYTES {
                     return Err(Error::Corrupt("snapshot data is implausibly large".into()));
                 }
-                // The size comes from an untrusted header: grow as data
-                // actually arrives rather than reserving it all up front.
-                let mut buf = Vec::with_capacity(entry.size().min(PREALLOCATE_MAX) as usize);
-                entry.read_to_end(&mut buf)?;
-                data = Some(buf);
+                if entry.size() != m.data_bytes {
+                    return Err(Error::Corrupt(format!(
+                        "snapshot {} data is {} bytes but its manifest says {}",
+                        m.id,
+                        entry.size(),
+                        m.data_bytes
+                    )));
+                }
+                seen_data = true;
+                on_data(m, &mut (&mut entry).take(m.data_bytes))?;
             }
             _ => {}
         }
     }
 
     let manifest = manifest.ok_or_else(|| Error::Corrupt("snapshot has no manifest".into()))?;
-    let data = data.ok_or_else(|| Error::Corrupt("snapshot has no data".into()))?;
-    check_manifest(&manifest)?;
+    if !seen_data {
+        return Err(Error::Corrupt("snapshot has no data".into()));
+    }
+    Ok(manifest)
+}
+
+/// Checks an archive's manifest and data checksum by streaming the data,
+/// without holding it in memory (it may be far larger than the archive).
+pub fn verify_archive(path: &Path) -> Result<Manifest> {
+    let mut digest = None;
+    let manifest = walk_archive(path, |m, data| {
+        let mut magic = [0u8; 8];
+        data.read_exact(&mut magic)
+            .map_err(|_| Error::Corrupt(format!("snapshot {} data is truncated", m.id)))?;
+        if &magic != state::MAGIC {
+            return Err(Error::Corrupt(format!(
+                "snapshot {} data is not a Quiver state",
+                m.id
+            )));
+        }
+        let mut hasher = Sha256::new();
+        hasher.update(magic);
+        let mut len = magic.len() as u64;
+        let mut buf = vec![0u8; 64 << 10];
+        loop {
+            let n = data.read(&mut buf)?;
+            if n == 0 {
+                break;
+            }
+            hasher.update(&buf[..n]);
+            len += n as u64;
+        }
+        digest = Some((len, hex(&hasher.finalize())));
+        Ok(())
+    })?;
+    match digest {
+        Some((len, sha)) if len == manifest.data_bytes && sha == manifest.data_sha256 => Ok(manifest),
+        _ => Err(Error::Corrupt(format!(
+            "snapshot {} failed its checksum",
+            manifest.id
+        ))),
+    }
+}
+
+pub fn read_archive(path: &Path) -> Result<Loaded> {
+    let mut data = Vec::new();
+    let manifest = walk_archive(path, |m, reader| {
+        // Grow as data actually arrives rather than trusting the size up front.
+        data.reserve(m.data_bytes.min(PREALLOCATE_MAX) as usize);
+        reader.read_to_end(&mut data)?;
+        Ok(())
+    })?;
     if data.len() as u64 != manifest.data_bytes || sha256_hex(&data) != manifest.data_sha256 {
         return Err(Error::Corrupt(format!(
             "snapshot {} failed its checksum",
@@ -200,13 +284,52 @@ pub fn read_archive(path: &Path) -> Result<Loaded> {
 #[derive(Debug, Clone)]
 pub struct SnapshotRegistry {
     dir: PathBuf,
+    /// Serialises changes to the directory, and holds the last `created_at_ms`
+    /// handed out so that snapshots taken within one millisecond still sort
+    /// oldest-first (retention relies on that order).
+    last_created_ms: Arc<Mutex<u64>>,
 }
 
 impl SnapshotRegistry {
+    /// Opens (creating if needed) a snapshot directory, removing `*.partial`
+    /// files that interrupted snapshots or uploads left behind.
     pub fn open(dir: impl Into<PathBuf>) -> Result<Self> {
         let dir = dir.into();
         fs::create_dir_all(&dir)?;
-        Ok(Self { dir })
+        let mut removed = 0usize;
+        for entry in fs::read_dir(&dir)? {
+            let path = entry?.path();
+            let stale = || {
+                fs::metadata(&path)
+                    .and_then(|m| m.modified())
+                    .ok()
+                    .and_then(|t| t.elapsed().ok())
+                    .is_some_and(|age| age >= STALE_PARTIAL_AGE)
+            };
+            // Another process sharing this directory may still be writing a
+            // fresh one; leftovers from a crash are removed once they age.
+            if path.extension().is_some_and(|e| e == "partial") && path.is_file() && stale() {
+                match fs::remove_file(&path) {
+                    Ok(()) => removed += 1,
+                    Err(e) => {
+                        tracing::warn!(path = %path.display(), error = %e, "cannot remove stale partial snapshot")
+                    }
+                }
+            }
+        }
+        if removed > 0 {
+            tracing::info!(dir = %dir.display(), removed, "removed stale partial snapshot files");
+        }
+        Ok(Self {
+            dir,
+            last_created_ms: Arc::default(),
+        })
+    }
+
+    fn lock(&self) -> MutexGuard<'_, u64> {
+        self.last_created_ms
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     pub fn dir(&self) -> &Path {
@@ -243,10 +366,16 @@ impl SnapshotRegistry {
     ) -> Result<SnapshotInfo> {
         let id = uuid::Uuid::new_v4().hyphenated().to_string();
         let path = self.path(&id)?;
-        write_archive(&path, &id, collection, config, store, index)?;
+        let mut last = self.lock();
+        let created_at_ms = now_ms().max(*last + 1);
+        let manifest = write_archive(&path, &id, collection, config, store, index, created_at_ms)?;
+        *last = created_at_ms;
 
         tracing::info!(snapshot = %id, collection, points = store.live(), "created snapshot");
-        Self::info(&path)
+        Ok(SnapshotInfo {
+            manifest,
+            archive_bytes: fs::metadata(&path)?.len(),
+        })
     }
 
     pub fn list(&self, collection: Option<&str>) -> Result<Vec<SnapshotInfo>> {
@@ -282,12 +411,16 @@ impl SnapshotRegistry {
         read_archive(&self.existing_path(id)?)
     }
 
-    pub fn delete(&self, id: &str) -> Result<SnapshotInfo> {
-        let path = self.existing_path(id)?;
-        let info = Self::info(&path)?;
-        fs::remove_file(&path)?;
+    /// Deletes a snapshot, even one whose archive is no longer readable.
+    pub fn delete(&self, id: &str) -> Result<()> {
+        let _guard = self.lock();
+        self.delete_locked(id)
+    }
+
+    fn delete_locked(&self, id: &str) -> Result<()> {
+        fs::remove_file(self.existing_path(id)?)?;
         tracing::info!(snapshot = %id, "deleted snapshot");
-        Ok(info)
+        Ok(())
     }
 
     pub fn staging_path(&self) -> PathBuf {
@@ -313,8 +446,11 @@ impl SnapshotRegistry {
 
     pub fn import_staged(&self, staged: &Path) -> Result<SnapshotInfo> {
         let result = (|| {
-            let manifest = read_archive(staged)?.manifest;
+            // Streams the data rather than decoding it, so memory stays flat
+            // however far a (possibly hostile) upload decompresses.
+            let manifest = verify_archive(staged)?;
             let target = self.path(&manifest.id)?;
+            let _guard = self.lock();
             if target.exists() {
                 return Err(Error::invalid(format!("snapshot {} already exists", manifest.id)));
             }
@@ -331,11 +467,12 @@ impl SnapshotRegistry {
         if keep == 0 {
             return Ok(Vec::new());
         }
+        let _guard = self.lock();
         let all = self.list(Some(collection))?;
         let excess = all.len().saturating_sub(keep);
         let mut deleted = Vec::with_capacity(excess);
         for info in &all[..excess] {
-            self.delete(&info.manifest.id)?;
+            self.delete_locked(&info.manifest.id)?;
             deleted.push(info.manifest.id.clone());
         }
         Ok(deleted)
@@ -359,6 +496,65 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let reg = SnapshotRegistry::open(dir.path().join("snapshots")).unwrap();
         (dir, reg)
+    }
+
+    #[test]
+    fn prune_keeps_the_newest_even_within_one_millisecond() {
+        let (_dir, reg) = registry();
+        let config = CollectionConfig::new(3);
+        for _ in 0..200 {
+            let older = reg.create("docs", &config, &store(0), None).unwrap().manifest;
+            let newest = reg.create("docs", &config, &store(0), None).unwrap().manifest;
+            assert!(newest.created_at_ms > older.created_at_ms);
+            reg.prune("docs", 1).unwrap();
+            assert!(
+                reg.get(&newest.id).is_ok(),
+                "prune deleted the snapshot just created"
+            );
+        }
+    }
+
+    #[test]
+    fn open_removes_only_stale_partial_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let two_hours_ago = SystemTime::now() - Duration::from_secs(2 * 3600);
+        for name in ["import-1234.partial", "abcd.tar.partial"] {
+            let path = dir.path().join(name);
+            fs::write(&path, b"junk").unwrap();
+            File::options()
+                .write(true)
+                .open(&path)
+                .unwrap()
+                .set_modified(two_hours_ago)
+                .unwrap();
+        }
+        // Fresh partial files may belong to another process still writing them.
+        fs::write(dir.path().join("import-live.partial"), b"in progress").unwrap();
+        fs::write(dir.path().join("notes.txt"), b"keep").unwrap();
+
+        SnapshotRegistry::open(dir.path()).unwrap();
+        let mut left: Vec<String> = fs::read_dir(dir.path())
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        left.sort();
+        assert_eq!(left, ["import-live.partial", "notes.txt"]);
+    }
+
+    #[test]
+    fn corrupt_archive_can_be_deleted() {
+        let (_dir, reg) = registry();
+        let info = reg
+            .create("docs", &CollectionConfig::new(3), &store(1), None)
+            .unwrap();
+        let path = reg.path(&info.manifest.id).unwrap();
+        fs::write(&path, b"garbage").unwrap();
+        reg.delete(&info.manifest.id).unwrap();
+        assert!(!path.exists());
+        assert!(matches!(
+            reg.delete(&info.manifest.id),
+            Err(Error::SnapshotNotFound(_))
+        ));
     }
 
     #[test]
@@ -389,7 +585,7 @@ mod tests {
         let config = CollectionConfig::new(3);
         let ids: Vec<String> = (0..4)
             .map(|i| {
-                std::thread::sleep(std::time::Duration::from_millis(2));
+                std::thread::sleep(Duration::from_millis(2));
                 reg.create("docs", &config, &store(i), None).unwrap().manifest.id
             })
             .collect();
@@ -425,6 +621,59 @@ mod tests {
         b.into_inner().unwrap().finish().unwrap();
 
         assert!(matches!(reg.load(&info.manifest.id), Err(Error::Corrupt(_))));
+    }
+
+    /// Builds an archive from raw entries, to forge hostile uploads.
+    fn forged(entries: &[(&str, &[u8])]) -> Vec<u8> {
+        let mut builder = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::fast()));
+        for (name, bytes) in entries {
+            append(&mut builder, name, bytes, 0).unwrap();
+        }
+        builder.into_inner().unwrap().finish().unwrap()
+    }
+
+    fn manifest_for(data: &[u8]) -> Vec<u8> {
+        let (_dir, reg) = registry();
+        let mut manifest = reg
+            .create("docs", &CollectionConfig::new(3), &store(0), None)
+            .unwrap()
+            .manifest;
+        manifest.data_bytes = data.len() as u64;
+        manifest.data_sha256 = sha256_hex(data);
+        serde_json::to_vec(&manifest).unwrap()
+    }
+
+    #[test]
+    fn hostile_uploads_are_rejected_before_their_data_is_buffered() {
+        let (_dir, reg) = registry();
+        let corrupt = |bytes: Vec<u8>| matches!(reg.import(&bytes[..]), Err(Error::Corrupt(_)));
+
+        // A checksum-valid but meaningless payload (e.g. a run of zeros that
+        // compresses to almost nothing) is not a Quiver state.
+        let zeros = vec![0u8; 1 << 20];
+        assert!(corrupt(forged(&[
+            (MANIFEST, &manifest_for(&zeros)),
+            (DATA, &zeros)
+        ])));
+
+        // Data whose size disagrees with the manifest.
+        let mut data = state::encode(Vec::new(), &store(2), None).unwrap();
+        let manifest = manifest_for(&data);
+        data.push(0);
+        assert!(corrupt(forged(&[(MANIFEST, &manifest), (DATA, &data)])));
+
+        // Data before the manifest, so its size cannot be checked first.
+        let data = state::encode(Vec::new(), &store(2), None).unwrap();
+        assert!(corrupt(forged(&[
+            (DATA, &data),
+            (MANIFEST, &manifest_for(&data))
+        ])));
+
+        assert!(reg.list(None).unwrap().is_empty());
+        assert!(
+            fs::read_dir(reg.dir()).unwrap().next().is_none(),
+            "staging file left behind"
+        );
     }
 
     #[test]

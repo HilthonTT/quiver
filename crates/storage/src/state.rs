@@ -7,7 +7,8 @@ use quiver_types::{Error, Result};
 use crate::codec::{Reader, WriteExt};
 use crate::store::VectorStore;
 
-const MAGIC: &[u8; 8] = b"VECTSNAP";
+/// First bytes of every encoded state, so other formats can be told apart cheaply.
+pub const MAGIC: &[u8; 8] = b"VECTSNAP";
 const VERSION: u32 = 2;
 const NO_INDEX: u64 = u64::MAX;
 

@@ -24,6 +24,8 @@ const COMPACT_RATIO: f64 = 0.3;
 pub(crate) const META_FILE: &str = "collection.json";
 const ROCKSDB_DIR: &str = "rocksdb";
 
+static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(0);
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CollectionMeta {
     pub config: CollectionConfig,
@@ -51,6 +53,9 @@ pub struct Collection {
     config: CollectionConfig,
     storage: StorageKind,
     env: Env,
+    /// Unique per handle in this process, so a dropped collection and its
+    /// same-named replacement are never mistaken for one another.
+    instance: u64,
     generation: AtomicU64,
     /// Set (under the write lock) once the collection is dropped or replaced.
     /// Handles still held elsewhere must then stop touching the directory,
@@ -191,6 +196,7 @@ impl Collection {
             config,
             storage: inner.engine.kind(),
             env,
+            instance: NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed),
             generation: AtomicU64::new(0),
             closed: AtomicBool::new(false),
             inner: RwLock::new(inner),
@@ -211,6 +217,12 @@ impl Collection {
 
     pub fn generation(&self) -> u64 {
         self.generation.load(Ordering::Acquire)
+    }
+
+    /// Identifies this collection's state: changes whenever it is written to,
+    /// and differs between a collection and any later one of the same name.
+    pub(crate) fn version(&self) -> (u64, u64) {
+        (self.instance, self.generation())
     }
 
     pub fn len(&self) -> usize {
