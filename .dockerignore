@@ -1,0 +1,11 @@
+target/
+clients/
+docs/
+assets/
+scripts/
+.git/
+.github/
+.env
+keys.json
+**/.venv/
+quiver-data/

@@ -1,0 +1,22 @@
+services:
+  quiver:
+    build: .
+    image: quiver:latest
+    ports:
+      - "6900:6900" # REST
+      - "6901:6901" # gRPC
+    volumes:
+      - quiver-data:/data
+    env_file:
+      - path: .env
+        required: false
+    environment:
+      # Set API keys (or QUIVER_KEYS_FILE) before exposing the ports beyond localhost.
+      QUIVER_API_KEY: ${QUIVER_API_KEY:-}
+      QUIVER_STORAGE: ${QUIVER_STORAGE:-file}
+      QUIVER_SNAPSHOT_INTERVAL: ${QUIVER_SNAPSHOT_INTERVAL:-3600}
+      RUST_LOG: ${RUST_LOG:-info}
+    restart: unless-stopped
+
+volumes:
+  quiver-data:
