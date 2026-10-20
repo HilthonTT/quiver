@@ -1,7 +1,5 @@
+use quiver_db::{CollectionConfig, Database, Error, Filter, IndexConfig, Metric, Point, SearchOptions};
 use serde_json::json;
-use quiver_db::{
-    CollectionConfig, Database, Error, Filter, IndexConfig, Metric, Point, SearchOptions,
-};
 
 fn db_with(metric: Metric, index: IndexConfig) -> std::sync::Arc<quiver_db::Collection> {
     Database::in_memory()
@@ -25,11 +23,8 @@ fn upsert_replaces_existing_ids() {
 #[test]
 fn later_duplicates_in_a_batch_win() {
     let c = db_with(Metric::Euclidean, IndexConfig::Flat);
-    c.upsert([
-        Point::new("a", vec![1.0, 1.0]),
-        Point::new("a", vec![2.0, 2.0]),
-    ])
-    .unwrap();
+    c.upsert([Point::new("a", vec![1.0, 1.0]), Point::new("a", vec![2.0, 2.0])])
+        .unwrap();
     assert_eq!(c.len(), 1);
     assert_eq!(c.get("a").unwrap().vector, vec![2.0, 2.0]);
 }
@@ -38,10 +33,7 @@ fn later_duplicates_in_a_batch_win() {
 fn invalid_batches_are_rejected_atomically() {
     let c = db_with(Metric::Cosine, IndexConfig::default());
     let err = c
-        .upsert([
-            Point::new("ok", vec![1.0, 0.0]),
-            Point::new("bad", vec![1.0]),
-        ])
+        .upsert([Point::new("ok", vec![1.0, 0.0]), Point::new("bad", vec![1.0])])
         .unwrap_err();
     assert!(matches!(err, Error::InvalidArgument(_)), "{err}");
     assert!(c.is_empty());
@@ -112,9 +104,7 @@ fn filtered_search() {
     .unwrap();
 
     let filter = Filter::parse(&json!({"parity": "odd", "i": {"$gte": 100}})).unwrap();
-    let opts = SearchOptions::default()
-        .filter(filter)
-        .include_vectors(true);
+    let opts = SearchOptions::default().filter(filter).include_vectors(true);
     let hits = c.search_with(&[0.0, 0.0], 3, &opts).unwrap();
     let ids: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
     assert_eq!(ids, ["101", "103", "105"]);
@@ -157,15 +147,9 @@ fn collection_management() {
         db.create_collection("bad name", CollectionConfig::new(2))
             .is_err()
     );
-    assert!(
-        db.create_collection("zero", CollectionConfig::new(0))
-            .is_err()
-    );
+    assert!(db.create_collection("zero", CollectionConfig::new(0)).is_err());
 
-    assert!(
-        db.get_or_create_collection("a", CollectionConfig::new(2))
-            .is_ok()
-    );
+    assert!(db.get_or_create_collection("a", CollectionConfig::new(2)).is_ok());
     assert!(
         db.get_or_create_collection("a", CollectionConfig::new(3))
             .is_err()
@@ -173,10 +157,7 @@ fn collection_management() {
 
     assert_eq!(db.list_collections().len(), 1);
     db.drop_collection("a").unwrap();
-    assert!(matches!(
-        db.collection("a"),
-        Err(Error::CollectionNotFound(_))
-    ));
+    assert!(matches!(db.collection("a"), Err(Error::CollectionNotFound(_))));
 }
 
 #[test]
@@ -244,18 +225,8 @@ fn kd_tree_is_exact() {
     kd.delete(&["5", "6"]).unwrap();
     flat.delete(&["5", "6"]).unwrap();
     for q in [[0.0, 0.0, 0.0], [0.5, -0.5, 0.2], [1.0, 1.0, 1.0]] {
-        let a: Vec<f32> = flat
-            .search(&q, 10)
-            .unwrap()
-            .iter()
-            .map(|h| h.distance)
-            .collect();
-        let b: Vec<f32> = kd
-            .search(&q, 10)
-            .unwrap()
-            .iter()
-            .map(|h| h.distance)
-            .collect();
+        let a: Vec<f32> = flat.search(&q, 10).unwrap().iter().map(|h| h.distance).collect();
+        let b: Vec<f32> = kd.search(&q, 10).unwrap().iter().map(|h| h.distance).collect();
         assert_eq!(a, b);
     }
 }

@@ -13,7 +13,7 @@ pub use quiver_storage as storage;
 pub use quiver_storage::StorageKind;
 pub use quiver_types as types;
 pub use quiver_types::{
-    CollectionConfig, CollectionInfo, Error, Filter, HnswParams, IndexConfig, KdTreeParams,
-    MAX_DIMENSION, MAX_ID_LEN, MAX_NAME_LEN, Metric, Point, PointInput, Result, SearchHit,
-    SearchOptions, auth, distance, filter, new_id, validate_name,
+    CollectionConfig, CollectionInfo, Error, Filter, HnswParams, IndexConfig, KdTreeParams, MAX_DIMENSION,
+    MAX_ID_LEN, MAX_NAME_LEN, Metric, Point, PointInput, Result, SearchHit, SearchOptions, auth, distance,
+    filter, new_id, validate_name,
 };

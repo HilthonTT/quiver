@@ -151,9 +151,7 @@ impl Default for KdTreeParams {
 impl KdTreeParams {
     fn validate(&self) -> Result<()> {
         if !(2..=64).contains(&self.balance_factor) {
-            return Err(Error::invalid(
-                "kd_tree.balance_factor must be between 2 and 64",
-            ));
+            return Err(Error::invalid("kd_tree.balance_factor must be between 2 and 64"));
         }
         Ok(())
     }

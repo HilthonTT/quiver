@@ -146,16 +146,10 @@ impl Database {
     }
 
     fn collection_dir(&self, name: &str) -> Option<PathBuf> {
-        self.root
-            .as_ref()
-            .map(|r| r.join(COLLECTIONS_DIR).join(name))
+        self.root.as_ref().map(|r| r.join(COLLECTIONS_DIR).join(name))
     }
 
-    pub fn create_collection(
-        &self,
-        name: &str,
-        config: CollectionConfig,
-    ) -> Result<Arc<Collection>> {
+    pub fn create_collection(&self, name: &str, config: CollectionConfig) -> Result<Arc<Collection>> {
         validate_name(name)?;
 
         let mut collections = self.collections.write();
@@ -173,11 +167,7 @@ impl Database {
         Ok(collection)
     }
 
-    pub fn get_or_create_collection(
-        &self,
-        name: &str,
-        config: CollectionConfig,
-    ) -> Result<Arc<Collection>> {
+    pub fn get_or_create_collection(&self, name: &str, config: CollectionConfig) -> Result<Arc<Collection>> {
         if let Ok(existing) = self.collection(name) {
             if existing.config() != &config {
                 return Err(Error::invalid(format!(
@@ -223,10 +213,10 @@ impl Database {
         collection.close();
         // Close our handles first; Windows refuses to delete open files.
         drop(collection);
-        if let Some(dir) = self.collection_dir(name) {
-            if dir.exists() {
-                fs::remove_dir_all(dir)?;
-            }
+        if let Some(dir) = self.collection_dir(name)
+            && dir.exists()
+        {
+            fs::remove_dir_all(dir)?;
         }
         Ok(())
     }
@@ -262,11 +252,8 @@ impl Database {
         let name = opts.name.unwrap_or(loaded.manifest.collection);
         validate_name(&name)?;
         // Verify the index before an existing collection is deleted for it.
-        let index = Collection::snapshot_index(
-            &loaded.manifest.config,
-            &loaded.store,
-            loaded.index.as_deref(),
-        )?;
+        let index =
+            Collection::snapshot_index(&loaded.manifest.config, &loaded.store, loaded.index.as_deref())?;
 
         let mut collections = self.collections.write();
         if let Some(existing) = collections.remove(&name) {

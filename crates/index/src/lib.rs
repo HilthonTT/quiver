@@ -35,9 +35,7 @@ impl PartialOrd for Neighbor {
 }
 impl Ord for Neighbor {
     fn cmp(&self, other: &Self) -> Ordering {
-        self.dist
-            .total_cmp(&other.dist)
-            .then(self.slot.cmp(&other.slot))
+        self.dist.total_cmp(&other.dist).then(self.slot.cmp(&other.slot))
     }
 }
 
@@ -62,11 +60,11 @@ impl TopK {
     pub fn push(&mut self, n: Neighbor) {
         if self.heap.len() < self.k {
             self.heap.push(n);
-        } else if let Some(worst) = self.heap.peek() {
-            if n < *worst {
-                self.heap.pop();
-                self.heap.push(n);
-            }
+        } else if let Some(worst) = self.heap.peek()
+            && n < *worst
+        {
+            self.heap.pop();
+            self.heap.push(n);
         }
     }
 
@@ -196,16 +194,10 @@ impl Index {
         let slots = store.slots();
         let index = match (r.u8()?, config) {
             (TAG_FLAT, IndexConfig::Flat) => Index::Flat(FlatIndex::new(metric)),
-            (TAG_HNSW, IndexConfig::Hnsw(p)) => {
-                Index::Hnsw(HnswIndex::read_from(&mut r, *p, metric, slots)?)
+            (TAG_HNSW, IndexConfig::Hnsw(p)) => Index::Hnsw(HnswIndex::read_from(&mut r, *p, metric, slots)?),
+            (TAG_KDTREE, IndexConfig::KdTree(p)) => {
+                Index::KdTree(KdTreeIndex::read_from(&mut r, *p, metric, slots, store.dim())?)
             }
-            (TAG_KDTREE, IndexConfig::KdTree(p)) => Index::KdTree(KdTreeIndex::read_from(
-                &mut r,
-                *p,
-                metric,
-                slots,
-                store.dim(),
-            )?),
             (tag, _) => {
                 return Err(Error::Corrupt(format!(
                     "stored index (tag {tag}) does not match the configured {} index",
@@ -265,8 +257,7 @@ mod tests {
             IndexConfig::KdTree(KdTreeParams::default()),
         ] {
             let index = Index::build(&config, Metric::Euclidean, &store);
-            let restored =
-                Index::from_bytes(&index.to_bytes(), &config, Metric::Euclidean, &store).unwrap();
+            let restored = Index::from_bytes(&index.to_bytes(), &config, Metric::Euclidean, &store).unwrap();
             let q = store.vector(7);
             let a = index.search(q, 5, None, &store, &|_| true);
             let b = restored.search(q, 5, None, &store, &|_| true);
@@ -283,13 +274,7 @@ mod tests {
             IndexConfig::KdTree(KdTreeParams::default()),
         ] {
             let index = Index::build(&config, Metric::Euclidean, &store);
-            let got = index.search(
-                store.vector(0),
-                usize::MAX,
-                Some(usize::MAX),
-                &store,
-                &|_| true,
-            );
+            let got = index.search(store.vector(0), usize::MAX, Some(usize::MAX), &store, &|_| true);
             assert_eq!(got.len(), 50, "{config:?}");
         }
     }

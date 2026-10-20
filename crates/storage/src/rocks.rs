@@ -1,7 +1,7 @@
 use std::path::Path;
 
-use rocksdb::{DB, Direction, IteratorMode, Options, WriteBatch, WriteOptions};
 use quiver_types::{Error, Result};
+use rocksdb::{DB, Direction, IteratorMode, Options, WriteBatch, WriteOptions};
 
 use crate::codec::{Reader, WriteExt};
 use crate::{Op, Recovered, StorageEngine, StorageKind, StorageOptions, VectorStore, rocks};
@@ -78,10 +78,7 @@ impl StorageEngine for RocksDbEngine {
     fn recover(&mut self, dim: usize) -> Result<Recovered> {
         let mut store = VectorStore::new(dim);
         let mut vector = Vec::with_capacity(dim);
-        for item in self
-            .db
-            .iterator(IteratorMode::From(PREFIX, Direction::Forward))
-        {
+        for item in self.db.iterator(IteratorMode::From(PREFIX, Direction::Forward)) {
             let (k, v) = item.map_err(storage_err)?;
             let Some(id) = k.strip_prefix(PREFIX) else {
                 break;

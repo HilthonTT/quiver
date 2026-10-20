@@ -10,11 +10,7 @@ use crate::error::ApiError;
 
 pub(crate) type Guard = (Arc<KeyStore>, Role);
 
-pub(crate) async fn require(
-    State((keys, required)): State<Guard>,
-    req: Request,
-    next: Next,
-) -> Response {
+pub(crate) async fn require(State((keys, required)): State<Guard>, req: Request, next: Next) -> Response {
     if keys.is_empty() {
         return next.run(req).await;
     }

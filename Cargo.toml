@@ -6,7 +6,7 @@ default-members = ["crates/server"]
 [workspace.package]
 version = "0.1.0"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 license = "MIT"
 repository = "https://github.com/HilthonTT/vector-db"
 homepage = "https://github.com/HilthonTT/vector-db"

@@ -1,5 +1,5 @@
-use serde_json::json;
 use quiver_db::{CollectionConfig, Database, DbOptions, Error, IndexConfig, Metric, Point};
+use serde_json::json;
 
 /// Deterministic pseudo-random vector, unique per `i`.
 fn vec_for(i: usize, dim: usize) -> Vec<f32> {
@@ -24,9 +24,7 @@ fn data_survives_reopen_via_wal_replay() {
     let dir = tempfile::tempdir().unwrap();
     {
         let db = Database::open(dir.path()).unwrap();
-        let c = db
-            .create_collection("docs", CollectionConfig::new(8))
-            .unwrap();
+        let c = db.create_collection("docs", CollectionConfig::new(8)).unwrap();
         c.upsert(points(0..100, 8)).unwrap();
         c.delete(&["p3", "p4"]).unwrap();
         // No flush: everything must come back from the WAL.
@@ -46,16 +44,11 @@ fn data_survives_reopen_via_snapshot() {
     let dir = tempfile::tempdir().unwrap();
     {
         let db = Database::open(dir.path()).unwrap();
-        for (name, index) in [
-            ("flat", IndexConfig::Flat),
-            ("hnsw", IndexConfig::default()),
-        ] {
+        for (name, index) in [("flat", IndexConfig::Flat), ("hnsw", IndexConfig::default())] {
             let c = db
                 .create_collection(
                     name,
-                    CollectionConfig::new(8)
-                        .metric(Metric::Euclidean)
-                        .index(index),
+                    CollectionConfig::new(8).metric(Metric::Euclidean).index(index),
                 )
                 .unwrap();
             c.upsert(points(0..200, 8)).unwrap();
@@ -81,9 +74,7 @@ fn torn_wal_write_loses_only_the_last_batch() {
     let wal = dir.path().join("collections/docs/wal.log");
     {
         let db = Database::open(dir.path()).unwrap();
-        let c = db
-            .create_collection("docs", CollectionConfig::new(4))
-            .unwrap();
+        let c = db.create_collection("docs", CollectionConfig::new(4)).unwrap();
         c.upsert(points(0..10, 4)).unwrap();
         c.upsert(points(10..20, 4)).unwrap();
     }
@@ -104,9 +95,7 @@ fn corrupt_snapshot_is_reported() {
     let dir = tempfile::tempdir().unwrap();
     {
         let db = Database::open(dir.path()).unwrap();
-        let c = db
-            .create_collection("docs", CollectionConfig::new(4))
-            .unwrap();
+        let c = db.create_collection("docs", CollectionConfig::new(4)).unwrap();
         c.upsert(points(0..10, 4)).unwrap();
         c.flush().unwrap();
     }
@@ -128,17 +117,11 @@ fn second_process_cannot_open_locked_database() {
 fn drop_collection_removes_files() {
     let dir = tempfile::tempdir().unwrap();
     let db = Database::open(dir.path()).unwrap();
-    db.create_collection("tmp", CollectionConfig::new(4))
-        .unwrap();
+    db.create_collection("tmp", CollectionConfig::new(4)).unwrap();
     db.drop_collection("tmp").unwrap();
     assert!(!dir.path().join("collections/tmp").exists());
     drop(db);
-    assert!(
-        Database::open(dir.path())
-            .unwrap()
-            .list_collections()
-            .is_empty()
-    );
+    assert!(Database::open(dir.path()).unwrap().list_collections().is_empty());
 }
 
 #[test]
@@ -149,9 +132,7 @@ fn compaction_preserves_data_and_reclaims_tombstones() {
         ..Default::default()
     };
     let db = Database::open_with(dir.path(), opts.clone()).unwrap();
-    let c = db
-        .create_collection("docs", CollectionConfig::new(4))
-        .unwrap();
+    let c = db.create_collection("docs", CollectionConfig::new(4)).unwrap();
     c.upsert(points(0..3_000, 4)).unwrap();
     let ids: Vec<String> = (0..2_000).map(|i| format!("p{i}")).collect();
     c.delete(&ids).unwrap();

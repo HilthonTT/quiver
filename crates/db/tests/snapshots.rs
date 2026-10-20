@@ -1,16 +1,15 @@
-use serde_json::json;
 use quiver_db::{
-    CollectionConfig, Database, DbOptions, Error, IndexConfig, Metric, Point, RestoreOptions,
-    StorageKind,
+    CollectionConfig, Database, DbOptions, Error, IndexConfig, Metric, Point, RestoreOptions, StorageKind,
 };
+use serde_json::json;
 
 fn seed(db: &Database, name: &str, n: usize) {
     let c = db
         .create_collection(name, CollectionConfig::new(3).metric(Metric::Euclidean))
         .unwrap();
-    c.upsert((0..n).map(|i| {
-        Point::new(format!("p{i}"), vec![i as f32, 0.5, -1.0]).with_metadata(json!({"i": i}))
-    }))
+    c.upsert(
+        (0..n).map(|i| Point::new(format!("p{i}"), vec![i as f32, 0.5, -1.0]).with_metadata(json!({"i": i}))),
+    )
     .unwrap();
 }
 
@@ -134,10 +133,7 @@ fn snapshots_preserve_kd_tree_collections() {
 fn in_memory_databases_have_no_snapshots_by_default() {
     let db = Database::in_memory();
     seed(&db, "docs", 1);
-    assert!(matches!(
-        db.create_snapshot("docs"),
-        Err(Error::Unsupported(_))
-    ));
+    assert!(matches!(db.create_snapshot("docs"), Err(Error::Unsupported(_))));
 }
 
 #[test]

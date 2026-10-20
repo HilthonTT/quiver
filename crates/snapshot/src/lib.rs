@@ -41,18 +41,10 @@ fn now_ms() -> u64 {
 }
 
 fn sha256_hex(bytes: &[u8]) -> String {
-    Sha256::digest(bytes)
-        .iter()
-        .map(|b| format!("{b:02x}"))
-        .collect()
+    Sha256::digest(bytes).iter().map(|b| format!("{b:02x}")).collect()
 }
 
-fn append(
-    builder: &mut tar::Builder<impl Write>,
-    name: &str,
-    bytes: &[u8],
-    mtime: u64,
-) -> Result<()> {
+fn append(builder: &mut tar::Builder<impl Write>, name: &str, bytes: &[u8], mtime: u64) -> Result<()> {
     let mut header = tar::Header::new_gnu();
     header.set_size(bytes.len() as u64);
     header.set_mode(0o644);
@@ -140,10 +132,7 @@ pub fn read_manifest(path: &Path) -> Result<Manifest> {
         }
     }
 
-    Err(Error::Corrupt(format!(
-        "{} has no manifest",
-        path.display()
-    )))
+    Err(Error::Corrupt(format!("{} has no manifest", path.display())))
 }
 
 pub fn read_archive(path: &Path) -> Result<Loaded> {
@@ -216,7 +205,7 @@ pub struct SnapshotRegistry {
 impl SnapshotRegistry {
     pub fn open(dir: impl Into<PathBuf>) -> Result<Self> {
         let dir = dir.into();
-        fs::create_dir_all(&dir);
+        fs::create_dir_all(&dir)?;
         Ok(Self { dir })
     }
 
@@ -272,9 +261,7 @@ impl SnapshotRegistry {
                 continue;
             }
             match Self::info(&path) {
-                Ok(info) if collection.is_none_or(|c| c == info.manifest.collection) => {
-                    out.push(info)
-                }
+                Ok(info) if collection.is_none_or(|c| c == info.manifest.collection) => out.push(info),
                 Ok(_) => {}
                 Err(e) => {
                     tracing::warn!(path = %path.display(), error = %e, "skipping unreadable snapshot")
@@ -282,8 +269,7 @@ impl SnapshotRegistry {
             }
         }
         out.sort_by(|a, b| {
-            (a.manifest.created_at_ms, &a.manifest.id)
-                .cmp(&(b.manifest.created_at_ms, &b.manifest.id))
+            (a.manifest.created_at_ms, &a.manifest.id).cmp(&(b.manifest.created_at_ms, &b.manifest.id))
         });
         Ok(out)
     }
@@ -305,8 +291,7 @@ impl SnapshotRegistry {
     }
 
     pub fn staging_path(&self) -> PathBuf {
-        self.dir
-            .join(format!("import-{}.partial", uuid::Uuid::new_v4()))
+        self.dir.join(format!("import-{}.partial", uuid::Uuid::new_v4()))
     }
 
     pub fn import(&self, mut reader: impl Read) -> Result<SnapshotInfo> {
@@ -331,10 +316,7 @@ impl SnapshotRegistry {
             let manifest = read_archive(staged)?.manifest;
             let target = self.path(&manifest.id)?;
             if target.exists() {
-                return Err(Error::invalid(format!(
-                    "snapshot {} already exists",
-                    manifest.id
-                )));
+                return Err(Error::invalid(format!("snapshot {} already exists", manifest.id)));
             }
             fs::rename(staged, &target)?;
             state::sync_parent(&target)?;
@@ -368,11 +350,7 @@ mod tests {
     fn store(n: usize) -> VectorStore {
         let mut s = VectorStore::new(3);
         for i in 0..n {
-            s.push(
-                format!("p{i}"),
-                &[i as f32, 1.0, 2.0],
-                Some(json!({"i": i})),
-            );
+            s.push(format!("p{i}"), &[i as f32, 1.0, 2.0], Some(json!({"i": i})));
         }
         s
     }
@@ -387,9 +365,7 @@ mod tests {
     fn create_list_load_delete() {
         let (_dir, reg) = registry();
         let config = CollectionConfig::new(3);
-        let info = reg
-            .create("docs", &config, &store(10), Some(b"idx"))
-            .unwrap();
+        let info = reg.create("docs", &config, &store(10), Some(b"idx")).unwrap();
         assert_eq!(info.manifest.points, 10);
         assert_eq!(info.manifest.config, config);
 
@@ -414,10 +390,7 @@ mod tests {
         let ids: Vec<String> = (0..4)
             .map(|i| {
                 std::thread::sleep(std::time::Duration::from_millis(2));
-                reg.create("docs", &config, &store(i), None)
-                    .unwrap()
-                    .manifest
-                    .id
+                reg.create("docs", &config, &store(i), None).unwrap().manifest.id
             })
             .collect();
         reg.create("other", &config, &store(1), None).unwrap();
@@ -451,10 +424,7 @@ mod tests {
         append(&mut b, DATA, &tampered, 0).unwrap();
         b.into_inner().unwrap().finish().unwrap();
 
-        assert!(matches!(
-            reg.load(&info.manifest.id),
-            Err(Error::Corrupt(_))
-        ));
+        assert!(matches!(reg.load(&info.manifest.id), Err(Error::Corrupt(_))));
     }
 
     #[test]
@@ -480,10 +450,7 @@ mod tests {
     fn ids_cannot_escape_the_directory() {
         let (_dir, reg) = registry();
         for bad in ["../etc/passwd", "a/b", "", "not-a-uuid"] {
-            assert!(
-                matches!(reg.get(bad), Err(Error::SnapshotNotFound(_))),
-                "{bad}"
-            );
+            assert!(matches!(reg.get(bad), Err(Error::SnapshotNotFound(_))), "{bad}");
         }
     }
 }

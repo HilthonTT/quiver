@@ -62,13 +62,10 @@ impl Wal {
         frame.put_u32(crc32fast::hash(&payload))?;
         frame.extend_from_slice(&payload);
 
-        let written = self.file.write_all(&frame).and_then(|()| {
-            if self.fsync {
-                self.file.sync_data()
-            } else {
-                Ok(())
-            }
-        });
+        let written = self
+            .file
+            .write_all(&frame)
+            .and_then(|()| if self.fsync { self.file.sync_data() } else { Ok(()) });
         if let Err(e) = written {
             // Drop any partial frame: replay stops at the first bad frame, so
             // leaving it would hide every later, successful append.
@@ -177,11 +174,7 @@ mod tests {
         drop(wal);
 
         let (_, entries) = Wal::open(&path, false).unwrap();
-        assert_eq!(
-            entries.len(),
-            2,
-            "appends after truncation must be readable"
-        );
+        assert_eq!(entries.len(), 2, "appends after truncation must be readable");
     }
 
     #[test]

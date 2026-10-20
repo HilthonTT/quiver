@@ -65,9 +65,9 @@ pub fn dot(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
 
     let mut acc = [0.0f32; LANES];
-    let (ca, ra) = a.split_at(a.len() - a.len() % LANES);
-    let (cb, rb) = b.split_at(ca.len());
-    for (x, y) in ca.chunks_exact(LANES).zip(cb.chunks_exact(LANES)) {
+    let (ca, ra) = a.as_chunks::<LANES>();
+    let (cb, rb) = b.as_chunks::<LANES>();
+    for (x, y) in ca.iter().zip(cb) {
         for i in 0..LANES {
             acc[i] += x[i] * y[i];
         }
@@ -80,9 +80,9 @@ pub fn dot(a: &[f32], b: &[f32]) -> f32 {
 pub fn squared_euclidean(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
     let mut acc = [0.0f32; LANES];
-    let (ca, ra) = a.split_at(a.len() - a.len() % LANES);
-    let (cb, rb) = b.split_at(ca.len());
-    for (x, y) in ca.chunks_exact(LANES).zip(cb.chunks_exact(LANES)) {
+    let (ca, ra) = a.as_chunks::<LANES>();
+    let (cb, rb) = b.as_chunks::<LANES>();
+    for (x, y) in ca.iter().zip(cb) {
         for i in 0..LANES {
             let d = x[i] - y[i];
             acc[i] += d * d;
@@ -103,9 +103,9 @@ pub fn squared_euclidean(a: &[f32], b: &[f32]) -> f32 {
 pub fn manhattan(a: &[f32], b: &[f32]) -> f32 {
     debug_assert_eq!(a.len(), b.len());
     let mut acc = [0.0f32; LANES];
-    let (ca, ra) = a.split_at(a.len() - b.len() % LANES);
-    let (cb, rb) = b.split_at(ca.len());
-    for (x, y) in ca.chunks_exact(LANES).zip(cb.chunks_exact(LANES)) {
+    let (ca, ra) = a.as_chunks::<LANES>();
+    let (cb, rb) = b.as_chunks::<LANES>();
+    for (x, y) in ca.iter().zip(cb) {
         for i in 0..LANES {
             acc[i] += (x[i] - y[i]).abs();
         }

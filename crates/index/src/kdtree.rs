@@ -124,13 +124,7 @@ impl KdTreeIndex {
         self.inserts_since_rebuild = 0;
     }
 
-    fn build(
-        &mut self,
-        slots: &mut [u32],
-        store: &VectorStore,
-        level: usize,
-        depth: &mut usize,
-    ) -> u32 {
+    fn build(&mut self, slots: &mut [u32], store: &VectorStore, level: usize, depth: &mut usize) -> u32 {
         if slots.is_empty() {
             return NIL;
         }
@@ -153,13 +147,7 @@ impl KdTreeIndex {
         node
     }
 
-    pub fn search(
-        &self,
-        query: &[f32],
-        k: usize,
-        store: &VectorStore,
-        accept: Accept<'_>,
-    ) -> Vec<Neighbor> {
+    pub fn search(&self, query: &[f32], k: usize, store: &VectorStore, accept: Accept<'_>) -> Vec<Neighbor> {
         let mut top = TopK::new(k);
         if self.root == NIL {
             return Vec::new();
@@ -257,9 +245,7 @@ impl KdTreeIndex {
         let mut depth = 0;
         while let Some((cur, level)) = stack.pop() {
             if std::mem::replace(&mut seen[cur as usize], true) {
-                return Err(Error::Corrupt(
-                    "kd-tree node is linked more than once".into(),
-                ));
+                return Err(Error::Corrupt("kd-tree node is linked more than once".into()));
             }
             depth = depth.max(level);
             let node = self.nodes[cur as usize];
@@ -339,11 +325,7 @@ mod tests {
                 let query = store.vector(q * 7);
                 let expected = flat.search(query, 10, &store, &|_| true);
                 let got = tree.search(query, 10, &store, &|_| true);
-                assert_eq!(
-                    distances(&got),
-                    distances(&expected),
-                    "{metric:?} query {q}"
-                );
+                assert_eq!(distances(&got), distances(&expected), "{metric:?} query {q}");
             }
         }
     }

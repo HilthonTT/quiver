@@ -23,8 +23,7 @@ pub trait WriteExt: Write {
     }
 
     fn put_bytes(&mut self, b: &[u8]) -> io::Result<()> {
-        let len =
-            u32::try_from(b.len()).map_err(|_| io::Error::other("field larger than 4 GiB"))?;
+        let len = u32::try_from(b.len()).map_err(|_| io::Error::other("field larger than 4 GiB"))?;
         self.put_u32(len)?;
         self.write_all(b)
     }
@@ -63,15 +62,11 @@ impl<'a> Reader<'a> {
     }
 
     pub fn u32(&mut self) -> Result<u32> {
-        Ok(u32::from_le_bytes(
-            self.take(4)?.try_into().expect("4 bytes"),
-        ))
+        Ok(u32::from_le_bytes(self.take(4)?.try_into().expect("4 bytes")))
     }
 
     pub fn u64(&mut self) -> Result<u64> {
-        Ok(u64::from_le_bytes(
-            self.take(8)?.try_into().expect("8 bytes"),
-        ))
+        Ok(u64::from_le_bytes(self.take(8)?.try_into().expect("8 bytes")))
     }
 
     pub fn f32s_into(&mut self, n: usize, out: &mut Vec<f32>) -> Result<()> {
@@ -80,11 +75,7 @@ impl<'a> Reader<'a> {
                 .ok_or_else(|| Error::Corrupt("length overflow".into()))?,
         )?;
         out.clear();
-        out.extend(
-            bytes
-                .chunks_exact(4)
-                .map(|c| f32::from_le_bytes(c.try_into().expect("4 bytes"))),
-        );
+        out.extend(bytes.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)));
         Ok(())
     }
 

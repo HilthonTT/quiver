@@ -15,7 +15,7 @@ impl StorageEngine for MemoryEngine {
         Ok(Recovered::empty(dim))
     }
 
-    fn log(&mut self, op: Op<'_>) -> Result<()> {
+    fn log(&mut self, _op: Op<'_>) -> Result<()> {
         Ok(())
     }
 
@@ -23,11 +23,11 @@ impl StorageEngine for MemoryEngine {
         false
     }
 
-    fn checkpoint(&mut self, store: &VectorStore, index: &[u8]) -> Result<()> {
+    fn checkpoint(&mut self, _store: &VectorStore, _index: &[u8]) -> Result<()> {
         Ok(())
     }
 
-    fn import(&mut self, store: &VectorStore, index: &[u8]) -> Result<()> {
+    fn import(&mut self, _store: &VectorStore, _index: &[u8]) -> Result<()> {
         Ok(())
     }
 }

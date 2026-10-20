@@ -9,8 +9,8 @@ mod wal;
 
 use std::path::Path;
 
-use serde::{Deserialize, Serialize};
 use quiver_types::{Error, Point, Result};
+use serde::{Deserialize, Serialize};
 
 pub use file::FileEngine;
 pub use memory::MemoryEngine;
@@ -144,9 +144,8 @@ pub fn open_engine(
     dir: Option<&Path>,
     options: StorageOptions,
 ) -> Result<Box<dyn StorageEngine>> {
-    let need_dir = || {
-        dir.ok_or_else(|| Error::invalid(format!("the {kind} storage engine needs a directory")))
-    };
+    let need_dir =
+        || dir.ok_or_else(|| Error::invalid(format!("the {kind} storage engine needs a directory")));
     match kind {
         StorageKind::Memory => Ok(Box::new(MemoryEngine)),
         StorageKind::File => Ok(Box::new(FileEngine::open(need_dir()?, options)?)),
@@ -166,9 +165,7 @@ mod tests {
 
     fn points(n: usize) -> Vec<Point> {
         (0..n)
-            .map(|i| {
-                Point::new(format!("p{i}"), vec![i as f32, 1.0]).with_metadata(json!({"i": i}))
-            })
+            .map(|i| Point::new(format!("p{i}"), vec![i as f32, 1.0]).with_metadata(json!({"i": i})))
             .collect()
     }
 
@@ -180,10 +177,7 @@ mod tests {
             let mut e = open();
             assert_eq!(e.recover(2).unwrap().store.live(), 0);
             e.log(Op::Upsert { points: &points(5) }).unwrap();
-            e.log(Op::Delete {
-                ids: &["p1".into()],
-            })
-            .unwrap();
+            e.log(Op::Delete { ids: &["p1".into()] }).unwrap();
         }
         // Rebuild the expected state the way the database would.
         let mut e = open();
@@ -231,14 +225,8 @@ mod tests {
 
     #[test]
     fn storage_kind_parsing() {
-        assert_eq!(
-            "RocksDB".parse::<StorageKind>().unwrap(),
-            StorageKind::RocksDb
-        );
-        assert_eq!(
-            "inmemory".parse::<StorageKind>().unwrap(),
-            StorageKind::Memory
-        );
+        assert_eq!("RocksDB".parse::<StorageKind>().unwrap(), StorageKind::RocksDb);
+        assert_eq!("inmemory".parse::<StorageKind>().unwrap(), StorageKind::Memory);
         assert!("mongo".parse::<StorageKind>().is_err());
     }
 }

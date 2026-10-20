@@ -131,12 +131,7 @@ impl HnswIndex {
         self.links[from as usize][layer] = pruned.iter().map(|n| n.slot).collect();
     }
 
-    fn select_neighbors(
-        &self,
-        candidates: &[Neighbor],
-        m: usize,
-        store: &VectorStore,
-    ) -> Vec<Neighbor> {
+    fn select_neighbors(&self, candidates: &[Neighbor], m: usize, store: &VectorStore) -> Vec<Neighbor> {
         if candidates.len() <= m {
             return candidates.to_vec();
         }
@@ -253,10 +248,7 @@ impl HnswIndex {
             ep = self.greedy_closest(query, ep, layer, store);
         }
         // A beam wider than the graph cannot find more, and `ef` sizes buffers.
-        let ef = ef
-            .unwrap_or(self.params.ef_search)
-            .max(k)
-            .min(self.links.len());
+        let ef = ef.unwrap_or(self.params.ef_search).max(k).min(self.links.len());
         let mut found = self.search_layer(query, &[ep], ef, 0, store, accept);
         found.truncate(k);
         found
@@ -322,10 +314,7 @@ impl HnswIndex {
         // so every edge on a layer must lead to a node that has that layer.
         for node in &index.links {
             for (layer, neighbours) in node.iter().enumerate() {
-                if neighbours
-                    .iter()
-                    .any(|&n| index.links[n as usize].len() <= layer)
-                {
+                if neighbours.iter().any(|&n| index.links[n as usize].len() <= layer) {
                     return Err(Error::Corrupt("hnsw edge points to a missing layer".into()));
                 }
             }
@@ -340,9 +329,7 @@ impl HnswIndex {
                 return Err(Error::Corrupt("hnsw entry point outside the graph".into()));
             }
             if index.links[entry as usize].len() != index.max_level + 1 {
-                return Err(Error::Corrupt(
-                    "hnsw entry point is not on the top layer".into(),
-                ));
+                return Err(Error::Corrupt("hnsw entry point is not on the top layer".into()));
             }
             index.entry = Some(entry);
         } else if index.max_level != 0 {
@@ -398,9 +385,7 @@ mod tests {
         let mut rng = SplitMix64(seed);
         let mut store = VectorStore::new(dim);
         for i in 0..n {
-            let v: Vec<f32> = (0..dim)
-                .map(|_| rng.next_f64() as f32 * 2.0 - 1.0)
-                .collect();
+            let v: Vec<f32> = (0..dim).map(|_| rng.next_f64() as f32 * 2.0 - 1.0).collect();
             store.push(i.to_string(), &v, None);
         }
         store
@@ -465,13 +450,8 @@ mod tests {
         }
         let mut buf = Vec::new();
         hnsw.write_to(&mut buf).unwrap();
-        let restored = HnswIndex::read_from(
-            &mut Reader::new(&buf),
-            HnswParams::default(),
-            Metric::Cosine,
-            200,
-        )
-        .unwrap();
+        let restored =
+            HnswIndex::read_from(&mut Reader::new(&buf), HnswParams::default(), Metric::Cosine, 200).unwrap();
         assert_eq!(restored.links, hnsw.links);
         assert_eq!(restored.entry, hnsw.entry);
         assert_eq!(restored.max_level, hnsw.max_level);
@@ -504,9 +484,6 @@ mod tests {
     fn empty_index_returns_nothing() {
         let store = VectorStore::new(2);
         let hnsw = HnswIndex::new(HnswParams::default(), Metric::Cosine);
-        assert!(
-            hnsw.search(&[1.0, 0.0], 5, None, &store, &|_| true)
-                .is_empty()
-        );
+        assert!(hnsw.search(&[1.0, 0.0], 5, None, &store, &|_| true).is_empty());
     }
 }

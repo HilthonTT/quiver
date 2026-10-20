@@ -146,9 +146,7 @@ fn parse_condition(op: &str, arg: &Value) -> Result<Condition> {
         if arg.is_number() || arg.is_string() {
             Ok(arg.clone())
         } else {
-            Err(Error::InvalidFilter(format!(
-                "`{op}` expects a number or string"
-            )))
+            Err(Error::InvalidFilter(format!("`{op}` expects a number or string")))
         }
     };
 

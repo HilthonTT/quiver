@@ -62,10 +62,7 @@ fn main() -> quiver_db::Result<()> {
     let t = Instant::now();
     let truth: Vec<HashSet<String>> = queries
         .iter()
-        .map(|q| {
-            flat.search(q, K)
-                .map(|h| h.into_iter().map(|h| h.id).collect())
-        })
+        .map(|q| flat.search(q, K).map(|h| h.into_iter().map(|h| h.id).collect()))
         .collect::<Result<_, _>>()?;
     let flat_qps = nq as f64 / t.elapsed().as_secs_f64();
     println!("{:<14} {:>10} {:>10}", "index", "QPS", "recall@10");
@@ -109,12 +106,7 @@ fn main() -> quiver_db::Result<()> {
         }
         let qps = nq as f64 / t.elapsed().as_secs_f64();
         let recall = hits as f64 / (nq * K) as f64;
-        println!(
-            "{:<14} {:>10.0} {:>10.4}",
-            format!("hnsw ef={ef}"),
-            qps,
-            recall
-        );
+        println!("{:<14} {:>10.0} {:>10.4}", format!("hnsw ef={ef}"), qps, recall);
     }
     Ok(())
 }

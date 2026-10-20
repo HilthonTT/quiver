@@ -79,9 +79,7 @@ pub fn decode(buf: &[u8], dim: usize) -> Result<State> {
     }
     let version = r.u32()?;
     if version != VERSION {
-        return Err(Error::Corrupt(format!(
-            "unsupported state version {version}"
-        )));
+        return Err(Error::Corrupt(format!("unsupported state version {version}")));
     }
     let stored_dim = r.u32()? as usize;
     if stored_dim != dim {

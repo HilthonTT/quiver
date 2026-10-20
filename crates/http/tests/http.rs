@@ -4,11 +4,11 @@ use axum::Router;
 use axum::body::Body;
 use axum::http::{Method, Request, StatusCode};
 use http_body_util::BodyExt;
-use serde_json::{Value, json};
-use tower::ServiceExt;
 use quiver_db::auth::{ApiKey, KeyStore, Role};
 use quiver_db::{Database, DbOptions, StorageKind};
 use quiver_http::{HttpOptions, router};
+use serde_json::{Value, json};
+use tower::ServiceExt;
 
 struct TestApp {
     app: Router,
@@ -139,10 +139,7 @@ async fn collection_lifecycle() {
 async fn search_with_filter() {
     let app = TestApp::seeded().await;
     let (status, body) = app
-        .post(
-            "/collections/books/search",
-            json!({"vector": [1.0, 0.1], "k": 2}),
-        )
+        .post("/collections/books/search", json!({"vector": [1.0, 0.1], "k": 2}))
         .await;
     assert_eq!(status, StatusCode::OK, "{body}");
     let ids: Vec<&str> = body["results"]
@@ -191,9 +188,7 @@ async fn point_crud() {
         json!({"id": "a", "vector": [0.0, 0.0], "metadata": {"genre": "sf"}})
     );
 
-    let (_, body) = app
-        .get("/collections/books/points/a?with_vectors=false")
-        .await;
+    let (_, body) = app.get("/collections/books/points/a?with_vectors=false").await;
     assert!(body.get("vector").is_none());
 
     let (_, body) = app
@@ -212,10 +207,7 @@ async fn point_crud() {
     assert_eq!(body["next_offset"], Value::Null);
 
     let (_, body) = app
-        .post(
-            "/collections/books/points/delete",
-            json!({"ids": ["a", "nope"]}),
-        )
+        .post("/collections/books/points/delete", json!({"ids": ["a", "nope"]}))
         .await;
     assert_eq!(body["deleted"], 1);
     let (status, _) = app
@@ -303,11 +295,7 @@ async fn api_keys_and_roles_are_enforced() {
         StatusCode::OK,
         "health is always public"
     );
-    assert_eq!(
-        app.get("/").await.0,
-        StatusCode::OK,
-        "root is always public"
-    );
+    assert_eq!(app.get("/").await.0, StatusCode::OK, "root is always public");
     let (status, body) = app.get("/collections").await;
     assert_eq!(status, StatusCode::UNAUTHORIZED);
     assert_eq!(body["error"]["code"], "unauthorized");
@@ -354,10 +342,7 @@ async fn missing_ids_are_generated() {
     assert_eq!(ids[0].as_str().unwrap().len(), 36);
     assert_eq!(ids[1], "named");
     let (status, _) = app
-        .get(&format!(
-            "/collections/books/points/{}",
-            ids[0].as_str().unwrap()
-        ))
+        .get(&format!("/collections/books/points/{}", ids[0].as_str().unwrap()))
         .await;
     assert_eq!(status, StatusCode::OK);
 }
@@ -405,10 +390,7 @@ async fn snapshot_lifecycle() {
         .await;
     assert_eq!(status, StatusCode::CONFLICT);
     let (status, _) = app
-        .post(
-            &format!("/snapshots/{id}/restore"),
-            json!({"replace": true}),
-        )
+        .post(&format!("/snapshots/{id}/restore"), json!({"replace": true}))
         .await;
     assert_eq!(status, StatusCode::OK);
 
@@ -448,11 +430,7 @@ async fn snapshot_lifecycle() {
     assert_eq!(app.get(&format!("/snapshots/{id}")).await.0, StatusCode::OK);
 
     let res = app
-        .raw(
-            Request::post("/snapshots")
-                .body(Body::from("garbage"))
-                .unwrap(),
-        )
+        .raw(Request::post("/snapshots").body(Body::from("garbage")).unwrap())
         .await;
     assert!(res.status().is_client_error() || res.status().is_server_error());
     assert_eq!(
@@ -466,17 +444,13 @@ async fn snapshot_lifecycle() {
 
 #[tokio::test]
 async fn snapshots_disabled_is_reported() {
-    let app = Router::new().merge(router(
-        Arc::new(Database::in_memory()),
-        HttpOptions::default(),
-    ));
+    let app = Router::new().merge(router(Arc::new(Database::in_memory()), HttpOptions::default()));
     let t = TestApp {
         app,
         key: None,
         _dir: tempfile::tempdir().unwrap(),
     };
-    t.post("/collections", json!({"name": "a", "dimension": 2}))
-        .await;
+    t.post("/collections", json!({"name": "a", "dimension": 2})).await;
     let (status, body) = t.post("/collections/a/snapshots", json!({})).await;
     assert_eq!(status, StatusCode::NOT_IMPLEMENTED);
     assert_eq!(body["error"]["code"], "unsupported");

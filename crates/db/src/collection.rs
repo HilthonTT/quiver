@@ -4,17 +4,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use parking_lot::RwLock;
-use serde::{Deserialize, Serialize};
-use serde_json::Value;
 use quiver_index::Index;
 use quiver_snapshot::{SnapshotInfo, SnapshotRegistry};
 use quiver_storage::{
-    Mutation, Op, Recovered, StorageEngine, StorageKind, StorageOptions, VectorStore, open_engine,
-    state,
+    Mutation, Op, Recovered, StorageEngine, StorageKind, StorageOptions, VectorStore, open_engine, state,
 };
 use quiver_types::{
     CollectionConfig, CollectionInfo, Error, MAX_ID_LEN, Point, Result, SearchHit, SearchOptions,
 };
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 /// Compact once at least this many slots are tombstoned...
 const COMPACT_MIN_TOMBSTONES: usize = 1_024;
@@ -67,12 +66,7 @@ fn engine_dir(dir: &Path, kind: StorageKind) -> PathBuf {
 }
 
 impl Collection {
-    pub(crate) fn create(
-        name: &str,
-        config: CollectionConfig,
-        dir: Option<&Path>,
-        env: Env,
-    ) -> Result<Self> {
+    pub(crate) fn create(name: &str, config: CollectionConfig, dir: Option<&Path>, env: Env) -> Result<Self> {
         config.validate()?;
         let storage = env.storage;
 
@@ -86,11 +80,7 @@ impl Collection {
                         storage,
                     },
                 )?;
-                open_engine(
-                    storage,
-                    Some(&engine_dir(dir, storage)),
-                    env.storage_options,
-                )?
+                open_engine(storage, Some(&engine_dir(dir, storage)), env.storage_options)?
             }
             _ => open_engine(StorageKind::Memory, None, env.storage_options)?,
         };
@@ -124,23 +114,13 @@ impl Collection {
             env.storage_options,
         )?;
 
-        let Recovered {
-            store,
-            index,
-            replay,
-        } = engine.recover(meta.config.dimension)?;
+        let Recovered { store, index, replay } = engine.recover(meta.config.dimension)?;
         let index = match index {
-            Some(bytes) => {
-                Index::from_bytes(&bytes, &meta.config.index, meta.config.metric, &store)?
-            }
+            Some(bytes) => Index::from_bytes(&bytes, &meta.config.index, meta.config.metric, &store)?,
             None => Index::build(&meta.config.index, meta.config.metric, &store),
         };
 
-        let mut inner = Inner {
-            store,
-            index,
-            engine,
-        };
+        let mut inner = Inner { store, index, engine };
         let replayed = replay.len();
         for m in replay {
             match m {
@@ -288,10 +268,7 @@ impl Collection {
 
     pub fn get(&self, id: &str) -> Option<Point> {
         let inner = self.inner.read();
-        inner
-            .store
-            .slot_of(id)
-            .map(|slot| point_at(&inner.store, slot))
+        inner.store.slot_of(id).map(|slot| point_at(&inner.store, slot))
     }
 
     pub fn get_many<S: AsRef<str>>(&self, ids: &[S]) -> Vec<Point> {
@@ -317,12 +294,7 @@ impl Collection {
         self.search_with(vector, k, &SearchOptions::default())
     }
 
-    pub fn search_with(
-        &self,
-        vector: &[f32],
-        k: usize,
-        opts: &SearchOptions,
-    ) -> Result<Vec<SearchHit>> {
+    pub fn search_with(&self, vector: &[f32], k: usize, opts: &SearchOptions) -> Result<Vec<SearchHit>> {
         let mut query = vector.to_vec();
         self.validate_vector(&mut query)?;
 
@@ -364,10 +336,11 @@ impl Collection {
     }
 
     pub fn create_snapshot(&self) -> Result<SnapshotInfo> {
-        let registry =
-            self.env.snapshots.as_ref().ok_or_else(|| {
-                Error::Unsupported("this database has no snapshot directory".into())
-            })?;
+        let registry = self
+            .env
+            .snapshots
+            .as_ref()
+            .ok_or_else(|| Error::Unsupported("this database has no snapshot directory".into()))?;
         let info = {
             let inner = self.inner.read();
             self.ensure_open()?;

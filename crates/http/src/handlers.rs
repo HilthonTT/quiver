@@ -10,8 +10,8 @@ use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 
 use quiver_db::{
-    Collection, CollectionConfig, CollectionInfo, Database, Filter, Point, PointInput,
-    RestoreOptions, SearchOptions, SnapshotInfo,
+    Collection, CollectionConfig, CollectionInfo, Database, Filter, Point, PointInput, RestoreOptions,
+    SearchOptions, SnapshotInfo,
 };
 
 use crate::error::ApiError;
@@ -103,18 +103,12 @@ pub async fn get_collection(
     Ok(Json(collection(&db, &name)?.info()))
 }
 
-pub async fn drop_collection(
-    State(db): State<AppState>,
-    Path(name): Path<String>,
-) -> ApiResult<StatusCode> {
+pub async fn drop_collection(State(db): State<AppState>, Path(name): Path<String>) -> ApiResult<StatusCode> {
     blocking(move || db.drop_collection(&name)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 
-pub async fn flush_collection(
-    State(db): State<AppState>,
-    Path(name): Path<String>,
-) -> ApiResult<StatusCode> {
+pub async fn flush_collection(State(db): State<AppState>, Path(name): Path<String>) -> ApiResult<StatusCode> {
     let c = collection(&db, &name)?;
     blocking(move || c.flush()).await?;
     Ok(StatusCode::NO_CONTENT)
@@ -222,23 +216,15 @@ pub async fn scroll_points(
 ) -> ApiResult<Json<Value>> {
     let Query(q) = query?;
     if q.limit > MAX_SCROLL {
-        return Err(ApiError::bad_request(format!(
-            "limit must be <= {MAX_SCROLL}"
-        )));
+        return Err(ApiError::bad_request(format!("limit must be <= {MAX_SCROLL}")));
     }
     let c = collection(&db, &name)?;
     let page = blocking(move || Ok(c.scroll(q.offset, q.limit))).await?;
     // An empty page is the end even for `limit=0`, which would otherwise
     // hand back the same cursor forever.
-    let next_offset =
-        (!page.is_empty() && page.len() == q.limit).then(|| q.offset.saturating_add(q.limit));
-    let points: Vec<Value> = page
-        .into_iter()
-        .map(|p| present(p, q.with_vectors))
-        .collect();
-    Ok(Json(
-        json!({ "points": points, "next_offset": next_offset }),
-    ))
+    let next_offset = (!page.is_empty() && page.len() == q.limit).then(|| q.offset.saturating_add(q.limit));
+    let points: Vec<Value> = page.into_iter().map(|p| present(p, q.with_vectors)).collect();
+    Ok(Json(json!({ "points": points, "next_offset": next_offset })))
 }
 
 pub async fn delete_points(
@@ -285,9 +271,7 @@ fn default_k() -> usize {
 impl SearchRequest {
     fn options(&self) -> ApiResult<SearchOptions> {
         if self.k == 0 || self.k > MAX_K {
-            return Err(ApiError::bad_request(format!(
-                "k must be between 1 and {MAX_K}"
-            )));
+            return Err(ApiError::bad_request(format!("k must be between 1 and {MAX_K}")));
         }
         let filter = match &self.filter {
             Some(Value::Null) | None => None,
@@ -396,10 +380,7 @@ pub async fn get_snapshot(
     Ok(Json(info))
 }
 
-pub async fn delete_snapshot(
-    State(db): State<AppState>,
-    Path(id): Path<String>,
-) -> ApiResult<StatusCode> {
+pub async fn delete_snapshot(State(db): State<AppState>, Path(id): Path<String>) -> ApiResult<StatusCode> {
     blocking(move || db.delete_snapshot(&id)).await?;
     Ok(StatusCode::NO_CONTENT)
 }
@@ -428,10 +409,7 @@ pub async fn restore_snapshot(
 }
 
 /// Streams the archive file (`application/gzip`).
-pub async fn download_snapshot(
-    State(db): State<AppState>,
-    Path(id): Path<String>,
-) -> ApiResult<Response> {
+pub async fn download_snapshot(State(db): State<AppState>, Path(id): Path<String>) -> ApiResult<Response> {
     let (path, info) = {
         let db = Arc::clone(&db);
         let id = id.clone();
