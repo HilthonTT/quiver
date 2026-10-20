@@ -1,7 +1,7 @@
 # syntax=docker/dockerfile:1
 
 # ---- build -------------------------------------------------------------------
-FROM rust:1.89-slim-bookworm AS build
+FROM rust:1.99-slim-bookworm AS build
 # clang/libclang + g++ build the bundled RocksDB engine.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends clang libclang-dev g++ make \
