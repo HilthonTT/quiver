@@ -113,6 +113,15 @@ the server), or an ``(id, vector[, metadata])`` tuple."""
 
 
 @dataclass(frozen=True)
+class ScrollPage:
+    """One page of :meth:`Collection.scroll`: points in ascending id order."""
+
+    points: list[Point]
+    next_cursor: str | None = None
+    """Pass as ``cursor=`` to fetch the next page; ``None`` after the last page."""
+
+
+@dataclass(frozen=True)
 class SearchResult:
     """One search hit."""
 

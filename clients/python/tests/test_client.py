@@ -23,6 +23,7 @@ from quiver import (
     PermissionDeniedError,
     Point,
     QuiverConnectionError,
+    ScrollPage,
     SearchResult,
     ServerError,
 )
@@ -147,7 +148,7 @@ def test_get_on_missing_collection_raises(
     async def main() -> None:
         async with async_client as c:
             with pytest.raises(NotFoundError):
-                await (await c.collection("typo")).get("a")
+                await c.collection("typo").get("a")
 
     asyncio.run(main())
 
@@ -168,27 +169,51 @@ def test_dot_ids_are_not_dropped_from_the_path(
 
     async def main() -> None:
         async with async_client as c:
-            p = await (await c.collection("docs")).get(point_id)
+            p = await c.collection("docs").get(point_id)
             assert p is not None and p.id == point_id
 
     asyncio.run(main())
 
 
-def test_scroll_follows_pages(client: Client, mock: Recorder) -> None:
-    pages = iter(
-        [
-            {"points": [{"id": "a"}, {"id": "b"}], "next_offset": 2},
-            {"points": [{"id": "c"}], "next_offset": None},
-        ]
-    )
+def test_scroll_returns_one_page_with_its_cursor(client: Client, mock: Recorder) -> None:
+    mock.on("GET", "/collections/docs/points", 200, {"points": [{"id": "a"}], "next_cursor": "a"})
+    page = client.collection("docs").scroll(limit=1)
+    assert page == ScrollPage([Point("a", [])], "a")
+    assert dict(mock.requests[-1].url.params) == {"limit": "1", "with_vectors": "false"}
+
+    mock.on("GET", "/collections/docs/points", 200, {"points": []})
+    page = client.collection("docs").scroll("a b", limit=5, with_vectors=True)
+    assert page.next_cursor is None
+    params = mock.requests[-1].url.params
+    assert (params["cursor"], params["with_vectors"]) == ("a b", "true")
+    assert "offset" not in params
+
+
+def test_iter_points_follows_cursors(mock: Recorder) -> None:
+    pages = {
+        None: {"points": [{"id": "a"}, {"id": "b"}], "next_cursor": "b"},
+        "b": {"points": [{"id": "c"}], "next_cursor": None},
+    }
+    seen: list[str | None] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        return httpx.Response(200, json=next(pages))
+        cursor = request.url.params.get("cursor")
+        seen.append(cursor)
+        return httpx.Response(200, json=pages[cursor])
 
-    c = Client(
-        http_client=httpx.Client(base_url="http://t", transport=httpx.MockTransport(handler))
-    )
-    assert [p.id for p in c.collection("docs").scroll(page_size=2)] == ["a", "b", "c"]
+    transport = httpx.MockTransport(handler)
+    c = Client(http_client=httpx.Client(base_url="http://t", transport=transport))
+    assert [p.id for p in c.collection("docs").iter_points(page_size=2)] == ["a", "b", "c"]
+    assert seen == [None, "b"]
+
+    async def main() -> None:
+        http = httpx.AsyncClient(base_url="http://t", transport=transport)
+        async with AsyncClient(http_client=http) as ac:
+            col = ac.collection("docs")
+            assert [p.id async for p in col.iter_points(page_size=2)] == ["a", "b", "c"]
+            assert (await col.scroll("b")).next_cursor is None
+
+    asyncio.run(main())
 
 
 def test_delete(client: Client, mock: Recorder) -> None:

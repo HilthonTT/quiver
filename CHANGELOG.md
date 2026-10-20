@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Breaking:** listing points pages by id cursor instead of offset, so changes between pages never skip or repeat points.
+  Points come back in ascending id order; REST `offset`/`next_offset` are now `cursor`/`next_cursor` (an `offset` parameter is rejected),
+  likewise in gRPC `Scroll`, `Collection::scroll` and the Rust client. In Python, `scroll(cursor=, limit=)` returns one `ScrollPage`
+  and `iter_points()` iterates over everything.
+- **Breaking:** Python `AsyncClient.collection()` is now a plain method (no `await`), like `Client.collection()`.
 - Malformed or wrongly shaped JSON bodies (including unknown fields) now return 400 `invalid_body` instead of 422.
 - Uploaded snapshots are verified by streaming (manifest first, size and SHA-256 checked) instead of being decoded in memory,
   so an upload that decompresses to far more than its size cannot exhaust memory.

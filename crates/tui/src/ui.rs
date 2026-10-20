@@ -4,7 +4,7 @@ use ratatui::style::{Color, Modifier, Style, Stylize};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Cell, Clear, Paragraph, Row, Table, TableState, Wrap};
 
-use crate::app::{App, FieldKind, Form, ListMode, Modal, Screen, ServerState, short_id};
+use crate::app::{App, FieldKind, Form, ListMode, Modal, PAGE_SIZE, Screen, ServerState, short_id};
 use crate::input::{format_bytes, format_timestamp, preview_json, truncate};
 
 const ACCENT: Color = Color::Rgb(249, 115, 22);
@@ -157,12 +157,13 @@ fn draw_collection(frame: &mut Frame, area: Rect, app: &App) {
     let name = app.current.as_deref().unwrap_or("?");
     let (title, rows, widths, header): (String, Vec<Row>, Vec<Constraint>, Row) = match &app.list {
         ListMode::Points => {
-            let end = app.offset + app.points.len();
-            let more = if app.next_offset.is_some() { "+" } else { "" };
+            let start = app.page_index() * PAGE_SIZE;
+            let end = start + app.points.len();
+            let more = if app.next_cursor.is_some() { "+" } else { "" };
             (
                 format!(
                     "{name} · points {}–{end}{more}",
-                    if end == 0 { 0 } else { app.offset + 1 }
+                    if end == start { start } else { start + 1 }
                 ),
                 app.points
                     .iter()
@@ -367,6 +368,7 @@ mod tests {
     use super::*;
     use crate::app::tests::{collection, press};
     use quiver_client::ServerInfo;
+    use quiver_types::Point;
     use ratatui::Terminal;
     use ratatui::backend::TestBackend;
     use ratatui::crossterm::event::KeyCode;
@@ -383,30 +385,6 @@ mod tests {
             })
             .collect::<Vec<_>>()
             .join("\n")
-    }
-
-    #[test]
-    fn form_cursor_follows_wide_characters() {
-        let mut app = App::new("http://x", false);
-        app.screen = Screen::Collection;
-        app.current = Some("docs".into());
-        press(&mut app, KeyCode::Char('i'));
-        for c in "日本".chars() {
-            press(&mut app, KeyCode::Char(c));
-        }
-        let mut terminal = Terminal::new(TestBackend::new(110, 34)).unwrap();
-        terminal.draw(|f| draw(f, &app)).unwrap();
-        let buf = terminal.backend().buffer();
-        let last = (0..buf.area.height)
-            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
-            .find(|&(x, y)| buf[(x, y)].symbol() == "本")
-            .unwrap();
-        let cursor = terminal.get_cursor_position().unwrap();
-        assert_eq!(
-            (cursor.x, cursor.y),
-            (last.0 + 2, last.1),
-            "cursor sits after the text"
-        );
     }
 
     #[test]
@@ -446,6 +424,46 @@ mod tests {
         let screen = render(&app);
         assert!(screen.contains("New collection"));
         assert!(screen.contains("◀ cosine ▶"));
+    }
+
+    #[test]
+    fn form_cursor_follows_wide_characters() {
+        let mut app = App::new("http://x", false);
+        app.screen = Screen::Collection;
+        app.current = Some("docs".into());
+        press(&mut app, KeyCode::Char('i'));
+        for c in "日本".chars() {
+            press(&mut app, KeyCode::Char(c));
+        }
+        let mut terminal = Terminal::new(TestBackend::new(110, 34)).unwrap();
+        terminal.draw(|f| draw(f, &app)).unwrap();
+        let buf = terminal.backend().buffer();
+        let last = (0..buf.area.height)
+            .flat_map(|y| (0..buf.area.width).map(move |x| (x, y)))
+            .find(|&(x, y)| buf[(x, y)].symbol() == "本")
+            .unwrap();
+        let cursor = terminal.get_cursor_position().unwrap();
+        assert_eq!(
+            (cursor.x, cursor.y),
+            (last.0 + 2, last.1),
+            "cursor sits after the text"
+        );
+    }
+
+    #[test]
+    fn points_title_counts_pages() {
+        let mut app = App::new("http://x", false);
+        app.screen = Screen::Collection;
+        app.current = Some("docs".into());
+        app.cursors = vec![None, Some("p049".into()), Some("p099".into())];
+        app.points = (100..105).map(|i| Point::new(format!("p{i}"), vec![])).collect();
+        assert!(render(&app).contains("docs · points 101–105 "));
+        app.next_cursor = Some("p104".into());
+        assert!(render(&app).contains("docs · points 101–105+"));
+        app.points.clear();
+        app.cursors.truncate(1);
+        app.next_cursor = None;
+        assert!(render(&app).contains("docs · points 0–0 "));
     }
 
     #[test]

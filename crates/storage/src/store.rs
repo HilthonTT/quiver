@@ -1,4 +1,5 @@
-use std::collections::HashMap;
+use std::collections::BTreeMap;
+use std::ops::Bound;
 
 use serde_json::Value;
 
@@ -9,7 +10,9 @@ pub struct VectorStore {
     ids: Vec<String>,
     metadata: Vec<Option<Value>>,
     alive: Vec<bool>,
-    id_to_slot: HashMap<String, u32>,
+    /// Live ids, ordered, so pages can be served in id order. Rebuilt from
+    /// `push`/`remove` on load, so it never needs to be persisted.
+    id_to_slot: BTreeMap<String, u32>,
 }
 
 impl VectorStore {
@@ -20,7 +23,7 @@ impl VectorStore {
             ids: Vec::new(),
             metadata: Vec::new(),
             alive: Vec::new(),
-            id_to_slot: HashMap::new(),
+            id_to_slot: BTreeMap::new(),
         }
     }
 
@@ -99,6 +102,15 @@ impl VectorStore {
         }
     }
 
+    /// Live points with an id greater than `after` (all of them if `None`),
+    /// in ascending byte-wise id order.
+    pub fn live_after<'a>(&'a self, after: Option<&str>) -> impl Iterator<Item = (&'a str, u32)> + 'a {
+        let start = after.map_or(Bound::Unbounded, Bound::Excluded);
+        self.id_to_slot
+            .range::<str, _>((start, Bound::Unbounded))
+            .map(|(id, &slot)| (id.as_str(), slot))
+    }
+
     pub fn live_slots(&self) -> impl Iterator<Item = u32> + '_ {
         (0..self.slots() as u32).filter(|&s| self.is_alive(s))
     }
@@ -121,6 +133,25 @@ mod tests {
         assert!(!s.is_alive(a));
         assert_eq!(s.slot_of("a"), Some(a2));
         assert_eq!((s.live(), s.tombstones()), (1, 1));
+    }
+
+    #[test]
+    fn live_after_is_ordered_and_exclusive() {
+        let mut s = VectorStore::new(1);
+        for id in ["b", "a", "d", "c"] {
+            s.push(id.into(), &[1.0], None);
+        }
+        s.remove("c");
+        s.push("a".into(), &[2.0], None);
+        let ids = |after| s.live_after(after).map(|(id, _)| id).collect::<Vec<_>>();
+        assert_eq!(ids(None), ["a", "b", "d"]);
+        assert_eq!(ids(Some("a")), ["b", "d"]);
+        assert_eq!(ids(Some("bb")), ["d"]);
+        assert!(ids(Some("d")).is_empty());
+        assert_eq!(
+            s.live_after(None).next().map(|(_, slot)| s.vector(slot)[0]),
+            Some(2.0)
+        );
     }
 
     #[test]

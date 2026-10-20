@@ -201,16 +201,20 @@ impl pb::quiver_server::Quiver for QuiverService {
         if limit > MAX_SCROLL {
             return Err(Status::invalid_argument(format!("limit must be <= {MAX_SCROLL}")));
         }
-        let offset = req.offset as usize;
+        let cursor = (!req.cursor.is_empty()).then(|| req.cursor.clone());
+        let collection = req.collection.clone();
         let page = self
-            .blocking(move |db| Ok(db.collection(&req.collection)?.scroll(offset, limit)))
+            .blocking(move |db| Ok(db.collection(&collection)?.scroll(cursor.as_deref(), limit)))
             .await?;
-        let next_offset = (page.len() == limit).then(|| offset.saturating_add(limit) as u64);
         let points = page
+            .points
             .into_iter()
             .map(|p| point_to_pb(p, req.with_vectors))
             .collect();
-        Ok(Response::new(pb::ScrollResponse { points, next_offset }))
+        Ok(Response::new(pb::ScrollResponse {
+            points,
+            next_cursor: page.next_cursor,
+        }))
     }
 
     async fn search(&self, req: Request<pb::SearchRequest>) -> Rpc<pb::SearchResponse> {

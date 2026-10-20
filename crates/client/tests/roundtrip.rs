@@ -66,9 +66,12 @@ async fn full_lifecycle() {
     assert_eq!((info.collections, info.points), (1, 2));
     assert_eq!(info.storage, "memory");
 
-    let page = c.scroll("docs", 0, 1, false).await.unwrap();
-    assert_eq!(page.points.len(), 1);
-    assert_eq!(page.next_offset, Some(1));
+    let page = c.scroll("docs", None, 1, false).await.unwrap();
+    assert_eq!(page.points[0].id, "a");
+    assert_eq!(page.next_cursor.as_deref(), Some("a"));
+    let page = c.scroll("docs", Some("a"), 1, false).await.unwrap();
+    assert_eq!(page.points[0].id, "b");
+    assert_eq!(page.next_cursor, None, "no cursor after the last page");
 
     let hits = c
         .search("docs", &SearchRequest::new(vec![0.0, 1.0], 1))

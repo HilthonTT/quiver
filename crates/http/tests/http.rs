@@ -201,10 +201,10 @@ async fn point_crud() {
 
     let (_, body) = app.get("/collections/books/points?limit=2").await;
     assert_eq!(body["points"].as_array().unwrap().len(), 2);
-    assert_eq!(body["next_offset"], 2);
-    let (_, body) = app.get("/collections/books/points?offset=2&limit=2").await;
+    assert_eq!(body["next_cursor"], "b");
+    let (_, body) = app.get("/collections/books/points?cursor=b&limit=2").await;
     assert_eq!(body["points"].as_array().unwrap().len(), 1);
-    assert_eq!(body["next_offset"], Value::Null);
+    assert_eq!(body["next_cursor"], Value::Null);
 
     let (_, body) = app
         .post("/collections/books/points/delete", json!({"ids": ["a", "nope"]}))
@@ -220,6 +220,42 @@ async fn point_crud() {
     assert_eq!(status, StatusCode::NOT_FOUND);
     let (_, info) = app.get("/collections/books").await;
     assert_eq!(info["count"], 1);
+}
+
+#[tokio::test]
+async fn scroll_pages_by_cursor_in_id_order() {
+    let app = TestApp::seeded().await;
+    let page = |body: &Value| -> Vec<String> {
+        body["points"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|p| p["id"].as_str().unwrap().to_owned())
+            .collect()
+    };
+
+    let (status, body) = app.get("/collections/books/points?limit=1").await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        (page(&body), &body["next_cursor"]),
+        (vec!["a".to_owned()], &json!("a"))
+    );
+    // A page that exactly reaches the end hands out no cursor.
+    let (_, body) = app.get("/collections/books/points?cursor=a&limit=2").await;
+    assert_eq!(page(&body), ["b", "c"]);
+    assert_eq!(body["next_cursor"], Value::Null);
+    // The cursor need not be a live id.
+    let (_, body) = app.get("/collections/books/points?cursor=aa").await;
+    assert_eq!(page(&body), ["b", "c"]);
+
+    let (status, _) = app.get("/collections/books/points?limit=10001").await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let (status, body) = app.get("/collections/books/points?offset=1").await;
+    assert_eq!(
+        status,
+        StatusCode::BAD_REQUEST,
+        "offset is no longer accepted: {body}"
+    );
 }
 
 #[tokio::test]

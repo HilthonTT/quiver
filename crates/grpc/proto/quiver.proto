@@ -168,16 +168,23 @@ message DeletePointsResponse {
   uint64 deleted = 1;
 }
 
+// Pages through points in ascending id order.
 message ScrollRequest {
+  reserved 2;
+  reserved "offset";
   string collection = 1;
-  uint64 offset = 2;
   // 0 means the default (100).
   uint32 limit = 3;
   bool with_vectors = 4;
+  // Exclusive: start after this id. Empty means from the start.
+  string cursor = 5;
 }
 message ScrollResponse {
+  reserved 2;
+  reserved "next_offset";
   repeated Point points = 1;
-  optional uint64 next_offset = 2;
+  // Pass as the next `cursor`; unset when there are no further points.
+  optional string next_cursor = 3;
 }
 
 message SearchRequest {

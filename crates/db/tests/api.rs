@@ -126,13 +126,88 @@ fn search_options_can_omit_metadata() {
 }
 
 #[test]
-fn scroll_pages_through_points() {
+fn scroll_pages_through_points_in_id_order() {
     let c = db_with(Metric::Euclidean, IndexConfig::Flat);
-    c.upsert((0..10).map(|i| Point::new(i.to_string(), vec![i as f32, 0.0])))
+    // Inserted out of order: pages follow ids, not insertion.
+    c.upsert([9, 3, 0, 7, 1, 8, 2, 6, 4, 5].map(|i| Point::new(i.to_string(), vec![i as f32, 0.0])))
         .unwrap();
     c.delete(&["0"]).unwrap();
-    let page: Vec<String> = c.scroll(2, 3).into_iter().map(|p| p.id).collect();
-    assert_eq!(page, ["3", "4", "5"]);
+    let page = c.scroll(Some("2"), 3);
+    let ids: Vec<String> = page.points.into_iter().map(|p| p.id).collect();
+    assert_eq!(ids, ["3", "4", "5"]);
+    assert_eq!(page.next_cursor.as_deref(), Some("5"));
+
+    let first = c.scroll(None, 2);
+    assert_eq!(first.points[0].id, "1");
+    // The last page hands out no cursor, even when it is exactly full.
+    let last = c.scroll(Some("6"), 3);
+    assert_eq!(last.points.len(), 3);
+    assert_eq!(last.next_cursor, None);
+    assert!(c.scroll(Some("9"), 3).points.is_empty());
+    assert_eq!(c.scroll(None, 0).next_cursor, None, "limit 0 never loops");
+}
+
+/// Pages through `c` `limit` at a time, calling `between` with the page
+/// number and the last id seen after each page.
+fn scroll_all(c: &quiver_db::Collection, limit: usize, mut between: impl FnMut(usize, &str)) -> Vec<String> {
+    let (mut seen, mut cursor, mut page_no) = (Vec::<String>::new(), None::<String>, 0);
+    loop {
+        let page = c.scroll(cursor.as_deref(), limit);
+        seen.extend(page.points.into_iter().map(|p| p.id));
+        between(page_no, seen.last().map_or("", String::as_str));
+        page_no += 1;
+        match page.next_cursor {
+            Some(next) => cursor = Some(next),
+            None => return seen,
+        }
+    }
+}
+
+#[test]
+fn scroll_never_skips_or_repeats_points_changed_between_pages() {
+    let c = db_with(Metric::Euclidean, IndexConfig::Flat);
+    let id = |i: usize| format!("p{i:03}");
+    let ids: Vec<String> = (0..100).map(id).collect();
+    c.upsert(ids.iter().map(|id| Point::new(id.clone(), vec![1.0, 0.0])))
+        .unwrap();
+
+    let mut deleted_ahead = Vec::new();
+    let seen = scroll_all(&c, 10, |_, last| {
+        let n: usize = last[1..].parse().unwrap();
+        // Delete one point already seen and one still ahead, and update
+        // (re-insert, which moves it to a new slot) one on each side.
+        let (behind, ahead) = (id(n - 3), id(n + 4));
+        c.delete(&[behind, ahead.clone()]).unwrap();
+        deleted_ahead.push(ahead);
+        let updated = [n - 1, n + 7].into_iter().filter(|&i| i < 100).map(id);
+        c.upsert(updated.map(|id| Point::new(id, vec![0.0, 1.0])))
+            .unwrap();
+    });
+
+    let expected: Vec<&String> = ids.iter().filter(|id| !deleted_ahead.contains(id)).collect();
+    assert_eq!(
+        seen.iter().collect::<Vec<_>>(),
+        expected,
+        "every surviving point exactly once"
+    );
+}
+
+#[test]
+fn scroll_cursor_survives_compaction() {
+    let c = db_with(Metric::Euclidean, IndexConfig::Flat);
+    c.upsert((0..50).map(|i| Point::new(format!("p{i:02}"), vec![i as f32, 0.0])))
+        .unwrap();
+    let seen = scroll_all(&c, 7, |page, _| {
+        if page == 1 {
+            let gone: Vec<String> = (0..50).step_by(2).map(|i| format!("p{i:02}")).collect();
+            c.delete(&gone).unwrap();
+            c.compact().unwrap();
+            assert_eq!(c.info().tombstones, 0);
+        }
+    });
+    let mut expected: Vec<String> = (0..14).map(|i| format!("p{i:02}")).collect();
+    expected.extend((14..50).filter(|i| i % 2 == 1).map(|i| format!("p{i:02}")));
+    assert_eq!(seen, expected);
 }
 
 #[test]

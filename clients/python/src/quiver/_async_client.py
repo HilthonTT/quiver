@@ -21,6 +21,7 @@ from ._models import (
     Metric,
     Point,
     PointLike,
+    ScrollPage,
     SearchResult,
     SnapshotInfo,
     Vector,
@@ -57,8 +58,6 @@ class AsyncClient:
             base_url=url.rstrip("/"), headers=_headers(api_key), timeout=timeout
         )
 
-    # --- plumbing -------------------------------------------------------
-
     async def _run(self, call: proto.Call[T]) -> T:
         try:
             response = await self._http.request(
@@ -93,8 +92,6 @@ class AsyncClient:
         tb: TracebackType | None,
     ) -> None:
         await self.aclose()
-
-    # --- server & collections -------------------------------------------
 
     async def health(self) -> dict[str, Any]:
         """Returns the server status and version."""
@@ -143,15 +140,13 @@ class AsyncClient:
         except ConflictError:
             return AsyncCollection(self, name)
 
-    async def collection(self, name: str) -> AsyncCollection:
+    def collection(self, name: str) -> AsyncCollection:
         """Returns a handle without checking that the collection exists."""
         return AsyncCollection(self, name)
 
     async def delete_collection(self, name: str) -> None:
         """Deletes a collection and all of its points."""
         await self._run(proto.delete_collection(name))
-
-    # --- snapshots --------------------------------------------------------
 
     async def list_snapshots(self, collection: str | None = None) -> list[SnapshotInfo]:
         """Lists snapshots, oldest first, optionally only one collection's."""
@@ -245,16 +240,28 @@ class AsyncCollection:
         return await self._client._run(proto.lookup(self.name, ids, with_vectors))
 
     async def scroll(
+        self, cursor: str | None = None, *, limit: int = 100, with_vectors: bool = False
+    ) -> ScrollPage:
+        """Fetches up to ``limit`` points with ids after ``cursor``, in ascending id order.
+
+        Pass the page's ``next_cursor`` to get the next page; it is ``None``
+        after the last one. Points changed between pages are never skipped or
+        repeated.
+        """
+        return await self._client._run(proto.scroll(self.name, cursor, limit, with_vectors))
+
+    async def iter_points(
         self, *, page_size: int = 500, with_vectors: bool = False
     ) -> AsyncIterator[Point]:
-        """Iterates over every point in the collection, page by page."""
-        offset: int | None = 0
-        while offset is not None:
-            page, offset = await self._client._run(
-                proto.scroll(self.name, offset, page_size, with_vectors)
-            )
-            for point in page:
+        """Iterates over every point in the collection in id order, page by page."""
+        cursor: str | None = None
+        while True:
+            page = await self.scroll(cursor, limit=page_size, with_vectors=with_vectors)
+            for point in page.points:
                 yield point
+            if page.next_cursor is None:
+                return
+            cursor = page.next_cursor
 
     async def delete(self, ids: Sequence[str]) -> int:
         """Deletes points by id. Returns how many existed."""

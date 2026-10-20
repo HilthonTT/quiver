@@ -2,7 +2,7 @@ mod collection;
 mod db;
 mod scheduler;
 
-pub use collection::Collection;
+pub use collection::{Collection, ScrollPage};
 pub use db::{Database, DbOptions, RestoreOptions};
 pub use scheduler::SnapshotScheduler;
 

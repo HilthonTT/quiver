@@ -166,9 +166,11 @@ pub struct PointQuery {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct ScrollQuery {
+    /// Exclusive: the page starts after this id.
     #[serde(default)]
-    offset: usize,
+    cursor: Option<String>,
     #[serde(default = "default_limit")]
     limit: usize,
     #[serde(default)]
@@ -253,12 +255,14 @@ pub async fn scroll_points(
         return Err(ApiError::bad_request(format!("limit must be <= {MAX_SCROLL}")));
     }
     let c = collection(&db, &name)?;
-    let page = blocking(move || Ok(c.scroll(q.offset, q.limit))).await?;
-    // An empty page is the end even for `limit=0`, which would otherwise
-    // hand back the same cursor forever.
-    let next_offset = (!page.is_empty() && page.len() == q.limit).then(|| q.offset.saturating_add(q.limit));
-    let points: Vec<Value> = page.into_iter().map(|p| present(p, q.with_vectors)).collect();
-    Ok(Json(json!({ "points": points, "next_offset": next_offset })))
+    let (cursor, limit) = (q.cursor, q.limit);
+    let page = blocking(move || Ok(c.scroll(cursor.as_deref(), limit))).await?;
+    let points: Vec<Value> = page
+        .points
+        .into_iter()
+        .map(|p| present(p, q.with_vectors))
+        .collect();
+    Ok(Json(json!({ "points": points, "next_cursor": page.next_cursor })))
 }
 
 pub async fn delete_points(

@@ -20,6 +20,7 @@ from ._models import (
     Metric,
     Point,
     PointLike,
+    ScrollPage,
     SearchResult,
     SnapshotInfo,
     Vector,
@@ -263,14 +264,26 @@ class Collection:
         """Fetches several points; missing ids are skipped."""
         return self._client._run(proto.lookup(self.name, ids, with_vectors))
 
-    def scroll(self, *, page_size: int = 500, with_vectors: bool = False) -> Iterator[Point]:
-        """Iterates over every point in the collection, page by page."""
-        offset: int | None = 0
-        while offset is not None:
-            page, offset = self._client._run(
-                proto.scroll(self.name, offset, page_size, with_vectors)
-            )
-            yield from page
+    def scroll(
+        self, cursor: str | None = None, *, limit: int = 100, with_vectors: bool = False
+    ) -> ScrollPage:
+        """Fetches up to ``limit`` points with ids after ``cursor``, in ascending id order.
+
+        Pass the page's ``next_cursor`` to get the next page; it is ``None``
+        after the last one. Points changed between pages are never skipped or
+        repeated.
+        """
+        return self._client._run(proto.scroll(self.name, cursor, limit, with_vectors))
+
+    def iter_points(self, *, page_size: int = 500, with_vectors: bool = False) -> Iterator[Point]:
+        """Iterates over every point in the collection in id order, page by page."""
+        cursor: str | None = None
+        while True:
+            page = self.scroll(cursor, limit=page_size, with_vectors=with_vectors)
+            yield from page.points
+            if page.next_cursor is None:
+                return
+            cursor = page.next_cursor
 
     def delete(self, ids: Sequence[str]) -> int:
         """Deletes points by id. Returns how many existed."""

@@ -56,9 +56,11 @@ pub struct ServerInfo {
 /// One page of [`Client::scroll`].
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 pub struct ScrollPage {
+    /// Points in ascending id order.
     pub points: Vec<Point>,
-    /// Offset of the next page; `None` at the end.
-    pub next_offset: Option<usize>,
+    /// Cursor for the next page; `None` at the end.
+    #[serde(default)]
+    pub next_cursor: Option<String>,
 }
 
 /// Result of [`Client::upsert`].
@@ -242,20 +244,23 @@ impl Client {
         }
     }
 
-    /// Lists points in insertion order, `limit` at a time.
+    /// Lists up to `limit` points with ids after `cursor` (from the start if
+    /// `None`), in ascending id order. Follow `next_cursor` for the next page.
     pub async fn scroll(
         &self,
         collection: &str,
-        offset: usize,
+        cursor: Option<&str>,
         limit: usize,
         with_vectors: bool,
     ) -> Result<ScrollPage> {
         let path = format!("collections/{}/points", seg(collection));
-        let query = [
-            ("offset", offset.to_string()),
+        let mut query = vec![
             ("limit", limit.to_string()),
             ("with_vectors", with_vectors.to_string()),
         ];
+        if let Some(cursor) = cursor {
+            query.push(("cursor", cursor.to_owned()));
+        }
         Self::json(self.request(Method::GET, &path).query(&query)).await
     }
 

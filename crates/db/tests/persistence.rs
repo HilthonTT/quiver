@@ -241,3 +241,31 @@ fn stale_handles_cannot_write_into_a_recreated_collection() {
     assert_eq!(c.len(), 1);
     assert!(c.get("new").is_some());
 }
+
+#[test]
+fn scroll_cursor_survives_reopen() {
+    let dir = tempfile::tempdir().unwrap();
+    let cursor = {
+        let db = Database::open(dir.path()).unwrap();
+        let c = db.create_collection("docs", CollectionConfig::new(8)).unwrap();
+        c.upsert(points(0..30, 8)).unwrap();
+        c.flush().unwrap();
+        // Some changes only in the WAL, so recovery replays them.
+        c.delete(&["p25"]).unwrap();
+        c.upsert(points(30..35, 8)).unwrap();
+        let page = c.scroll(None, 10);
+        assert_eq!(page.points.last().unwrap().id, "p17");
+        page.next_cursor.unwrap()
+    };
+    let db = Database::open(dir.path()).unwrap();
+    let c = db.collection("docs").unwrap();
+    let page = c.scroll(Some(&cursor), 100);
+    let ids: Vec<String> = page.points.into_iter().map(|p| p.id).collect();
+    let mut expected: Vec<String> = (0..35)
+        .map(|i| format!("p{i}"))
+        .filter(|id| id.as_str() > "p17" && id != "p25")
+        .collect();
+    expected.sort();
+    assert_eq!(ids, expected);
+    assert_eq!(page.next_cursor, None);
+}

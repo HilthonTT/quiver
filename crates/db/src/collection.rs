@@ -26,6 +26,15 @@ const ROCKSDB_DIR: &str = "rocksdb";
 
 static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(0);
 
+/// One page of [`Collection::scroll`].
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScrollPage {
+    /// Points in ascending id order.
+    pub points: Vec<Point>,
+    /// Pass as the next `cursor`; `None` when there are no further points.
+    pub next_cursor: Option<String>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct CollectionMeta {
     pub config: CollectionConfig,
@@ -297,15 +306,24 @@ impl Collection {
             .collect()
     }
 
-    pub fn scroll(&self, offset: usize, limit: usize) -> Vec<Point> {
+    /// Up to `limit` points with an id greater than `cursor` (from the start
+    /// if `None`), in ascending byte-wise id order. Paging by id rather than
+    /// position means deletes and updates between pages never cause points
+    /// to be skipped or repeated.
+    pub fn scroll(&self, cursor: Option<&str>, limit: usize) -> ScrollPage {
         let inner = self.inner.read();
-        inner
-            .store
-            .live_slots()
-            .skip(offset)
+        let mut live = inner.store.live_after(cursor);
+        let points: Vec<Point> = live
+            .by_ref()
             .take(limit)
-            .map(|slot| point_at(&inner.store, slot))
-            .collect()
+            .map(|(_, slot)| point_at(&inner.store, slot))
+            .collect();
+        // Only hand out a cursor if it leads to at least one more point.
+        let next_cursor = match (points.last(), live.next()) {
+            (Some(last), Some(_)) => Some(last.id.clone()),
+            _ => None,
+        };
+        ScrollPage { points, next_cursor }
     }
 
     pub fn search(&self, vector: &[f32], k: usize) -> Result<Vec<SearchHit>> {

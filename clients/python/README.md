@@ -56,13 +56,32 @@ Vectors can be lists, tuples or numpy arrays. Large iterables (including generat
 | `search(vector, k=10, filter=None, ef=None, with_vectors=False, with_metadata=True)` | k-nearest-neighbour search |
 | `search_batch(vectors, k=10, ...)` | Many searches in one request |
 | `get(id)` / `get_many(ids)` | Fetch points (`get` returns `None` if missing) |
-| `scroll(page_size=500)` | Iterate over every point |
+| `scroll(cursor=None, limit=100)` | One page of points in id order, with `next_cursor` |
+| `iter_points(page_size=500)` | Iterate over every point, following the cursors |
 | `delete(ids)` | Delete points; returns how many existed |
 | `info()` / `len(col)` | Configuration and point count |
 | `flush()` / `compact()` | Force a checkpoint / reclaim deleted space |
 | `create_snapshot()` / `snapshots()` | Back up this collection / list its backups |
 
 Distances are always **lower = closer**: `1 - cos` for cosine, L2 for Euclidean, `-(a·b)` for dot product, L1 for Manhattan, and the count of differing components for Hamming.
+
+### Paging
+
+Points are paged in ascending id order. Each page carries a `next_cursor`
+(`None` after the last page); points inserted, updated or deleted between pages
+are never skipped or returned twice.
+
+```python
+page = movies.scroll(limit=100)
+while True:
+    for point in page.points:
+        print(point.id, point.metadata)
+    if page.next_cursor is None:
+        break
+    page = movies.scroll(page.next_cursor, limit=100)
+
+ids = [p.id for p in movies.iter_points()]  # or let the client follow the cursors
+```
 
 ### Snapshots (backups)
 
@@ -101,6 +120,8 @@ async def main():
         col = await client.get_or_create_collection("docs", dimension=3)
         await col.upsert([("a", [1, 0, 0])])
         print(await col.search([1, 0, 0], k=1))
+        docs = client.collection("docs")  # plain method: no await
+        print([p.id async for p in docs.iter_points()])
 
 
 asyncio.run(main())

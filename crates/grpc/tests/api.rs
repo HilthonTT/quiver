@@ -186,3 +186,32 @@ async fn reads_report_missing_collections() {
         .unwrap();
     assert_eq!(list.get_ref().collections[0].count, 1);
 }
+
+#[tokio::test]
+async fn scroll_follows_cursors_in_id_order() {
+    let db = seeded();
+    db.collection("c")
+        .unwrap()
+        .upsert(["d", "b", "c"].map(|id| Point::new(id, vec![0.0, 1.0])))
+        .unwrap();
+    let mut client = start(db, KeyStore::default()).await;
+    let scroll = |cursor: &str, limit| pb::ScrollRequest {
+        collection: "c".into(),
+        cursor: cursor.into(),
+        limit,
+        with_vectors: false,
+    };
+
+    let first = client.scroll(scroll("", 2)).await.unwrap().into_inner();
+    let ids: Vec<_> = first.points.iter().map(|p| p.id.as_str()).collect();
+    assert_eq!(ids, ["a", "b"]);
+    assert_eq!(first.next_cursor.as_deref(), Some("b"));
+
+    let last = client.scroll(scroll("b", 2)).await.unwrap().into_inner();
+    let ids: Vec<_> = last.points.iter().map(|p| p.id.as_str()).collect();
+    assert_eq!(ids, ["c", "d"]);
+    assert_eq!(last.next_cursor, None, "no cursor after the last page");
+
+    let err = client.scroll(scroll("", 10_001)).await.unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
+}

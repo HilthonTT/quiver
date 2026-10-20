@@ -71,8 +71,28 @@ def test_round_trip(client: Client, name: str, index: HNSW | Flat | KDTree) -> N
 
     assert col.delete([f"p{i}" for i in range(100)]) == 100
     assert len(col) == 400
-    assert sum(1 for _ in col.scroll(page_size=64)) == 400
+    assert sum(1 for _ in col.iter_points(page_size=64)) == 400
     col.flush()
+
+
+def test_scroll_pages_by_cursor_while_points_change(client: Client, name: str) -> None:
+    col = client.create_collection(name, 2, index=Flat())
+    col.upsert((f"p{i:02}", [1.0, float(i)]) for i in range(30))
+    seen: list[str] = []
+    cursor = None
+    while True:
+        page = col.scroll(cursor, limit=7)
+        seen += [p.id for p in page.points]
+        if page.next_cursor is None:
+            break
+        cursor = page.next_cursor
+        # Delete one point behind the cursor and one ahead; update another.
+        last = int(cursor[1:])
+        col.delete([f"p{last - 2:02}", f"p{min(last + 3, 29):02}"])
+        col.upsert([(f"p{min(last + 1, 29):02}", [2.0, 1.0])])
+    assert seen == sorted(set(seen)), "no point repeated, in id order"
+    assert set(seen) >= {p.id for p in col.iter_points()}, "no surviving point skipped"
+    assert col.scroll(seen[-1]).points == []
 
 
 def test_errors(client: Client, name: str) -> None:
@@ -92,7 +112,7 @@ def test_async(name: str) -> None:
             await col.upsert([("a", [1, 0]), ("b", [0, 1])])
             hits = await col.search([1, 0.1], k=1)
             assert hits[0].id == "a"
-            assert [p.id async for p in col.scroll()] == ["a", "b"]
+            assert [p.id async for p in col.iter_points()] == ["a", "b"]
             await client.delete_collection(name)
 
     asyncio.run(main())

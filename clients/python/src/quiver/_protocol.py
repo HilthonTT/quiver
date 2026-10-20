@@ -21,6 +21,7 @@ from ._models import (
     Metric,
     Point,
     PointLike,
+    ScrollPage,
     SearchResult,
     SnapshotInfo,
     Vector,
@@ -164,14 +165,15 @@ def lookup(name: str, ids: Sequence[str], with_vectors: bool) -> Call[list[Point
     )
 
 
-def scroll(
-    name: str, offset: int, limit: int, with_vectors: bool
-) -> Call[tuple[list[Point], int | None]]:
+def scroll(name: str, cursor: str | None, limit: int, with_vectors: bool) -> Call[ScrollPage]:
+    params: dict[str, Any] = {"limit": limit, "with_vectors": str(with_vectors).lower()}
+    if cursor is not None:
+        params["cursor"] = cursor
     return Call(
         "GET",
         f"/collections/{_seg(name)}/points",
-        lambda b: ([Point.from_dict(p) for p in b["points"]], b.get("next_offset")),
-        params={"offset": offset, "limit": limit, "with_vectors": str(with_vectors).lower()},
+        lambda b: ScrollPage([Point.from_dict(p) for p in b["points"]], b.get("next_cursor")),
+        params=params,
     )
 
 

@@ -25,8 +25,8 @@ pub enum Action {
     LoadPoints {
         /// Collection name.
         collection: String,
-        /// Offset of the page.
-        offset: usize,
+        /// Which page, relative to the current one.
+        page: Page,
     },
     /// Fetch a point (with its vector) and show it.
     ShowPoint {
@@ -90,6 +90,19 @@ pub enum Action {
     },
     /// Delete a snapshot.
     DeleteSnapshot(String),
+}
+
+/// Which page of points to load.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Page {
+    /// The first page.
+    First,
+    /// The current page again.
+    Current,
+    /// The page after the current one.
+    Next,
+    /// The page before the current one.
+    Previous,
 }
 
 /// A query given either as a vector or as text to embed.
@@ -491,10 +504,11 @@ pub struct App {
     pub current: Option<String>,
     /// Current page of points.
     pub points: Vec<Point>,
-    /// Offset of the current page.
-    pub offset: usize,
-    /// Offset of the next page, if any.
-    pub next_offset: Option<usize>,
+    /// Start cursor of every page up to the current one (the last entry);
+    /// the first page starts at `None`. Popped to page back.
+    pub cursors: Vec<Option<String>>,
+    /// Cursor of the next page, if any.
+    pub next_cursor: Option<String>,
     /// Points or search results.
     pub list: ListMode,
     /// Selected row in the collection view.
@@ -533,8 +547,8 @@ impl App {
             selected: 0,
             current: None,
             points: Vec::new(),
-            offset: 0,
-            next_offset: None,
+            cursors: vec![None],
+            next_cursor: None,
             list: ListMode::Points,
             row: 0,
             snapshots: Vec::new(),
@@ -561,6 +575,11 @@ impl App {
         } else {
             self.status = Some(Status { text, error: true });
         }
+    }
+
+    /// Zero-based number of the current page of points.
+    pub fn page_index(&self) -> usize {
+        self.cursors.len().saturating_sub(1)
     }
 
     /// The collection selected on the dashboard.
@@ -648,6 +667,11 @@ impl App {
                 if matches!(self.list, ListMode::Results(_)) {
                     self.list = ListMode::Points;
                     self.row = 0;
+                    // Points may have been inserted or deleted while results were shown.
+                    return Some(Action::LoadPoints {
+                        collection,
+                        page: Page::Current,
+                    });
                 } else {
                     self.screen = Screen::Dashboard;
                     self.current = None;
@@ -656,13 +680,16 @@ impl App {
             KeyCode::Up | KeyCode::Char('k') => step(&mut self.row, len, false),
             KeyCode::Down | KeyCode::Char('j') => step(&mut self.row, len, true),
             KeyCode::PageDown | KeyCode::Right if self.list == ListMode::Points => {
-                return self
-                    .next_offset
-                    .map(|offset| Action::LoadPoints { collection, offset });
+                return self.next_cursor.is_some().then_some(Action::LoadPoints {
+                    collection,
+                    page: Page::Next,
+                });
             }
-            KeyCode::PageUp | KeyCode::Left if self.list == ListMode::Points && self.offset > 0 => {
-                let offset = self.offset.saturating_sub(PAGE_SIZE);
-                return Some(Action::LoadPoints { collection, offset });
+            KeyCode::PageUp | KeyCode::Left if self.list == ListMode::Points && self.page_index() > 0 => {
+                return Some(Action::LoadPoints {
+                    collection,
+                    page: Page::Previous,
+                });
             }
             KeyCode::Enter => {
                 return self.selected_row().map(|(id, distance)| Action::ShowPoint {
