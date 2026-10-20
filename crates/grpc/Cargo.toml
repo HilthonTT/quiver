@@ -1,6 +1,6 @@
 [package]
-name = "vectordb-grpc"
-description = "gRPC API layer for VectorDB."
+name = "quiver-grpc"
+description = "gRPC API layer for Quiver."
 readme = "../../README.md"
 version.workspace = true
 edition.workspace = true
@@ -12,8 +12,8 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-vectordb-types.workspace = true
-vectordb-db.workspace = true
+quiver-types.workspace = true
+quiver-db.workspace = true
 tonic.workspace = true
 tonic-prost.workspace = true
 prost.workspace = true

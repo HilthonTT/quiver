@@ -6,13 +6,13 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use parking_lot::RwLock;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use vectordb_index::Index;
-use vectordb_snapshot::{SnapshotInfo, SnapshotRegistry};
-use vectordb_storage::{
+use quiver_index::Index;
+use quiver_snapshot::{SnapshotInfo, SnapshotRegistry};
+use quiver_storage::{
     Mutation, Op, Recovered, StorageEngine, StorageKind, StorageOptions, VectorStore, open_engine,
     state,
 };
-use vectordb_types::{
+use quiver_types::{
     CollectionConfig, CollectionInfo, Error, MAX_ID_LEN, Point, Result, SearchHit, SearchOptions,
 };
 

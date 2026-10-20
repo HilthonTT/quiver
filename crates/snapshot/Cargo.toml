@@ -1,6 +1,6 @@
 [package]
-name = "vectordb-snapshot"
-description = "Snapshot creation and restore for VectorDB collections."
+name = "quiver-snapshot"
+description = "Snapshot creation and restore for Quiver collections."
 readme = "../../README.md"
 version.workspace = true
 edition.workspace = true
@@ -12,8 +12,8 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-vectordb-types.workspace = true
-vectordb-storage.workspace = true
+quiver-types.workspace = true
+quiver-storage.workspace = true
 serde_json.workspace = true
 uuid.workspace = true
 tar.workspace = true

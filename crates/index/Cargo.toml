@@ -1,6 +1,6 @@
 [package]
-name = "vectordb-index"
-description = "Vector index implementations (flat, HNSW, ...) for VectorDB."
+name = "quiver-index"
+description = "Vector index implementations (flat, HNSW, ...) for Quiver."
 readme = "../../README.md"
 version.workspace = true
 edition.workspace = true
@@ -12,8 +12,8 @@ keywords.workspace = true
 categories.workspace = true
 
 [dependencies]
-vectordb-types.workspace = true
-vectordb-storage.workspace = true
+quiver-types.workspace = true
+quiver-storage.workspace = true
 rayon.workspace = true
 
 [lints]

@@ -5,9 +5,9 @@ mod kdtree;
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
-use vectordb_storage::VectorStore;
-use vectordb_storage::codec::{Reader, WriteExt};
-use vectordb_types::{Error, IndexConfig, Metric, Result};
+use quiver_storage::VectorStore;
+use quiver_storage::codec::{Reader, WriteExt};
+use quiver_types::{Error, IndexConfig, Metric, Result};
 
 pub use flat::FlatIndex;
 pub use hnsw::HnswIndex;
@@ -242,7 +242,7 @@ pub(crate) fn random_store(n: usize, dim: usize, seed: u64) -> VectorStore {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vectordb_types::{HnswParams, KdTreeParams};
+    use quiver_types::{HnswParams, KdTreeParams};
 
     #[test]
     fn topk_keeps_closest() {

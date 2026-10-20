@@ -2,7 +2,7 @@ use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 use std::path::Path;
 
-use vectordb_types::{Error, Result};
+use quiver_types::{Error, Result};
 
 use crate::codec::WriteExt;
 use crate::{Mutation, Op};
@@ -119,7 +119,7 @@ fn parse_frames(buf: &[u8]) -> (Vec<Mutation>, usize) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use vectordb_types::Point;
+    use quiver_types::Point;
 
     fn point(id: &str) -> Point {
         Point::new(id, vec![1.0, 2.0])

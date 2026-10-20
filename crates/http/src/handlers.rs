@@ -9,7 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 
-use vectordb_db::{
+use quiver_db::{
     Collection, CollectionConfig, CollectionInfo, Database, Filter, Point, PointInput,
     RestoreOptions, SearchOptions, SnapshotInfo,
 };
@@ -38,7 +38,7 @@ impl<T: Serialize> IntoResponse for Json<T> {
 
 async fn blocking<T, F>(f: F) -> ApiResult<T>
 where
-    F: FnOnce() -> Result<T, vectordb_db::Error> + Send + 'static,
+    F: FnOnce() -> Result<T, quiver_db::Error> + Send + 'static,
     T: Send + 'static,
 {
     tokio::task::spawn_blocking(f)
@@ -53,9 +53,9 @@ fn collection(db: &Database, name: &str) -> ApiResult<Arc<Collection>> {
 
 pub async fn root() -> Json<Value> {
     Json(json!({
-        "name": "SagittaDB",
+        "name": "Quiver",
         "version": env!("CARGO_PKG_VERSION"),
-        "docs": "https://github.com/HilthonTT/sagittadb/blob/main/docs/API.md",
+        "docs": "https://github.com/HilthonTT/vector-db/blob/main/docs/API.md",
     }))
 }
 

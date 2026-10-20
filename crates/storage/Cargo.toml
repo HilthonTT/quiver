@@ -1,6 +1,6 @@
 [package]
-name = "vectordb-storage"
-description = "Persistent storage engine for VectorDB."
+name = "quiver-storage"
+description = "Persistent storage engine for Quiver."
 readme = "../../README.md"
 version.workspace = true
 edition.workspace = true
@@ -21,7 +21,7 @@ serde.workspace = true
 serde_json.workspace = true
 crc32fast.workspace = true
 tracing.workspace = true
-vectordb-types.workspace = true
+quiver-types.workspace = true
 rocksdb = { workspace = true, optional = true }
 
 [dev-dependencies]

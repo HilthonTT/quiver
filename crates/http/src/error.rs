@@ -49,9 +49,9 @@ impl ApiError {
     }
 }
 
-impl From<vectordb_db::Error> for ApiError {
-    fn from(err: vectordb_db::Error) -> Self {
-        use vectordb_db::Error as E;
+impl From<quiver_db::Error> for ApiError {
+    fn from(err: quiver_db::Error) -> Self {
+        use quiver_db::Error as E;
 
         let (status, code) = match &err {
             E::CollectionNotFound(_) | E::SnapshotNotFound(_) => {

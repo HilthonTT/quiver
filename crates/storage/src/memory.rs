@@ -1,4 +1,4 @@
-use vectordb_types::Result;
+use quiver_types::Result;
 
 use crate::{Op, Recovered, StorageEngine, StorageKind, VectorStore};
 

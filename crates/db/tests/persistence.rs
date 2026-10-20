@@ -1,5 +1,5 @@
 use serde_json::json;
-use vectordb_db::{CollectionConfig, Database, DbOptions, Error, IndexConfig, Metric, Point};
+use quiver_db::{CollectionConfig, Database, DbOptions, Error, IndexConfig, Metric, Point};
 
 /// Deterministic pseudo-random vector, unique per `i`.
 fn vec_for(i: usize, dim: usize) -> Vec<f32> {

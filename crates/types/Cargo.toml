@@ -1,6 +1,6 @@
 [package]
-name = "vectordb-types"
-description = "Shared definitions for VectorDB: points, metrics, configs, filters, errors and auth."
+name = "quiver-types"
+description = "Shared definitions for Quiver: points, metrics, configs, filters, errors and auth."
 readme = "../../README.md"
 version.workspace = true
 edition.workspace = true

@@ -15,14 +15,14 @@ categories = ["database-implementations"]
 
 [workspace.dependencies]
 # Internal crates
-vectordb-client = { path = "crates/client" }
-vectordb-db = { path = "crates/db" }
-vectordb-grpc = { path = "crates/grpc" }
-vectordb-http = { path = "crates/http" }
-vectordb-index = { path = "crates/index" }
-vectordb-snapshot = { path = "crates/snapshot" }
-vectordb-storage = { path = "crates/storage" }
-vectordb-types = { path = "crates/types" }
+quiver-client = { path = "crates/client" }
+quiver-db = { path = "crates/db" }
+quiver-grpc = { path = "crates/grpc" }
+quiver-http = { path = "crates/http" }
+quiver-index = { path = "crates/index" }
+quiver-snapshot = { path = "crates/snapshot" }
+quiver-storage = { path = "crates/storage" }
+quiver-types = { path = "crates/types" }
 
 # External crates
 anyhow = "1"

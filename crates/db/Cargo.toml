@@ -1,5 +1,5 @@
 [package]
-name = "vectordb-db"
+name = "quiver-db"
 description = "Embeddable database engine tying together storage, indexing and snapshots."
 readme = "../../README.md"
 version.workspace = true
@@ -14,13 +14,13 @@ categories.workspace = true
 [features]
 default = []
 ## Enables the RocksDB storage engine.
-rocksdb = ["vectordb-storage/rocksdb"]
+rocksdb = ["quiver-storage/rocksdb"]
 
 [dependencies]
-vectordb-types.workspace = true
-vectordb-storage.workspace = true
-vectordb-index.workspace = true
-vectordb-snapshot.workspace = true
+quiver-types.workspace = true
+quiver-storage.workspace = true
+quiver-index.workspace = true
+quiver-snapshot.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 parking_lot.workspace = true

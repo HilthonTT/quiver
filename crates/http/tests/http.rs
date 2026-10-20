@@ -6,9 +6,9 @@ use axum::http::{Method, Request, StatusCode};
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
 use tower::ServiceExt;
-use vectordb_db::auth::{ApiKey, KeyStore, Role};
-use vectordb_db::{Database, DbOptions, StorageKind};
-use vectordb_http::{HttpOptions, router};
+use quiver_db::auth::{ApiKey, KeyStore, Role};
+use quiver_db::{Database, DbOptions, StorageKind};
+use quiver_http::{HttpOptions, router};
 
 struct TestApp {
     app: Router,

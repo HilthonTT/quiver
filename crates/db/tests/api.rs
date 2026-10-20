@@ -1,9 +1,9 @@
 use serde_json::json;
-use vectordb_db::{
+use quiver_db::{
     CollectionConfig, Database, Error, Filter, IndexConfig, Metric, Point, SearchOptions,
 };
 
-fn db_with(metric: Metric, index: IndexConfig) -> std::sync::Arc<vectordb_db::Collection> {
+fn db_with(metric: Metric, index: IndexConfig) -> std::sync::Arc<quiver_db::Collection> {
     Database::in_memory()
         .create_collection("c", CollectionConfig::new(2).metric(metric).index(index))
         .unwrap()

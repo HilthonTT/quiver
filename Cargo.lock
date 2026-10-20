@@ -1622,14 +1622,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "accd4ea62f7bb7a82fe23066fb0957d48ef677f6eeb8215f372f52e48bb32426"
 
 [[package]]
-name = "vectordb-client"
+name = "quiver-client"
 version = "0.1.0"
 dependencies = [
- "vectordb-types",
+ "quiver-types",
 ]
 
 [[package]]
-name = "vectordb-db"
+name = "quiver-db"
 version = "0.1.0"
 dependencies = [
  "parking_lot",
@@ -1637,14 +1637,14 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tracing",
- "vectordb-index",
- "vectordb-snapshot",
- "vectordb-storage",
- "vectordb-types",
+ "quiver-index",
+ "quiver-snapshot",
+ "quiver-storage",
+ "quiver-types",
 ]
 
 [[package]]
-name = "vectordb-grpc"
+name = "quiver-grpc"
 version = "0.1.0"
 dependencies = [
  "prost",
@@ -1657,12 +1657,12 @@ dependencies = [
  "tonic-prost",
  "tonic-prost-build",
  "tracing",
- "vectordb-db",
- "vectordb-types",
+ "quiver-db",
+ "quiver-types",
 ]
 
 [[package]]
-name = "vectordb-http"
+name = "quiver-http"
 version = "0.1.0"
 dependencies = [
  "axum",
@@ -1676,34 +1676,34 @@ dependencies = [
  "tower",
  "tower-http",
  "tracing",
- "vectordb-db",
- "vectordb-types",
+ "quiver-db",
+ "quiver-types",
 ]
 
 [[package]]
-name = "vectordb-index"
+name = "quiver-index"
 version = "0.1.0"
 dependencies = [
  "rayon",
- "vectordb-storage",
- "vectordb-types",
+ "quiver-storage",
+ "quiver-types",
 ]
 
 [[package]]
-name = "vectordb-server"
+name = "quiver-server"
 version = "0.1.0"
 dependencies = [
  "anyhow",
  "crc32fast",
  "tracing",
- "vectordb-db",
- "vectordb-grpc",
- "vectordb-http",
- "vectordb-types",
+ "quiver-db",
+ "quiver-grpc",
+ "quiver-http",
+ "quiver-types",
 ]
 
 [[package]]
-name = "vectordb-snapshot"
+name = "quiver-snapshot"
 version = "0.1.0"
 dependencies = [
  "flate2",
@@ -1713,12 +1713,12 @@ dependencies = [
  "tempfile",
  "tracing",
  "uuid",
- "vectordb-storage",
- "vectordb-types",
+ "quiver-storage",
+ "quiver-types",
 ]
 
 [[package]]
-name = "vectordb-storage"
+name = "quiver-storage"
 version = "0.1.0"
 dependencies = [
  "crc32fast",
@@ -1727,20 +1727,20 @@ dependencies = [
  "serde_json",
  "tempfile",
  "tracing",
- "vectordb-types",
+ "quiver-types",
 ]
 
 [[package]]
-name = "vectordb-tui"
+name = "quiver-tui"
 version = "0.1.0"
 dependencies = [
  "anyhow",
- "vectordb-client",
- "vectordb-types",
+ "quiver-client",
+ "quiver-types",
 ]
 
 [[package]]
-name = "vectordb-types"
+name = "quiver-types"
 version = "0.1.0"
 dependencies = [
  "serde",

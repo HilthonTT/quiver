@@ -10,7 +10,7 @@ mod wal;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
-use vectordb_types::{Error, Point, Result};
+use quiver_types::{Error, Point, Result};
 
 pub use file::FileEngine;
 pub use memory::MemoryEngine;
@@ -78,7 +78,7 @@ pub enum StorageKind {
     /// Nothing is persisted.
     #[serde(alias = "inmemory", alias = "in_memory")]
     Memory,
-    /// VectorDB's own WAL + snapshot files (the default).
+    /// Quiver's own WAL + snapshot files (the default).
     #[default]
     File,
     /// RocksDB (requires the `rocksdb` cargo feature).

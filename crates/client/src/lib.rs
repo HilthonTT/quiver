@@ -1,1 +1,1 @@
-//! Rust client SDK for talking to a VectorDB server.
+//! Rust client SDK for talking to a Quiver server.

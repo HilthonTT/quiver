@@ -1,5 +1,5 @@
 use serde_json::json;
-use vectordb_db::{
+use quiver_db::{
     CollectionConfig, Database, DbOptions, Error, IndexConfig, Metric, Point, RestoreOptions,
     StorageKind,
 };

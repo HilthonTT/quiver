@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use rocksdb::{DB, Direction, IteratorMode, Options, WriteBatch, WriteOptions};
-use vectordb_types::{Error, Result};
+use quiver_types::{Error, Result};
 
 use crate::codec::{Reader, WriteExt};
 use crate::{Op, Recovered, StorageEngine, StorageKind, StorageOptions, VectorStore, rocks};

@@ -13,8 +13,8 @@ pub struct Manifest {
     pub collection: String,
     /// When the snapshot was taken, in milliseconds since the Unix epoch.
     pub created_at_ms: u64,
-    /// Version of VectorDB that wrote the snapshot.
-    pub vector_db_version: String,
+    /// Version of Quiver that wrote the snapshot.
+    pub quiver_version: String,
     /// The collection's configuration.
     pub config: CollectionConfig,
     /// Number of live points.

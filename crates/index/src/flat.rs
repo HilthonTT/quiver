@@ -1,7 +1,7 @@
 use rayon::prelude::*;
 
-use vectordb_storage::VectorStore;
-use vectordb_types::Metric;
+use quiver_storage::VectorStore;
+use quiver_types::Metric;
 
 use crate::{Accept, Neighbor, TopK};
 

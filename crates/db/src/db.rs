@@ -4,9 +4,9 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use parking_lot::RwLock;
-use vectordb_snapshot::{SnapshotInfo, SnapshotRegistry};
-use vectordb_storage::{StorageKind, StorageOptions};
-use vectordb_types::{CollectionConfig, CollectionInfo, Error, Result, validate_name};
+use quiver_snapshot::{SnapshotInfo, SnapshotRegistry};
+use quiver_storage::{StorageKind, StorageOptions};
+use quiver_types::{CollectionConfig, CollectionInfo, Error, Result, validate_name};
 
 use crate::collection::{Collection, Env, META_FILE};
 

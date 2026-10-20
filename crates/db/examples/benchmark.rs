@@ -13,11 +13,11 @@
 use std::collections::HashSet;
 use std::time::Instant;
 
-use vectordb_db::{CollectionConfig, Database, IndexConfig, Metric, Point, SearchOptions};
+use quiver_db::{CollectionConfig, Database, IndexConfig, Metric, Point, SearchOptions};
 
 const K: usize = 10;
 
-fn main() -> vectordb_db::Result<()> {
+fn main() -> quiver_db::Result<()> {
     let raw: Vec<String> = std::env::args().skip(1).collect();
     let args: Vec<usize> = raw.iter().filter_map(|a| a.parse().ok()).collect();
     let uniform = raw.iter().any(|a| a == "uniform");

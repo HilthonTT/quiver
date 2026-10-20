@@ -1,1 +1,1 @@
-//! gRPC API layer for VectorDB.
+//! gRPC API layer for Quiver.

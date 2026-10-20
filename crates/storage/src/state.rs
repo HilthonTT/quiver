@@ -2,7 +2,7 @@ use std::fs::{self, File};
 use std::io::{BufWriter, Write};
 use std::path::Path;
 
-use vectordb_types::{Error, Result};
+use quiver_types::{Error, Result};
 
 use crate::codec::{Reader, WriteExt};
 use crate::store::VectorStore;
@@ -75,7 +75,7 @@ pub fn decode(buf: &[u8], dim: usize) -> Result<State> {
 
     let mut r = Reader::new(body);
     if r.take(8)? != MAGIC {
-        return Err(Error::Corrupt("not a VectorDB state file".into()));
+        return Err(Error::Corrupt("not a Quiver state file".into()));
     }
     let version = r.u32()?;
     if version != VERSION {

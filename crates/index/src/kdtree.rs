@@ -1,8 +1,8 @@
 use std::io::Write;
 
-use vectordb_storage::VectorStore;
-use vectordb_storage::codec::{Reader, WriteExt};
-use vectordb_types::{Error, KdTreeParams, Metric, Result};
+use quiver_storage::VectorStore;
+use quiver_storage::codec::{Reader, WriteExt};
+use quiver_types::{Error, KdTreeParams, Metric, Result};
 
 use crate::{Accept, Neighbor, TopK};
 

@@ -1,6 +1,6 @@
 use std::io::{self, Write};
 
-use vectordb_types::{Error, Result};
+use quiver_types::{Error, Result};
 
 pub trait WriteExt: Write {
     fn put_u8(&mut self, v: u8) -> io::Result<()> {

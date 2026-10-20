@@ -8,9 +8,9 @@ use flate2::bufread::GzDecoder;
 use flate2::write::GzEncoder;
 use sha2::{Digest, Sha256};
 
-use vectordb_storage::{VectorStore, state};
-pub use vectordb_types::snapshot::{Manifest, SnapshotInfo};
-use vectordb_types::{CollectionConfig, Error, Result, validate_name};
+use quiver_storage::{VectorStore, state};
+pub use quiver_types::snapshot::{Manifest, SnapshotInfo};
+use quiver_types::{CollectionConfig, Error, Result, validate_name};
 
 /// Version of the archive layout. Bumped on incompatible changes.
 pub const FORMAT_VERSION: u32 = 1;
@@ -76,7 +76,7 @@ pub fn write_archive(
         id: id.to_owned(),
         collection: collection.to_owned(),
         created_at_ms: now_ms(),
-        vector_db_version: env!("CARGO_PKG_VERSION").to_owned(),
+        quiver_version: env!("CARGO_PKG_VERSION").to_owned(),
         config: config.clone(),
         points: store.live(),
         data_bytes: data.len() as u64,

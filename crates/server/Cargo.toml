@@ -1,6 +1,6 @@
 [package]
-name = "vectordb-server"
-description = "VectorDB server binary exposing the gRPC and HTTP APIs."
+name = "quiver-server"
+description = "Quiver server binary exposing the gRPC and HTTP APIs."
 readme = "../../README.md"
 version.workspace = true
 edition.workspace = true
@@ -12,14 +12,14 @@ keywords.workspace = true
 categories.workspace = true
 
 [[bin]]
-name = "vectordb-server"
+name = "quiver-server"
 path = "src/main.rs"
 
 [dependencies]
-vectordb-types.workspace = true
-vectordb-db.workspace = true
-vectordb-grpc.workspace = true
-vectordb-http.workspace = true
+quiver-types.workspace = true
+quiver-db.workspace = true
+quiver-grpc.workspace = true
+quiver-http.workspace = true
 anyhow.workspace = true
 tracing = "0.1.44"
 crc32fast = "1.5.2"

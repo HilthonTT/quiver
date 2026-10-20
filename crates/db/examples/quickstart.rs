@@ -5,9 +5,9 @@
 //! ```
 
 use serde_json::json;
-use vectordb_db::{CollectionConfig, Database, Filter, Metric, Point, SearchOptions};
+use quiver_db::{CollectionConfig, Database, Filter, Metric, Point, SearchOptions};
 
-fn main() -> vectordb_db::Result<()> {
+fn main() -> quiver_db::Result<()> {
     let dir = std::env::temp_dir().join("vector-db-quickstart");
     let _ = std::fs::remove_dir_all(&dir);
     let db = Database::open(&dir)?;

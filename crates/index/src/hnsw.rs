@@ -2,11 +2,11 @@ use std::cmp::Reverse;
 use std::collections::BinaryHeap;
 use std::io::Write;
 
-use vectordb_storage::{
+use quiver_storage::{
     VectorStore,
     codec::{Reader, WriteExt},
 };
-use vectordb_types::{Error, HnswParams, Metric, Result};
+use quiver_types::{Error, HnswParams, Metric, Result};
 
 use crate::{Accept, Neighbor};
 

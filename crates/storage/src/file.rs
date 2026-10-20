@@ -1,6 +1,6 @@
 use std::path::{Path, PathBuf};
 
-use vectordb_types::Result;
+use quiver_types::Result;
 
 use crate::wal::Wal;
 use crate::{
@@ -10,7 +10,7 @@ use crate::{
 const STATE_FILE: &str = "state.bin";
 const WAL_FILE: &str = "wal.log";
 
-/// Durable engine built on VectorDB's own WAL and snapshot files.
+/// Durable engine built on Quiver's own WAL and snapshot files.
 ///
 /// Restarts load the last checkpoint, including the serialized index,
 /// and replay the WAL on top: no index rebuild is needed.

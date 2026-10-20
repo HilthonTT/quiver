@@ -11,8 +11,8 @@ use axum::middleware;
 use axum::routing::{get, post};
 use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
-use vectordb_db::Database;
-use vectordb_db::auth::{KeyStore, Role};
+use quiver_db::Database;
+use quiver_db::auth::{KeyStore, Role};
 
 use crate::error::ApiError;
 

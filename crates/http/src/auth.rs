@@ -4,7 +4,7 @@ use axum::extract::{Request, State};
 use axum::http::header::AUTHORIZATION;
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Response};
-use vectordb_db::auth::{KeyStore, Role};
+use quiver_db::auth::{KeyStore, Role};
 
 use crate::error::ApiError;
 
