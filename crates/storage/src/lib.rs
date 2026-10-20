@@ -78,7 +78,7 @@ pub enum StorageKind {
     /// Nothing is persisted.
     #[serde(alias = "inmemory", alias = "in_memory")]
     Memory,
-    /// SagittaDB's own WAL + snapshot files (the default).
+    /// VectorDB's own WAL + snapshot files (the default).
     #[default]
     File,
     /// RocksDB (requires the `rocksdb` cargo feature).
