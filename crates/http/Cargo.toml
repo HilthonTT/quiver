@@ -14,6 +14,19 @@ categories.workspace = true
 [dependencies]
 vectordb-types.workspace = true
 vectordb-db.workspace = true
+axum.workspace = true
+tokio = { workspace = true, features = ["fs", "io-util"] }
+tokio-util = { workspace = true, features = ["io"] }
+futures-util.workspace = true
+tower-http.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+tower.workspace = true
+http-body-util.workspace = true
+tempfile.workspace = true
 
 [lints]
 workspace = true

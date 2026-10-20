@@ -1,1 +1,3 @@
-//! HTTP/REST API layer for VectorDB.
+mod error;
+
+use crate::error::ApiError;

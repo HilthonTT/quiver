@@ -26,8 +26,11 @@ vectordb-types = { path = "crates/types" }
 
 # External crates
 anyhow = "1"
+axum = "0.8"
 crc32fast = "1.4"
 flate2 = "1"
+futures-util = { version = "0.3", default-features = false }
+http-body-util = "0.1"
 parking_lot = "0.12"
 rayon = "1.12"
 rocksdb = "0.25"
@@ -37,6 +40,10 @@ sha2 = "0.10"
 tar = "0.4"
 tempfile = "3"
 thiserror = "2"
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net"] }
+tokio-util = "0.7"
+tower = { version = "0.5", features = ["util"] }
+tower-http = { version = "0.6", features = ["trace", "cors"] }
 tracing = "0.1"
 uuid = { version = "1", features = ["v4", "serde"] }
 
