@@ -18,7 +18,7 @@ impl SnapshotScheduler {
         let stop = Arc::new((Mutex::new(false), Condvar::new()));
         let signal = Arc::clone(&stop);
         let handle = std::thread::Builder::new()
-            .name("vector-db-snapshots".into())
+            .name("quiver-snapshots".into())
             .spawn(move || {
                 let mut seen: HashMap<String, u64> = HashMap::new();
                 loop {

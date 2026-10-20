@@ -1,5 +1,5 @@
 blank_issues_enabled: false
 contact_links:
   - name: Security vulnerability
-    url: https://github.com/HilthonTT/vector-db/security/advisories/new
+    url: https://github.com/HilthonTT/quiver/security/advisories/new
     about: Please report security issues privately, not as public issues.

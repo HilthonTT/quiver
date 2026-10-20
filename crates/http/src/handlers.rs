@@ -55,7 +55,7 @@ pub async fn root() -> Json<Value> {
     Json(json!({
         "name": "Quiver",
         "version": env!("CARGO_PKG_VERSION"),
-        "docs": "https://github.com/HilthonTT/vector-db/blob/main/docs/API.md",
+        "docs": "https://github.com/HilthonTT/quiver#readme",
     }))
 }
 

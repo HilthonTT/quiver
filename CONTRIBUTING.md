@@ -12,7 +12,7 @@ You'll need:
 - `make` (optional; the targets just wrap `cargo` and `uv`)
 
 ```bash
-git clone https://github.com/HilthonTT/vector-db && cd quiver
+git clone https://github.com/HilthonTT/quiver && cd quiver
 make check          # everything CI runs
 ```
 

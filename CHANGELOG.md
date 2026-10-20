@@ -41,6 +41,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `quiver` HTTP server: collection, point, search and batch-search endpoints; API-key auth; graceful shutdown with flush; Docker image.
 - `quiver` Python client: sync and async, typed, numpy support, automatic upsert batching.
 
-[Unreleased]: https://github.com/HilthonTT/vector-db/compare/v0.2.0...HEAD
-[0.2.0]: https://github.com/HilthonTT/vector-db/compare/v0.1.0...v0.2.0
-[0.1.0]: https://github.com/HilthonTT/vector-db/releases/tag/v0.1.0
+[Unreleased]: https://github.com/HilthonTT/quiver/compare/v0.2.0...HEAD
+[0.2.0]: https://github.com/HilthonTT/quiver/compare/v0.1.0...v0.2.0
+[0.1.0]: https://github.com/HilthonTT/quiver/releases/tag/v0.1.0

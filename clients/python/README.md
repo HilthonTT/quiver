@@ -1,6 +1,6 @@
 # quiver — Python client
 
-Typed sync and async Python client for [Quiver](https://github.com/HilthonTT/vector-db), a vector database written in Rust.
+Typed sync and async Python client for [Quiver](https://github.com/HilthonTT/quiver), a vector database written in Rust.
 
 ```bash
 pip install quiver            # or: uv add quiver

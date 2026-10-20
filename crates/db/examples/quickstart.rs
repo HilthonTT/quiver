@@ -8,7 +8,7 @@ use quiver_db::{CollectionConfig, Database, Filter, Metric, Point, SearchOptions
 use serde_json::json;
 
 fn main() -> quiver_db::Result<()> {
-    let dir = std::env::temp_dir().join("vector-db-quickstart");
+    let dir = std::env::temp_dir().join("quiver-quickstart");
     let _ = std::fs::remove_dir_all(&dir);
     let db = Database::open(&dir)?;
 

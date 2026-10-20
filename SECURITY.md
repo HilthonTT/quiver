@@ -3,7 +3,7 @@
 ## Reporting a vulnerability
 
 Please **do not** open a public issue for security problems. Report them privately through
-[GitHub Security Advisories](https://github.com/HilthonTT/vector-db/security/advisories/new).
+[GitHub Security Advisories](https://github.com/HilthonTT/quiver/security/advisories/new).
 
 Include what you found, how to reproduce it, the affected version (`quiver --version` or the commit),
 and the impact you expect. You should get an acknowledgement within a few days; once a fix is ready

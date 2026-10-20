@@ -28,9 +28,9 @@ numpy = ["numpy>=1.22"]
 dev = ["pytest>=8", "ruff>=0.6", "mypy>=1.10", "numpy>=1.22"]
 
 [project.urls]
-Homepage = "https://github.com/HilthonTT/vector-db"
-Documentation = "https://github.com/HilthonTT/vector-db/tree/main/clients/python"
-Issues = "https://github.com/HilthonTT/vector-db/issues"
+Homepage = "https://github.com/HilthonTT/quiver"
+Documentation = "https://github.com/HilthonTT/quiver/tree/main/clients/python"
+Issues = "https://github.com/HilthonTT/quiver/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/quiver"]

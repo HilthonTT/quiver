@@ -3,7 +3,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/HilthonTT/vector-db/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/HilthonTT/vector-db/actions/workflows/ci.yml/badge.svg"></a>
+  <a href="https://github.com/HilthonTT/quiver/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/HilthonTT/quiver/actions/workflows/ci.yml/badge.svg"></a>
   <a href="LICENSE"><img alt="License: MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
   <img alt="MSRV 1.89" src="https://img.shields.io/badge/rust-1.89%2B-orange">
 </p>
