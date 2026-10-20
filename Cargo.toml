@@ -28,6 +28,7 @@ vectordb-types = { path = "crates/types" }
 anyhow = "1"
 crc32fast = "1.4"
 flate2 = "1"
+parking_lot = "0.12"
 rayon = "1.12"
 rocksdb = "0.25"
 serde = { version = "1", features = ["derive"] }
