@@ -18,7 +18,12 @@ path = "src/main.rs"
 [dependencies]
 quiver-types.workspace = true
 quiver-client.workspace = true
-anyhow.workspace = true
+clap.workspace = true
+ratatui.workspace = true
+reqwest.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
 
 [lints]
 workspace = true
