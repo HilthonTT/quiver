@@ -15,6 +15,9 @@ updates:
     directory: /
     schedule:
       interval: weekly
+    ignore:
+      # Its tags are Rust versions (we pin the MSRV, 1.89), not releases of the action.
+      - dependency-name: dtolnay/rust-toolchain
   - package-ecosystem: docker
     directory: /
     schedule:
