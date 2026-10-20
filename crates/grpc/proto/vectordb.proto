@@ -1,0 +1,229 @@
+syntax = "proto3";
+
+// VectorDB gRPC API, v1.
+//
+// Mirrors the REST API (docs/API.md). Metadata and filters are carried as
+// JSON strings so arbitrary nested documents round-trip losslessly.
+//
+// Authentication: send `authorization: Bearer <key>` (or `x-api-key: <key>`)
+// metadata. Read-only keys may call every read RPC; writes need read-write keys.
+package vectordb.v1;
+
+service VectorDB {
+  rpc Health(HealthRequest) returns (HealthResponse);
+
+  // Collections
+  rpc ListCollections(ListCollectionsRequest) returns (ListCollectionsResponse);
+  rpc CreateCollection(CreateCollectionRequest) returns (CollectionInfo);
+  rpc GetCollection(GetCollectionRequest) returns (CollectionInfo);
+  rpc DropCollection(DropCollectionRequest) returns (DropCollectionResponse);
+  rpc Flush(FlushRequest) returns (FlushResponse);
+  rpc Compact(CompactRequest) returns (CollectionInfo);
+
+  // Points
+  rpc Upsert(UpsertRequest) returns (UpsertResponse);
+  rpc GetPoints(GetPointsRequest) returns (GetPointsResponse);
+  rpc DeletePoints(DeletePointsRequest) returns (DeletePointsResponse);
+  rpc Scroll(ScrollRequest) returns (ScrollResponse);
+
+  // Search
+  rpc Search(SearchRequest) returns (SearchResponse);
+  rpc SearchBatch(SearchBatchRequest) returns (SearchBatchResponse);
+
+  // Snapshots
+  rpc CreateSnapshot(CreateSnapshotRequest) returns (SnapshotInfo);
+  rpc ListSnapshots(ListSnapshotsRequest) returns (ListSnapshotsResponse);
+  rpc DeleteSnapshot(DeleteSnapshotRequest) returns (DeleteSnapshotResponse);
+  rpc RestoreSnapshot(RestoreSnapshotRequest) returns (CollectionInfo);
+}
+
+enum Metric {
+  METRIC_UNSPECIFIED = 0; // defaults to cosine
+  METRIC_COSINE = 1;
+  METRIC_EUCLIDEAN = 2;
+  METRIC_DOT_PRODUCT = 3;
+  METRIC_MANHATTAN = 4;
+  METRIC_HAMMING = 5;
+}
+
+message FlatIndex {}
+
+message HnswIndex {
+  optional uint32 m = 1;
+  optional uint32 ef_construction = 2;
+  optional uint32 ef_search = 3;
+  optional uint64 seed = 4;
+}
+
+message KdTreeIndex {
+  optional uint32 balance_factor = 1;
+}
+
+// Unset defaults to HNSW with default parameters.
+message IndexConfig {
+  oneof kind {
+    FlatIndex flat = 1;
+    HnswIndex hnsw = 2;
+    KdTreeIndex kd_tree = 3;
+  }
+}
+
+message CollectionInfo {
+  string name = 1;
+  uint32 dimension = 2;
+  Metric metric = 3;
+  IndexConfig index = 4;
+  uint64 count = 5;
+  uint64 tombstones = 6;
+}
+
+message Point {
+  // Optional on upsert: a UUID is generated when empty.
+  string id = 1;
+  repeated float vector = 2;
+  // JSON object; empty means no metadata.
+  string metadata_json = 3;
+}
+
+message SearchHit {
+  string id = 1;
+  float distance = 2;
+  string metadata_json = 3;
+  repeated float vector = 4;
+}
+
+message SnapshotInfo {
+  string id = 1;
+  string collection = 2;
+  uint64 created_at_ms = 3;
+  string sagitta_version = 4;
+  uint32 dimension = 5;
+  Metric metric = 6;
+  IndexConfig index = 7;
+  uint64 points = 8;
+  uint64 data_bytes = 9;
+  string data_sha256 = 10;
+  uint64 archive_bytes = 11;
+}
+
+message HealthRequest {}
+message HealthResponse {
+  string status = 1;
+  string version = 2;
+}
+
+message ListCollectionsRequest {}
+message ListCollectionsResponse {
+  repeated CollectionInfo collections = 1;
+}
+
+message CreateCollectionRequest {
+  string name = 1;
+  uint32 dimension = 2;
+  Metric metric = 3;
+  IndexConfig index = 4;
+}
+
+message GetCollectionRequest {
+  string name = 1;
+}
+
+message DropCollectionRequest {
+  string name = 1;
+}
+message DropCollectionResponse {}
+
+message FlushRequest {
+  string collection = 1;
+}
+message FlushResponse {}
+
+message CompactRequest {
+  string collection = 1;
+}
+
+message UpsertRequest {
+  string collection = 1;
+  repeated Point points = 2;
+}
+message UpsertResponse {
+  uint64 upserted = 1;
+  repeated string ids = 2;
+}
+
+message GetPointsRequest {
+  string collection = 1;
+  repeated string ids = 2;
+  bool with_vectors = 3;
+}
+message GetPointsResponse {
+  repeated Point points = 1;
+}
+
+message DeletePointsRequest {
+  string collection = 1;
+  repeated string ids = 2;
+}
+message DeletePointsResponse {
+  uint64 deleted = 1;
+}
+
+message ScrollRequest {
+  string collection = 1;
+  uint64 offset = 2;
+  // 0 means the default (100).
+  uint32 limit = 3;
+  bool with_vectors = 4;
+}
+message ScrollResponse {
+  repeated Point points = 1;
+  optional uint64 next_offset = 2;
+}
+
+message SearchRequest {
+  string collection = 1;
+  repeated float vector = 2;
+  // 0 means the default (10).
+  uint32 k = 3;
+  // JSON filter (see docs/API.md); empty means none.
+  string filter_json = 4;
+  optional uint32 ef = 5;
+  bool with_vectors = 6;
+  // Defaults to true when unset.
+  optional bool with_metadata = 7;
+}
+message SearchResponse {
+  repeated SearchHit hits = 1;
+}
+
+message SearchBatchRequest {
+  // Every request must name the same collection.
+  repeated SearchRequest searches = 1;
+}
+message SearchBatchResponse {
+  repeated SearchResponse results = 1;
+}
+
+message CreateSnapshotRequest {
+  string collection = 1;
+}
+
+message ListSnapshotsRequest {
+  // Empty lists every collection's snapshots.
+  string collection = 1;
+}
+message ListSnapshotsResponse {
+  repeated SnapshotInfo snapshots = 1;
+}
+
+message DeleteSnapshotRequest {
+  string id = 1;
+}
+message DeleteSnapshotResponse {}
+
+message RestoreSnapshotRequest {
+  string id = 1;
+  // Restore under this name instead of the original (empty = original).
+  string collection = 2;
+  bool replace = 3;
+}
