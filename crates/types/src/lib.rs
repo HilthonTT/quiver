@@ -2,7 +2,7 @@ pub mod auth;
 mod config;
 pub mod distance;
 mod error;
-mod filter;
+pub mod filter;
 mod point;
 pub mod snapshot;
 
