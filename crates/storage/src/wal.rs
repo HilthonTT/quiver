@@ -27,7 +27,14 @@ impl Wal {
         let mut buf = Vec::new();
         file.read_to_end(&mut buf)?;
 
-        let (entries, valid) = parse_frames(&buf);
+        let (entries, valid) = parse_frames(&buf).map_err(|offset| {
+            Error::Corrupt(format!(
+                "write-ahead log {} is corrupt at byte {offset} with {} bytes of later records; \
+                 move it aside to discard them and open anyway",
+                path.display(),
+                buf.len() - offset
+            ))
+        })?;
         if valid < buf.len() {
             tracing::warn!(
                 path = %path.display(),
@@ -88,29 +95,44 @@ impl Wal {
     }
 }
 
-fn parse_frames(buf: &[u8]) -> (Vec<Mutation>, usize) {
+/// Returns the replayed entries and the length of the valid prefix.
+///
+/// A bad frame at the end of the log is a torn final write and is dropped,
+/// as is a zero-filled tail (a crash can extend the file before the data
+/// lands). A bad frame followed by more data is corruption: `Err` holds its
+/// offset so the caller can refuse to discard the records after it.
+fn parse_frames(buf: &[u8]) -> std::result::Result<(Vec<Mutation>, usize), usize> {
     let mut entries = Vec::new();
     let mut pos = 0;
 
     while buf.len() - pos >= 8 {
+        let zero_tail = || buf[pos..].iter().all(|&b| b == 0);
         let len = u32::from_le_bytes(buf[pos..pos + 4].try_into().expect("4 bytes")) as usize;
         let crc = u32::from_le_bytes(buf[pos + 4..pos + 8].try_into().expect("4 bytes"));
         let start = pos + 8;
         if len > MAX_FRAME || buf.len() - start < len {
             break;
         }
-        let payload = &buf[start..start + len];
+        let end = start + len;
+        let payload = &buf[start..end];
         if crc32fast::hash(payload) != crc {
-            break;
+            if end == buf.len() || zero_tail() {
+                break;
+            }
+            return Err(pos);
         }
         match serde_json::from_slice(payload) {
             Ok(entry) => entries.push(entry),
-            Err(_) => break,
+            // A zero header has a valid checksum (crc32 of nothing is 0).
+            Err(_) if zero_tail() => break,
+            // Any other checksum-valid frame was written completely, so
+            // failing to parse it is corruption, never a torn write.
+            Err(_) => return Err(pos),
         }
-        pos = start + len;
+        pos = end;
     }
 
-    (entries, pos)
+    Ok((entries, pos))
 }
 
 #[cfg(test)]
@@ -194,5 +216,62 @@ mod tests {
         std::fs::write(&path, bytes).unwrap();
         let (_, entries) = Wal::open(&path, false).unwrap();
         assert!(entries.is_empty());
+    }
+
+    fn three_frames(path: &Path) -> Vec<u8> {
+        {
+            let (mut wal, _) = Wal::open(path, false).unwrap();
+            for id in ["a", "b", "c"] {
+                wal.append(Op::Upsert { points: &[point(id)] }).unwrap();
+            }
+        }
+        std::fs::read(path).unwrap()
+    }
+
+    #[test]
+    fn corrupt_middle_frame_is_reported_and_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.log");
+        let mut bytes = three_frames(&path);
+        bytes[10] ^= 0x01; // inside the first frame's payload
+        std::fs::write(&path, &bytes).unwrap();
+
+        let err = Wal::open(&path, false).unwrap_err();
+        assert!(matches!(err, Error::Corrupt(_)), "{err:?}");
+        // The intact frames after it must still be on disk for recovery.
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    }
+
+    #[test]
+    fn zero_filled_tail_is_truncated() {
+        // After a power loss the file can be extended with zeros the data never reached.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.log");
+        let mut bytes = three_frames(&path);
+        let valid = bytes.len();
+        bytes.extend_from_slice(&[0; 64]);
+        std::fs::write(&path, &bytes).unwrap();
+
+        let (_, entries) = Wal::open(&path, false).unwrap();
+        assert_eq!(entries.len(), 3);
+        assert_eq!(std::fs::metadata(&path).unwrap().len() as usize, valid);
+    }
+
+    #[test]
+    fn unparsable_frame_with_valid_checksum_is_reported() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.log");
+        let mut bytes = three_frames(&path);
+        let payload = b"not json";
+        let mut frame = Vec::new();
+        frame.put_u32(payload.len() as u32).unwrap();
+        frame.put_u32(crc32fast::hash(payload)).unwrap();
+        frame.extend_from_slice(payload);
+        bytes.extend_from_slice(&frame);
+        std::fs::write(&path, &bytes).unwrap();
+
+        // A checksum-valid frame was fully written, so this is not a torn tail.
+        assert!(matches!(Wal::open(&path, false), Err(Error::Corrupt(_))));
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
     }
 }

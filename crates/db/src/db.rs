@@ -5,7 +5,7 @@ use std::sync::Arc;
 
 use parking_lot::RwLock;
 use quiver_snapshot::{SnapshotInfo, SnapshotRegistry};
-use quiver_storage::{StorageKind, StorageOptions};
+use quiver_storage::{StorageKind, StorageOptions, state};
 use quiver_types::{CollectionConfig, CollectionInfo, Error, Result, validate_name};
 
 use crate::collection::{Collection, Env, META_FILE};
@@ -216,6 +216,13 @@ impl Database {
         if let Some(dir) = self.collection_dir(name)
             && dir.exists()
         {
+            // Remove the metadata first: if we crash part-way, what remains is
+            // skipped on open instead of loading as a half-deleted collection.
+            let meta = dir.join(META_FILE);
+            if meta.exists() {
+                fs::remove_file(&meta)?;
+                state::sync_parent(&meta)?;
+            }
             fs::remove_dir_all(dir)?;
         }
         Ok(())

@@ -9,6 +9,9 @@ pub const MAX_DIMENSION: usize = 65_536;
 pub const MAX_ID_LEN: usize = 512;
 /// Maximum collection-name length.
 pub const MAX_NAME_LEN: usize = 64;
+/// Maximum nesting depth of point metadata. Stored data is wrapped in a few
+/// more levels and must stay under serde_json's read limit of 128.
+pub const MAX_METADATA_DEPTH: usize = 64;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CollectionConfig {

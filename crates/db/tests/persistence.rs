@@ -90,6 +90,75 @@ fn torn_wal_write_loses_only_the_last_batch() {
     assert_eq!(db.collection("docs").unwrap().len(), 10);
 }
 
+fn nested(depth: usize) -> serde_json::Value {
+    let mut v = json!(1);
+    for _ in 0..depth {
+        v = json!([v]);
+    }
+    v
+}
+
+#[test]
+fn overly_nested_metadata_is_rejected_and_later_writes_survive() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db = Database::open(dir.path()).unwrap();
+        let c = db.create_collection("docs", CollectionConfig::new(2)).unwrap();
+        c.upsert([Point::new("a", vec![1.0, 0.5])]).unwrap();
+        // Deep enough that the WAL or checkpoint could no longer be read back.
+        for depth in [126, 200] {
+            let deep = Point::new("deep", vec![0.5, 1.0]).with_metadata(nested(depth));
+            assert!(matches!(c.upsert([deep]), Err(Error::InvalidArgument(_))));
+        }
+        c.upsert([Point::new("ok", vec![0.5, 1.0]).with_metadata(nested(32))])
+            .unwrap();
+        c.upsert([Point::new("b", vec![0.3, 0.7])]).unwrap();
+        c.flush().unwrap();
+        c.upsert([Point::new("c", vec![0.2, 0.9])]).unwrap();
+    }
+    let db = Database::open(dir.path()).unwrap();
+    let c = db.collection("docs").unwrap();
+    assert_eq!(c.len(), 4);
+    assert_eq!(c.get("ok").unwrap().metadata, Some(nested(32)));
+}
+
+#[test]
+fn null_metadata_reads_back_the_same_after_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db = Database::open(dir.path()).unwrap();
+        let c = db.create_collection("docs", CollectionConfig::new(2)).unwrap();
+        c.upsert([Point::new("a", vec![1.0, 0.5]).with_metadata(serde_json::Value::Null)])
+            .unwrap();
+        assert_eq!(c.get("a").unwrap().metadata, None);
+    }
+    let db = Database::open(dir.path()).unwrap();
+    assert_eq!(db.collection("docs").unwrap().get("a").unwrap().metadata, None);
+}
+
+#[test]
+fn recreating_a_half_dropped_collection_starts_empty() {
+    let dir = tempfile::tempdir().unwrap();
+    let cdir = dir.path().join("collections/docs");
+    {
+        let db = Database::open(dir.path()).unwrap();
+        let c = db.create_collection("docs", CollectionConfig::new(2)).unwrap();
+        c.upsert([Point::new("old", vec![1.0, 0.5])]).unwrap();
+    }
+    // A drop interrupted after removing the metadata but before the data files.
+    std::fs::remove_file(cdir.join("collection.json")).unwrap();
+    {
+        let db = Database::open(dir.path()).unwrap();
+        let c = db.create_collection("docs", CollectionConfig::new(2)).unwrap();
+        assert_eq!(c.len(), 0);
+        c.upsert([Point::new("new", vec![0.3, 0.7])]).unwrap();
+    }
+    let db = Database::open(dir.path()).unwrap();
+    let c = db.collection("docs").unwrap();
+    assert!(c.get("old").is_none());
+    assert_eq!(c.len(), 1);
+}
+
 #[test]
 fn corrupt_snapshot_is_reported() {
     let dir = tempfile::tempdir().unwrap();

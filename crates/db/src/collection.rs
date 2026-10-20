@@ -10,7 +10,8 @@ use quiver_storage::{
     Mutation, Op, Recovered, StorageEngine, StorageKind, StorageOptions, VectorStore, open_engine, state,
 };
 use quiver_types::{
-    CollectionConfig, CollectionInfo, Error, MAX_ID_LEN, Point, Result, SearchHit, SearchOptions,
+    CollectionConfig, CollectionInfo, Error, MAX_ID_LEN, MAX_METADATA_DEPTH, Point, Result, SearchHit,
+    SearchOptions,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -72,6 +73,11 @@ impl Collection {
 
         let engine = match (storage.is_durable(), dir) {
             (true, Some(dir)) => {
+                // A leftover directory (e.g. from an interrupted drop) must not
+                // leak its old log or checkpoint into the new collection.
+                if dir.exists() {
+                    fs::remove_dir_all(dir)?;
+                }
                 fs::create_dir_all(dir)?;
                 write_meta(
                     dir,
@@ -383,6 +389,20 @@ impl Collection {
                 "point ids must be 1..={MAX_ID_LEN} bytes"
             )));
         }
+        if p.metadata
+            .as_ref()
+            .is_some_and(|m| deeper_than(m, MAX_METADATA_DEPTH))
+        {
+            return Err(Error::invalid(format!(
+                "point `{}`: metadata is nested more than {MAX_METADATA_DEPTH} levels deep",
+                p.id
+            )));
+        }
+        // `null` and absent metadata are stored the same way; normalise so a
+        // point reads back identically however it was recovered.
+        if p.metadata == Some(Value::Null) {
+            p.metadata = None;
+        }
         self.validate_vector(&mut p.vector)
             .map_err(|e| Error::invalid(format!("point `{}`: {e}", p.id)))
     }
@@ -471,4 +491,14 @@ fn write_meta(dir: &Path, meta: &CollectionMeta) -> Result<()> {
     fs::File::open(&tmp)?.sync_all()?;
     fs::rename(&tmp, &path)?;
     state::sync_parent(&path)
+}
+
+/// Whether `v` nests arrays/objects more than `limit` levels deep. Recursion
+/// stops at `limit`, so arbitrarily deep values cannot overflow the stack.
+fn deeper_than(v: &Value, limit: usize) -> bool {
+    match v {
+        Value::Array(a) => limit == 0 || a.iter().any(|c| deeper_than(c, limit - 1)),
+        Value::Object(o) => limit == 0 || o.values().any(|c| deeper_than(c, limit - 1)),
+        _ => false,
+    }
 }
