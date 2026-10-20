@@ -327,3 +327,270 @@ fn vectors_whose_distances_would_overflow_are_rejected() {
     cosine.upsert([Point::new("big", vec![2e19, 0.0])]).unwrap();
     assert_eq!(cosine.search(&[3e19, 0.0], 1).unwrap()[0].id, "big");
 }
+
+fn line(c: &quiver_db::Collection, n: usize) {
+    c.upsert((0..n).map(|i| {
+        Point::new(format!("x{i}"), vec![i as f32, 0.0]).with_metadata(json!({ "i": i, "even": i % 2 == 0 }))
+    }))
+    .unwrap();
+}
+
+fn ids(hits: &[quiver_db::SearchHit]) -> Vec<&str> {
+    hits.iter().map(|h| h.id.as_str()).collect()
+}
+
+#[test]
+fn update_metadata_merges_like_json_merge_patch() {
+    use quiver_db::{MetadataMode, PointSelector};
+    let c = db_with(Metric::Euclidean, IndexConfig::Flat);
+    c.upsert([
+        Point::new("a", vec![0.0, 0.0]).with_metadata(json!({"x": 1, "n": {"a": 1, "b": 2}})),
+        Point::new("b", vec![1.0, 0.0]).with_metadata(json!([1, 2])),
+        Point::new("c", vec![2.0, 0.0]),
+    ])
+    .unwrap();
+    let patch = json!({"n": {"b": null, "c": 3}, "y": true, "x": null});
+    let selector = PointSelector::Ids(vec![
+        "a".into(),
+        "b".into(),
+        "c".into(),
+        "missing".into(),
+        "a".into(),
+    ]);
+    assert_eq!(
+        c.update_metadata(&selector, patch, MetadataMode::Merge).unwrap(),
+        3,
+        "missing ids are skipped"
+    );
+
+    assert_eq!(
+        c.get("a").unwrap().metadata,
+        Some(json!({"n": {"a": 1, "c": 3}, "y": true}))
+    );
+    // Absent or non-object metadata is merged onto `{}`.
+    for id in ["b", "c"] {
+        assert_eq!(
+            c.get(id).unwrap().metadata,
+            Some(json!({"n": {"c": 3}, "y": true}))
+        );
+    }
+    // A patch that removes the last key leaves an empty object.
+    c.update_metadata(
+        &PointSelector::Ids(vec!["c".into()]),
+        json!({"n": null, "y": null}),
+        MetadataMode::Merge,
+    )
+    .unwrap();
+    assert_eq!(c.get("c").unwrap().metadata, Some(json!({})));
+}
+
+#[test]
+fn update_metadata_replaces_by_filter() {
+    use quiver_db::{MetadataMode, PointSelector};
+    let c = db_with(Metric::Euclidean, IndexConfig::Flat);
+    line(&c, 6);
+    let evens = PointSelector::Filter(Filter::parse(&json!({"even": true})).unwrap());
+    assert_eq!(
+        c.update_metadata(&evens, json!({"tag": "e"}), MetadataMode::Replace)
+            .unwrap(),
+        3
+    );
+    assert_eq!(c.get("x2").unwrap().metadata, Some(json!({"tag": "e"})));
+    assert_eq!(
+        c.get("x3").unwrap().metadata,
+        Some(json!({"i": 3, "even": false}))
+    );
+
+    // Replacing with `null` removes the metadata.
+    let tagged = PointSelector::Filter(Filter::parse(&json!({"tag": "e"})).unwrap());
+    assert_eq!(
+        c.update_metadata(&tagged, json!(null), MetadataMode::Replace)
+            .unwrap(),
+        3
+    );
+    assert_eq!(c.get("x4").unwrap().metadata, None);
+    assert_eq!(
+        c.update_metadata(&tagged, json!({}), MetadataMode::Replace)
+            .unwrap(),
+        0
+    );
+}
+
+#[test]
+fn invalid_metadata_updates_change_nothing() {
+    use quiver_db::{MetadataMode, PointSelector};
+    let c = db_with(Metric::Euclidean, IndexConfig::Flat);
+    line(&c, 3);
+    let generation = c.generation();
+    let mut deep = json!(1);
+    for _ in 0..=quiver_db::types::MAX_METADATA_DEPTH {
+        deep = json!({ "d": deep });
+    }
+    let all = PointSelector::Ids(vec!["x0".into(), "x1".into(), "x2".into()]);
+    for mode in [MetadataMode::Merge, MetadataMode::Replace] {
+        let err = c
+            .update_metadata(&all, json!({"ok": 1, "deep": deep}), mode)
+            .unwrap_err();
+        assert!(matches!(err, Error::InvalidArgument(_)), "{err}");
+    }
+    for i in 0..3 {
+        assert_eq!(
+            c.get(&format!("x{i}")).unwrap().metadata,
+            Some(json!({"i": i, "even": i % 2 == 0}))
+        );
+    }
+    assert_eq!(c.generation(), generation);
+}
+
+#[test]
+fn update_metadata_leaves_the_index_and_slots_alone() {
+    use quiver_db::{MetadataMode, PointSelector};
+    let c = db_with(
+        Metric::Euclidean,
+        IndexConfig::Hnsw(quiver_db::HnswParams::default()),
+    );
+    line(&c, 50);
+    let before = c.search(&[10.2, 0.0], 5).unwrap();
+    let generation = c.generation();
+
+    let all = PointSelector::Filter(Filter::parse(&json!({"i": {"$gte": 0}})).unwrap());
+    assert_eq!(
+        c.update_metadata(&all, json!({"seen": true}), MetadataMode::Merge)
+            .unwrap(),
+        50
+    );
+
+    assert!(c.generation() > generation, "snapshot scheduler sees the change");
+    assert_eq!(c.info().tombstones, 0, "updated in place, no new slots");
+    let after = c.search(&[10.2, 0.0], 5).unwrap();
+    assert_eq!(ids(&after), ids(&before));
+    assert_eq!(
+        after.iter().map(|h| h.distance).collect::<Vec<_>>(),
+        before.iter().map(|h| h.distance).collect::<Vec<_>>()
+    );
+    assert_eq!(after[0].metadata.as_ref().unwrap()["seen"], true);
+    assert_eq!(c.get("x7").unwrap().vector, vec![7.0, 0.0]);
+}
+
+#[test]
+fn count_and_delete_where() {
+    let c = db_with(Metric::Euclidean, IndexConfig::Flat);
+    line(&c, 10);
+    let evens = Filter::parse(&json!({"even": true})).unwrap();
+    assert_eq!(c.count(None), 10);
+    assert_eq!(c.count(Some(&evens)), 5);
+
+    assert_eq!(c.delete_where(&evens).unwrap(), 5);
+    assert_eq!(c.count(None), 5);
+    assert_eq!(c.count(Some(&evens)), 0);
+    assert!(c.get("x4").is_none() && c.get("x5").is_some());
+    assert_eq!(c.delete_where(&evens).unwrap(), 0);
+    let hits = c.search(&[4.0, 0.0], 10).unwrap();
+    assert!(hits.iter().all(|h| h.metadata.as_ref().unwrap()["even"] == false));
+}
+
+#[test]
+fn search_by_id_leaves_the_point_itself_out() {
+    let c = db_with(Metric::Euclidean, IndexConfig::Flat);
+    line(&c, 10);
+    let hits = c.search_by_id("x4", 3, &SearchOptions::default()).unwrap();
+    assert_eq!(
+        ids(&hits)[0..2]
+            .iter()
+            .copied()
+            .collect::<std::collections::BTreeSet<_>>(),
+        ["x3", "x5"].into()
+    );
+    assert!(!ids(&hits).contains(&"x4"));
+    assert_eq!(hits.len(), 3);
+
+    let err = c.search_by_id("nope", 3, &SearchOptions::default()).unwrap_err();
+    assert!(matches!(&err, Error::PointNotFound(id) if id == "nope"), "{err}");
+}
+
+#[test]
+fn recommend_moves_towards_positives_and_away_from_negatives() {
+    let c = db_with(Metric::Euclidean, IndexConfig::Flat);
+    line(&c, 10);
+    let opts = SearchOptions::default();
+    let hits = c.recommend(&["x4"], &[], 2, &opts).unwrap();
+    assert_eq!(
+        ids(&hits).into_iter().collect::<std::collections::BTreeSet<_>>(),
+        ["x3", "x5"].into()
+    );
+    // Mean of the positives: (5, 0).
+    let hits = c.recommend(&["x4", "x6"], &[], 1, &opts).unwrap();
+    assert_eq!(ids(&hits), ["x5"]);
+    // 2·(4, 0) − (2, 0) = (6, 0); the examples themselves are never returned.
+    let hits = c.recommend(&["x4"], &["x2"], 3, &opts).unwrap();
+    assert_eq!(ids(&hits)[0], "x6");
+    assert!(!ids(&hits).contains(&"x4") && !ids(&hits).contains(&"x2"));
+
+    let err = c.recommend(&["x1", "gone"], &[], 3, &opts).unwrap_err();
+    assert!(matches!(&err, Error::PointNotFound(id) if id == "gone"), "{err}");
+    let err = c.recommend(&["x1"], &["also-gone"], 3, &opts).unwrap_err();
+    assert!(
+        matches!(&err, Error::PointNotFound(id) if id == "also-gone"),
+        "{err}"
+    );
+    let none: [&str; 0] = [];
+    assert!(matches!(
+        c.recommend(&none, &["x1"], 3, &opts),
+        Err(Error::InvalidArgument(_))
+    ));
+}
+
+#[test]
+fn recommend_rejects_a_zero_query_for_cosine() {
+    let c = db_with(Metric::Cosine, IndexConfig::Flat);
+    c.upsert([Point::new("a", vec![1.0, 0.0]), Point::new("b", vec![-1.0, 0.0])])
+        .unwrap();
+    let err = c
+        .recommend(&["a", "b"], &[], 1, &SearchOptions::default())
+        .unwrap_err();
+    assert!(matches!(err, Error::InvalidArgument(_)), "{err}");
+}
+
+#[test]
+fn excluded_examples_do_not_shrink_results_below_k() {
+    for index in [
+        IndexConfig::Flat,
+        IndexConfig::Hnsw(quiver_db::HnswParams::default()),
+        IndexConfig::KdTree(quiver_db::KdTreeParams::default()),
+    ] {
+        let c = db_with(Metric::Euclidean, index);
+        line(&c, 100);
+        let opts = SearchOptions::default();
+        let hits = c.search_by_id("x50", 10, &opts).unwrap();
+        assert_eq!(hits.len(), 10, "{index:?}");
+        let examples = ["x48", "x49", "x50", "x51", "x52"];
+        let hits = c.recommend(&examples, &[], 10, &opts).unwrap();
+        assert_eq!(hits.len(), 10, "{index:?}");
+        assert!(ids(&hits).iter().all(|id| !examples.contains(id)), "{index:?}");
+        // Excluded and filtered out together still fill up k.
+        let odd = opts
+            .clone()
+            .filter(Filter::parse(&json!({"even": false})).unwrap());
+        let hits = c.search_by_id("x51", 10, &odd).unwrap();
+        assert_eq!(hits.len(), 10, "{index:?}");
+        assert!(!ids(&hits).contains(&"x51"));
+    }
+}
+
+#[test]
+fn max_distance_drops_far_hits() {
+    let c = db_with(Metric::Euclidean, IndexConfig::Flat);
+    line(&c, 10);
+    let near = SearchOptions::default().max_distance(2.5);
+    let hits = c.search_with(&[0.0, 0.0], 10, &near).unwrap();
+    assert_eq!(ids(&hits), ["x0", "x1", "x2"]);
+    assert_eq!(
+        c.search_with(&[0.0, 0.0], 2, &near).unwrap().len(),
+        2,
+        "still capped at k"
+    );
+    let hits = c
+        .search_by_id("x5", 10, &SearchOptions::default().max_distance(1.0))
+        .unwrap();
+    assert_eq!(ids(&hits).len(), 2);
+}

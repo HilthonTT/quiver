@@ -13,4 +13,7 @@ pub use config::{
 pub use distance::Metric;
 pub use error::{Error, Result};
 pub use filter::Filter;
-pub use point::{CollectionInfo, Point, PointInput, SearchHit, SearchOptions, new_id};
+pub use point::{
+    CollectionInfo, MetadataMode, Point, PointInput, PointSelector, SearchHit, SearchOptions, merge_patch,
+    new_id,
+};

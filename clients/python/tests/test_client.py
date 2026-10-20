@@ -138,6 +138,26 @@ def test_get_returns_none_when_missing(client: Client, mock: Recorder) -> None:
     assert client.collection("docs").get("nope") is None
 
 
+@pytest.mark.parametrize("point_id", ["lookup", "delete", "count", "metadata"])
+def test_ids_taken_by_fixed_routes_are_fetched_by_lookup(
+    client: Client, async_client: AsyncClient, mock: Recorder, point_id: str
+) -> None:
+    mock.on("POST", "/collections/docs/points/lookup", 200, {"points": [{"id": point_id}]})
+    point = client.collection("docs").get(point_id)
+    assert point is not None and point.id == point_id
+    assert mock.last_json()["ids"] == [point_id]
+
+    async def main() -> None:
+        async with async_client as c:
+            p = await c.collection("docs").get(point_id)
+            assert p is not None and p.id == point_id
+
+    asyncio.run(main())
+
+    mock.on("POST", "/collections/docs/points/lookup", 200, {"points": []})
+    assert client.collection("docs").get(point_id) is None
+
+
 def test_get_on_missing_collection_raises(
     client: Client, async_client: AsyncClient, mock: Recorder
 ) -> None:
@@ -222,6 +242,122 @@ def test_delete(client: Client, mock: Recorder) -> None:
     assert mock.last_json() == {"ids": ["a", "zz"]}
 
 
+def _data_ops_routes(mock: Recorder) -> None:
+    hit = {"results": [{"id": "b", "distance": 0.5}]}
+    mock.on("POST", "/collections/docs/points/count", 200, {"count": 3})
+    mock.on("POST", "/collections/docs/points/delete", 200, {"deleted": 2})
+    mock.on("POST", "/collections/docs/points/metadata", 200, {"updated": 1})
+    mock.on("POST", "/collections/docs/search", 200, hit)
+    mock.on("POST", "/collections/docs/recommend", 200, hit)
+
+
+# Each data operation, its result from the routes above, and the body it must send.
+DATA_OPS: list[tuple[str, tuple[Any, ...], dict[str, Any], Any, dict[str, Any]]] = [
+    ("count", (), {}, 3, {}),
+    ("count", ({"genre": "sf"},), {}, 3, {"filter": {"genre": "sf"}}),
+    ("delete_where", ({"year": {"$lt": 1990}},), {}, 2, {"filter": {"year": {"$lt": 1990}}}),
+    (
+        "update_metadata",
+        ({"seen": True, "old": None},),
+        {"ids": ["a"]},
+        1,
+        {"metadata": {"seen": True, "old": None}, "mode": "merge", "ids": ["a"]},
+    ),
+    (
+        "update_metadata",
+        (None,),
+        {"filter": {"genre": "sf"}, "mode": "replace"},
+        1,
+        {"metadata": None, "mode": "replace", "filter": {"genre": "sf"}},
+    ),
+    (
+        "search",
+        (np.array([1, 0], dtype=np.float64),),
+        {"k": 3, "max_distance": 0.25},
+        "b",
+        {
+            "vector": [1.0, 0.0],
+            "k": 3,
+            "with_vectors": False,
+            "with_metadata": True,
+            "max_distance": 0.25,
+        },
+    ),
+    (
+        "search_by_id",
+        ("a",),
+        {"k": 2, "filter": {"x": 1}},
+        "b",
+        {"id": "a", "k": 2, "with_vectors": False, "with_metadata": True, "filter": {"x": 1}},
+    ),
+    (
+        "recommend",
+        ("a",),
+        {"k": 5},
+        "b",
+        {"positive": ["a"], "negative": [], "k": 5, "with_vectors": False, "with_metadata": True},
+    ),
+    (
+        "recommend",
+        (["a", "c"], ["d"]),
+        {"max_distance": 1.0, "with_vectors": True},
+        "b",
+        {
+            "positive": ["a", "c"],
+            "negative": ["d"],
+            "k": 10,
+            "with_vectors": True,
+            "with_metadata": True,
+            "max_distance": 1.0,
+        },
+    ),
+]
+
+
+def _summary(result: Any) -> Any:
+    return result[0].id if isinstance(result, list) else result
+
+
+@pytest.mark.parametrize(("method", "args", "kwargs", "expected", "body"), DATA_OPS)
+def test_data_operations_send_the_same_requests_sync_and_async(
+    client: Client,
+    async_client: AsyncClient,
+    mock: Recorder,
+    method: str,
+    args: tuple[Any, ...],
+    kwargs: dict[str, Any],
+    expected: Any,
+    body: dict[str, Any],
+) -> None:
+    _data_ops_routes(mock)
+    result = getattr(client.collection("docs"), method)(*args, **kwargs)
+    assert _summary(result) == expected
+    assert mock.last_json() == body
+
+    async def main() -> Any:
+        async with async_client as c:
+            return await getattr(c.collection("docs"), method)(*args, **kwargs)
+
+    assert _summary(asyncio.run(main())) == expected
+    assert mock.last_json() == body
+
+
+def test_update_metadata_needs_exactly_one_selector(client: Client) -> None:
+    col = client.collection("docs")
+    with pytest.raises(ValueError):
+        col.update_metadata({"a": 1})
+    with pytest.raises(ValueError):
+        col.update_metadata({"a": 1}, ids=["a"], filter={"x": 1})
+
+
+def test_missing_example_points_raise_not_found(client: Client, mock: Recorder) -> None:
+    error = {"error": {"code": "point_not_found", "message": "point `x` not found"}}
+    mock.on("POST", "/collections/docs/recommend", 404, error)
+    with pytest.raises(NotFoundError) as info:
+        client.collection("docs").recommend(["x"])
+    assert info.value.code == "point_not_found"
+
+
 @pytest.mark.parametrize(
     ("status", "code", "exc"),
     [
@@ -267,6 +403,7 @@ def test_async_client(async_client: AsyncClient, mock: Recorder) -> None:
     mock.on("POST", "/collections/docs/points", 200, {"upserted": 1})
     mock.on("POST", "/collections/docs/search", 200, {"results": [{"id": "a", "distance": 0}]})
     mock.on("GET", "/collections/docs", 200, INFO)
+    mock.on("POST", "/collections/docs/points/count", 200, {"count": 2})
 
     async def main() -> None:
         async with async_client as client:

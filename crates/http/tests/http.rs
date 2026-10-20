@@ -812,3 +812,194 @@ async fn point_reads_do_not_block_the_runtime() {
     reader.join().unwrap();
     writer.join().unwrap();
 }
+
+fn hit_ids(body: &Value) -> Vec<&str> {
+    body["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["id"].as_str().unwrap())
+        .collect()
+}
+
+#[tokio::test]
+async fn metadata_updates_by_ids_and_filter() {
+    let app = TestApp::seeded().await;
+    let (status, body) = app
+        .post(
+            "/collections/books/points/metadata",
+            json!({"ids": ["a", "nope"], "metadata": {"year": 1979, "genre": null}}),
+        )
+        .await;
+    assert_eq!((status, &body), (StatusCode::OK, &json!({"updated": 1})));
+    let (_, body) = app.get("/collections/books/points/a").await;
+    assert_eq!(body["metadata"], json!({"year": 1979}));
+
+    let (_, body) = app
+        .post(
+            "/collections/books/points/metadata",
+            json!({"filter": {"genre": "sf"}, "metadata": {"shelf": 2}, "mode": "replace"}),
+        )
+        .await;
+    assert_eq!(body["updated"], 1, "only c is still sf");
+    let (_, body) = app.get("/collections/books/points/c").await;
+    assert_eq!(body["metadata"], json!({"shelf": 2}));
+
+    for bad in [
+        json!({"metadata": {}}),
+        json!({"ids": ["a"], "filter": {"x": 1}, "metadata": {}}),
+        json!({"ids": ["a"]}),
+        json!({"ids": ["a"], "metadata": {}, "mode": "upsert"}),
+        json!({"ids": ["a"], "metadata": {}, "extra": 1}),
+    ] {
+        let (status, body) = app.post("/collections/books/points/metadata", bad.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad} -> {body}");
+    }
+}
+
+#[tokio::test]
+async fn count_and_delete_by_filter() {
+    let app = TestApp::seeded().await;
+    let (status, body) = app.post("/collections/books/points/count", json!({})).await;
+    assert_eq!((status, body["count"].clone()), (StatusCode::OK, json!(3)));
+    let (_, body) = app
+        .post(
+            "/collections/books/points/count",
+            json!({"filter": {"genre": "sf"}}),
+        )
+        .await;
+    assert_eq!(body["count"], 2);
+
+    let (status, body) = app
+        .post("/collections/books/points/delete", json!({"filter": {}}))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert!(
+        body["error"]["message"]
+            .as_str()
+            .unwrap()
+            .contains("drop the collection")
+    );
+    for bad in [json!({}), json!({"ids": ["a"], "filter": {"genre": "sf"}})] {
+        let (status, _) = app.post("/collections/books/points/delete", bad).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    let (status, body) = app
+        .post(
+            "/collections/books/points/delete",
+            json!({"filter": {"genre": "sf"}}),
+        )
+        .await;
+    assert_eq!((status, body), (StatusCode::OK, json!({"deleted": 2})));
+    let (_, body) = app.post("/collections/books/points/count", json!({})).await;
+    assert_eq!(body["count"], 1);
+}
+
+#[tokio::test]
+async fn search_by_id_recommend_and_max_distance() {
+    let app = TestApp::seeded().await;
+    let (status, body) = app
+        .post("/collections/books/search", json!({"id": "a", "k": 5}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(hit_ids(&body), ["b", "c"], "the point itself is left out");
+
+    let (_, body) = app
+        .post(
+            "/collections/books/search",
+            json!({"vector": [0.0, 0.0], "k": 5, "max_distance": 1.5}),
+        )
+        .await;
+    assert_eq!(hit_ids(&body), ["a", "b"]);
+
+    let (status, body) = app.post("/collections/books/search", json!({"id": "nope"})).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "point_not_found");
+    for bad in [json!({}), json!({"id": "a", "vector": [0.0, 0.0]})] {
+        let (status, _) = app.post("/collections/books/search", bad).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    let (_, body) = app
+        .post(
+            "/collections/books/search/batch",
+            json!({"searches": [{"id": "c", "k": 1}, {"vector": [5.0, 5.0], "k": 1}]}),
+        )
+        .await;
+    assert_eq!(body["results"][0][0]["id"], "b");
+    assert_eq!(body["results"][1][0]["id"], "c");
+
+    let (status, body) = app
+        .post("/collections/books/recommend", json!({"positive": ["a"], "k": 1}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(hit_ids(&body), ["b"]);
+    // Both examples are left out, so only c can be recommended.
+    let (_, body) = app
+        .post(
+            "/collections/books/recommend",
+            json!({"positive": ["a", "b"], "negative": [], "k": 3, "with_vectors": true}),
+        )
+        .await;
+    assert_eq!(hit_ids(&body), ["c"]);
+    assert_eq!(body["results"][0]["vector"], json!([5.0, 5.0]));
+    let (status, body) = app
+        .post(
+            "/collections/books/recommend",
+            json!({"positive": ["a"], "negative": ["gone"]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "point_not_found");
+    assert!(body["error"]["message"].as_str().unwrap().contains("gone"));
+    let (status, _) = app
+        .post("/collections/books/recommend", json!({"positive": []}))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    let too_many = vec!["a"; 10_001];
+    let (status, _) = app
+        .post(
+            "/collections/books/recommend",
+            json!({"positive": too_many[..5_001], "negative": too_many[..5_000]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn read_only_keys_can_count_and_recommend_but_not_change_points() {
+    let mut app = TestApp::with_options(HttpOptions {
+        keys: keys(),
+        ..Default::default()
+    });
+    app.key = Some("rw-secret");
+    app.post("/collections", json!({"name": "x", "dimension": 2}))
+        .await;
+    app.post(
+        "/collections/x/points",
+        json!({"points": [{"id": "a", "vector": [1.0, 0.0]}, {"id": "b", "vector": [0.0, 1.0]}]}),
+    )
+    .await;
+
+    app.key = Some("ro-secret");
+    let (status, _) = app.post("/collections/x/points/count", json!({})).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = app
+        .post("/collections/x/recommend", json!({"positive": ["a"]}))
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = app.post("/collections/x/search", json!({"id": "a"})).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, _) = app
+        .post(
+            "/collections/x/points/metadata",
+            json!({"ids": ["a"], "metadata": {"k": 1}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, _) = app
+        .post("/collections/x/points/delete", json!({"filter": {"k": 1}}))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}

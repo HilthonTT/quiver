@@ -12,6 +12,7 @@
 //! # }
 //! ```
 
+pub use quiver_types::MetadataMode;
 use quiver_types::snapshot::SnapshotInfo;
 use quiver_types::{CollectionConfig, CollectionInfo, Point, PointInput, SearchHit};
 use reqwest::{Method, RequestBuilder, StatusCode, Url};
@@ -39,6 +40,9 @@ pub enum ClientError {
 }
 
 pub type Result<T> = std::result::Result<T, ClientError>;
+
+/// Point ids that `GET collections/{name}/points/{id}` cannot address.
+const RESERVED_POINT_IDS: [&str; 6] = [".", "..", "lookup", "delete", "count", "metadata"];
 
 /// Overall limit for one request, matching the Python client.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -71,10 +75,15 @@ pub struct UpsertResult {
     pub ids: Vec<String>,
 }
 
-/// A nearest-neighbour query.
+/// A nearest-neighbour query, by vector or by an existing point's id.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SearchRequest {
+    /// The query vector; leave empty when searching by `id`.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
     pub vector: Vec<f32>,
+    /// Search with this point's stored vector, leaving the point itself out.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
     pub k: usize,
     /// Metadata filter, in the server's JSON filter syntax.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -82,6 +91,9 @@ pub struct SearchRequest {
     /// HNSW search breadth; ignored by other indexes.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ef: Option<usize>,
+    /// Drop hits farther than this; with HNSW it applies to the approximate top `k`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_distance: Option<f32>,
     pub with_vectors: bool,
     pub with_metadata: bool,
 }
@@ -91,13 +103,65 @@ impl SearchRequest {
     pub fn new(vector: Vec<f32>, k: usize) -> Self {
         Self {
             vector,
+            id: None,
             k,
             filter: None,
             ef: None,
+            max_distance: None,
             with_vectors: false,
             with_metadata: true,
         }
     }
+
+    /// The `k` points nearest to point `id`, which is left out.
+    pub fn by_id(id: impl Into<String>, k: usize) -> Self {
+        Self {
+            id: Some(id.into()),
+            ..Self::new(Vec::new(), k)
+        }
+    }
+}
+
+/// Points like the `positive` examples and unlike the `negative` ones.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RecommendRequest {
+    pub positive: Vec<String>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub negative: Vec<String>,
+    pub k: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ef: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_distance: Option<f32>,
+    pub with_vectors: bool,
+    pub with_metadata: bool,
+}
+
+impl RecommendRequest {
+    /// Top-`k` recommendations from `positive` examples, with metadata.
+    pub fn new(positive: Vec<String>, k: usize) -> Self {
+        Self {
+            positive,
+            negative: Vec::new(),
+            k,
+            filter: None,
+            ef: None,
+            max_distance: None,
+            with_vectors: false,
+            with_metadata: true,
+        }
+    }
+}
+
+/// Which points [`Client::update_metadata`] changes.
+#[derive(Debug, Clone, PartialEq)]
+pub enum Selector {
+    /// These ids; missing ones are skipped.
+    Ids(Vec<String>),
+    /// Every point matching this filter (the server's JSON filter syntax).
+    Filter(Value),
 }
 
 #[derive(Deserialize)]
@@ -227,9 +291,10 @@ impl Client {
 
     /// Fetches one point with its vector, or `None` if it does not exist.
     pub async fn get_point(&self, collection: &str, id: &str) -> Result<Option<Point>> {
-        if id == "." || id == ".." {
-            // URLs resolve these as dot-segments, even percent-encoded
-            // (`%2E%2E`), so they cannot appear in a path; look them up by body.
+        if RESERVED_POINT_IDS.contains(&id) {
+            // `GET points/{id}` cannot reach these: URLs resolve `.` and `..`
+            // as dot-segments (even percent-encoded), and the server's fixed
+            // `points/...` routes take the rest. Look them up by body instead.
             let path = format!("collections/{}/points/lookup", seg(collection));
             let req = self.request(Method::POST, &path).json(&json!({ "ids": [id] }));
             let mut points: Vec<Point> = Self::field(req, "points").await?;
@@ -274,8 +339,55 @@ impl Client {
         .await
     }
 
+    /// Deletes every point matching `filter`, and returns how many there were.
+    /// The server rejects an empty filter: drop the collection instead.
+    pub async fn delete_where(&self, collection: &str, filter: &Value) -> Result<usize> {
+        let path = format!("collections/{}/points/delete", seg(collection));
+        Self::field(
+            self.request(Method::POST, &path)
+                .json(&json!({ "filter": filter })),
+            "deleted",
+        )
+        .await
+    }
+
+    /// Counts the points, or those matching `filter`.
+    pub async fn count(&self, collection: &str, filter: Option<&Value>) -> Result<usize> {
+        let path = format!("collections/{}/points/count", seg(collection));
+        let body = match filter {
+            Some(f) => json!({ "filter": f }),
+            None => json!({}),
+        };
+        Self::field(self.request(Method::POST, &path).json(&body), "count").await
+    }
+
+    /// Changes the selected points' metadata without resending vectors, and
+    /// returns how many were updated.
+    pub async fn update_metadata(
+        &self,
+        collection: &str,
+        selector: &Selector,
+        metadata: &Value,
+        mode: MetadataMode,
+    ) -> Result<usize> {
+        let path = format!("collections/{}/points/metadata", seg(collection));
+        let mut body = json!({ "metadata": metadata, "mode": mode });
+        match selector {
+            Selector::Ids(ids) => body["ids"] = json!(ids),
+            Selector::Filter(f) => body["filter"] = f.clone(),
+        }
+        Self::field(self.request(Method::POST, &path).json(&body), "updated").await
+    }
+
     pub async fn search(&self, collection: &str, req: &SearchRequest) -> Result<Vec<SearchHit>> {
         let path = format!("collections/{}/search", seg(collection));
+        Self::field(self.request(Method::POST, &path).json(req), "results").await
+    }
+
+    /// Recommends points from positive (and optionally negative) examples,
+    /// which are left out of the results.
+    pub async fn recommend(&self, collection: &str, req: &RecommendRequest) -> Result<Vec<SearchHit>> {
+        let path = format!("collections/{}/recommend", seg(collection));
         Self::field(self.request(Method::POST, &path).json(req), "results").await
     }
 

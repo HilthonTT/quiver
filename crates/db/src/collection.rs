@@ -10,8 +10,8 @@ use quiver_storage::{
     Mutation, Op, Recovered, StorageEngine, StorageKind, StorageOptions, VectorStore, open_engine, state,
 };
 use quiver_types::{
-    CollectionConfig, CollectionInfo, Error, MAX_ID_LEN, MAX_METADATA_DEPTH, Point, Result, SearchHit,
-    SearchOptions,
+    CollectionConfig, CollectionInfo, Error, Filter, MAX_ID_LEN, MAX_METADATA_DEPTH, MetadataMode, Point,
+    PointSelector, Result, SearchHit, SearchOptions, merge_patch,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -293,6 +293,102 @@ impl Collection {
         Ok(removed)
     }
 
+    /// Deletes every point whose metadata matches `filter`; returns how many.
+    pub fn delete_where(&self, filter: &Filter) -> Result<usize> {
+        let mut inner = self.inner.write();
+        self.ensure_open()?;
+        let store = &inner.store;
+        let ids: Vec<String> = store
+            .live_slots()
+            .filter(|&slot| filter.matches(store.metadata(slot)))
+            .map(|slot| store.id(slot).to_owned())
+            .collect();
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        inner.engine.log(Op::Delete { ids: &ids })?;
+        let removed = apply_delete(&mut inner, &ids);
+        self.bump();
+        self.maintain(&mut inner)?;
+        Ok(removed)
+    }
+
+    /// Number of points, or of points whose metadata matches `filter`.
+    pub fn count(&self, filter: Option<&Filter>) -> usize {
+        let inner = self.inner.read();
+        let store = &inner.store;
+        match filter {
+            None => store.live(),
+            Some(f) => store
+                .live_slots()
+                .filter(|&slot| f.matches(store.metadata(slot)))
+                .count(),
+        }
+    }
+
+    /// Changes the metadata of the selected points without touching their
+    /// vectors, and returns how many were updated (missing ids are skipped).
+    ///
+    /// Every new value is validated before anything changes, so a batch is
+    /// applied completely or not at all.
+    pub fn update_metadata(
+        &self,
+        selector: &PointSelector,
+        metadata: Value,
+        mode: MetadataMode,
+    ) -> Result<usize> {
+        let mut inner = self.inner.write();
+        self.ensure_open()?;
+        let store = &inner.store;
+        let mut slots: Vec<u32> = match selector {
+            PointSelector::Ids(ids) => ids.iter().filter_map(|id| store.slot_of(id)).collect(),
+            PointSelector::Filter(f) => store
+                .live_slots()
+                .filter(|&slot| f.matches(store.metadata(slot)))
+                .collect(),
+        };
+        slots.sort_unstable();
+        slots.dedup();
+        if slots.is_empty() {
+            return Ok(0);
+        }
+
+        // Logged as an upsert of the whole points, so recovery needs nothing new.
+        let updated = slots
+            .iter()
+            .map(|&slot| {
+                let new = match mode {
+                    MetadataMode::Replace => metadata.clone(),
+                    MetadataMode::Merge => {
+                        let mut value = store
+                            .metadata(slot)
+                            .filter(|m| m.is_object())
+                            .cloned()
+                            .unwrap_or_else(|| Value::Object(serde_json::Map::new()));
+                        merge_patch(&mut value, &metadata);
+                        value
+                    }
+                };
+                let id = store.id(slot);
+                Ok(Point {
+                    id: id.to_owned(),
+                    vector: store.vector(slot).to_vec(),
+                    metadata: checked_metadata(id, Some(new))?,
+                })
+            })
+            .collect::<Result<Vec<Point>>>()?;
+
+        inner.engine.log(Op::Upsert { points: &updated })?;
+        let n = updated.len();
+        // In place: the vectors are unchanged, so the index and slots stay valid.
+        for (slot, point) in slots.into_iter().zip(updated) {
+            inner.store.set_metadata(slot, point.metadata);
+        }
+        self.bump();
+        self.maintain(&mut inner)?;
+        Ok(n)
+    }
+
     pub fn get(&self, id: &str) -> Option<Point> {
         let inner = self.inner.read();
         inner.store.slot_of(id).map(|slot| point_at(&inner.store, slot))
@@ -333,30 +429,85 @@ impl Collection {
     pub fn search_with(&self, vector: &[f32], k: usize, opts: &SearchOptions) -> Result<Vec<SearchHit>> {
         let mut query = vector.to_vec();
         self.validate_vector(&mut query)?;
+        let inner = self.inner.read();
+        Ok(search_locked(&inner.store, &inner.index, &query, k, opts, &[]))
+    }
 
+    /// Searches with the stored vector of point `id`, leaving that point out
+    /// of the results.
+    pub fn search_by_id(&self, id: &str, k: usize, opts: &SearchOptions) -> Result<Vec<SearchHit>> {
+        let inner = self.inner.read();
+        let slot = inner
+            .store
+            .slot_of(id)
+            .ok_or_else(|| Error::PointNotFound(id.to_owned()))?;
+        let mut query = inner.store.vector(slot).to_vec();
+        self.validate_vector(&mut query)?;
+        Ok(search_locked(
+            &inner.store,
+            &inner.index,
+            &query,
+            k,
+            opts,
+            &[slot],
+        ))
+    }
+
+    /// Finds points like the `positive` examples and unlike the `negative`
+    /// ones. The query is the mean of the positives, pushed away from the
+    /// mean of the negatives (`2·mean(pos) − mean(neg)`) when there are any.
+    /// The examples themselves are left out of the results.
+    pub fn recommend<S: AsRef<str>>(
+        &self,
+        positive: &[S],
+        negative: &[S],
+        k: usize,
+        opts: &SearchOptions,
+    ) -> Result<Vec<SearchHit>> {
+        if positive.is_empty() {
+            return Err(Error::invalid("recommend needs at least one positive example"));
+        }
         let inner = self.inner.read();
         let store = &inner.store;
-        let accept = |slot: u32| {
-            store.is_alive(slot)
-                && opts
-                    .filter
-                    .as_ref()
-                    .is_none_or(|f| f.matches(store.metadata(slot)))
+        let slots = |ids: &[S]| {
+            ids.iter()
+                .map(|id| {
+                    let id = id.as_ref();
+                    store
+                        .slot_of(id)
+                        .ok_or_else(|| Error::PointNotFound(id.to_owned()))
+                })
+                .collect::<Result<Vec<u32>>>()
         };
-        let found = inner.index.search(&query, k, opts.ef, store, &accept);
-
-        Ok(found
-            .into_iter()
-            .map(|n| SearchHit {
-                id: store.id(n.slot).to_owned(),
-                distance: n.dist,
-                metadata: opts
-                    .include_metadata
-                    .then(|| store.metadata(n.slot).cloned())
-                    .flatten(),
-                vector: opts.include_vectors.then(|| store.vector(n.slot).to_vec()),
-            })
-            .collect())
+        let (pos, neg) = (slots(positive)?, slots(negative)?);
+        let mean = |slots: &[u32]| {
+            let mut sum = vec![0.0f64; self.config.dimension];
+            for &slot in slots {
+                for (s, &x) in sum.iter_mut().zip(store.vector(slot)) {
+                    *s += f64::from(x);
+                }
+            }
+            sum.into_iter()
+                .map(|s| s / slots.len() as f64)
+                .collect::<Vec<f64>>()
+        };
+        let pos_mean = mean(&pos);
+        let mut query: Vec<f32> = if neg.is_empty() {
+            pos_mean.iter().map(|&x| x as f32).collect()
+        } else {
+            let neg_mean = mean(&neg);
+            pos_mean
+                .iter()
+                .zip(&neg_mean)
+                .map(|(&p, &n)| (2.0 * p - n) as f32)
+                .collect()
+        };
+        self.validate_vector(&mut query)?;
+        let mut exclude = pos;
+        exclude.extend(neg);
+        exclude.sort_unstable();
+        exclude.dedup();
+        Ok(search_locked(store, &inner.index, &query, k, opts, &exclude))
     }
 
     pub fn flush(&self) -> Result<()> {
@@ -419,20 +570,7 @@ impl Collection {
                 "point ids must be 1..={MAX_ID_LEN} bytes"
             )));
         }
-        if p.metadata
-            .as_ref()
-            .is_some_and(|m| deeper_than(m, MAX_METADATA_DEPTH))
-        {
-            return Err(Error::invalid(format!(
-                "point `{}`: metadata is nested more than {MAX_METADATA_DEPTH} levels deep",
-                p.id
-            )));
-        }
-        // `null` and absent metadata are stored the same way; normalise so a
-        // point reads back identically however it was recovered.
-        if p.metadata == Some(Value::Null) {
-            p.metadata = None;
-        }
+        p.metadata = checked_metadata(&p.id, p.metadata.take())?;
         self.validate_vector(&mut p.vector)
             .map_err(|e| Error::invalid(format!("point `{}`: {e}", p.id)))
     }
@@ -499,6 +637,40 @@ impl Collection {
     }
 }
 
+/// Runs a search over `store`, never returning the (sorted) `exclude` slots.
+/// They are rejected inside the index so they do not use up any of the `k`.
+fn search_locked(
+    store: &VectorStore,
+    index: &Index,
+    query: &[f32],
+    k: usize,
+    opts: &SearchOptions,
+    exclude: &[u32],
+) -> Vec<SearchHit> {
+    let accept = |slot: u32| {
+        store.is_alive(slot)
+            && exclude.binary_search(&slot).is_err()
+            && opts
+                .filter
+                .as_ref()
+                .is_none_or(|f| f.matches(store.metadata(slot)))
+    };
+    index
+        .search(query, k, opts.ef, store, &accept)
+        .into_iter()
+        .filter(|n| opts.max_distance.is_none_or(|max| n.dist <= max))
+        .map(|n| SearchHit {
+            id: store.id(n.slot).to_owned(),
+            distance: n.dist,
+            metadata: opts
+                .include_metadata
+                .then(|| store.metadata(n.slot).cloned())
+                .flatten(),
+            vector: opts.include_vectors.then(|| store.vector(n.slot).to_vec()),
+        })
+        .collect()
+}
+
 fn apply_upsert(inner: &mut Inner, points: Vec<Point>) {
     let Inner { store, index, .. } = inner;
     let first = store.slots() as u32;
@@ -510,6 +682,21 @@ fn apply_upsert(inner: &mut Inner, points: Vec<Point>) {
 
 fn apply_delete(inner: &mut Inner, ids: &[String]) -> usize {
     ids.iter().filter(|id| inner.store.remove(id)).count()
+}
+
+/// Validates a point's metadata and normalises `null` to `None`: the two
+/// are stored the same way, so a point reads back identically however it
+/// was recovered.
+fn checked_metadata(id: &str, metadata: Option<Value>) -> Result<Option<Value>> {
+    if metadata
+        .as_ref()
+        .is_some_and(|m| deeper_than(m, MAX_METADATA_DEPTH))
+    {
+        return Err(Error::invalid(format!(
+            "point `{id}`: metadata is nested more than {MAX_METADATA_DEPTH} levels deep"
+        )));
+    }
+    Ok(metadata.filter(|m| !m.is_null()))
 }
 
 fn point_at(store: &VectorStore, slot: u32) -> Point {

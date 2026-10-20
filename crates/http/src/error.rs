@@ -74,6 +74,7 @@ impl From<quiver_db::Error> for ApiError {
 
         let (status, code) = match &err {
             E::CollectionNotFound(_) | E::SnapshotNotFound(_) => (StatusCode::NOT_FOUND, "not_found"),
+            E::PointNotFound(_) => (StatusCode::NOT_FOUND, "point_not_found"),
             E::CollectionExists(_) => (StatusCode::CONFLICT, "already_exists"),
             E::DimensionMismatch { .. } => (StatusCode::BAD_REQUEST, "dimension_mismatch"),
             E::InvalidArgument(_) => (StatusCode::BAD_REQUEST, "invalid_argument"),

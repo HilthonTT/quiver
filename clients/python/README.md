@@ -53,12 +53,16 @@ Vectors can be lists, tuples or numpy arrays. Large iterables (including generat
 |---|---|
 | `upsert(points, batch_size=1000)` | Insert or replace points; returns count written |
 | `insert(vector, metadata=None, id=None)` | Insert one point; returns its (generated) id |
-| `search(vector, k=10, filter=None, ef=None, with_vectors=False, with_metadata=True)` | k-nearest-neighbour search |
+| `search(vector, k=10, filter=None, ef=None, max_distance=None, with_vectors=False, with_metadata=True)` | k-nearest-neighbour search |
+| `search_by_id(id, k=10, ...)` | Neighbours of an existing point (which is left out) |
+| `recommend(positive, negative=(), k=10, ...)` | Points like the positive examples and unlike the negative ones |
 | `search_batch(vectors, k=10, ...)` | Many searches in one request |
 | `get(id)` / `get_many(ids)` | Fetch points (`get` returns `None` if missing) |
 | `scroll(cursor=None, limit=100)` | One page of points in id order, with `next_cursor` |
 | `iter_points(page_size=500)` | Iterate over every point, following the cursors |
-| `delete(ids)` | Delete points; returns how many existed |
+| `delete(ids)` / `delete_where(filter)` | Delete points by id or by filter; returns how many existed |
+| `update_metadata(metadata, ids=None, filter=None, mode="merge")` | Change metadata without resending vectors |
+| `count(filter=None)` | Number of points, optionally matching a filter |
 | `info()` / `len(col)` | Configuration and point count |
 | `flush()` / `compact()` | Force a checkpoint / reclaim deleted space |
 | `create_snapshot()` / `snapshots()` | Back up this collection / list its backups |
@@ -82,6 +86,26 @@ while True:
 
 ids = [p.id for p in movies.iter_points()]  # or let the client follow the cursors
 ```
+
+### Data operations
+
+```python
+movies.count({"genre": "sci-fi"})  # 2
+
+# Merge (JSON Merge Patch: nested objects merge, None removes a key)...
+movies.update_metadata({"seen": True, "draft": None}, ids=["alien", "arrival"])
+# ...or replace the whole value, here for every match of a filter.
+movies.update_metadata({"genre": "classic"}, filter={"year": {"$lt": 1990}}, mode="replace")
+
+movies.delete_where({"genre": "romance"})  # an empty filter is refused
+
+movies.search_by_id("alien", k=5)  # neighbours of a stored point, without itself
+movies.recommend(["alien", "arrival"], negative=["amelie"], k=5)
+movies.search([1.0, 0.0, 0.0, 0.1], k=10, max_distance=0.3)  # only close hits
+```
+
+`max_distance` drops hits farther than the threshold; results are still capped
+at `k`, and with HNSW the threshold applies to the approximate top `k`.
 
 ### Snapshots (backups)
 

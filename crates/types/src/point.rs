@@ -73,6 +73,9 @@ pub struct SearchOptions {
     pub include_vectors: bool,
     /// Include each hit's metadata in the results.
     pub include_metadata: bool,
+    /// Drop hits farther than this distance. Results are still capped at
+    /// `k`; with HNSW the threshold applies to the approximate top `k`.
+    pub max_distance: Option<f32>,
 }
 
 impl Default for SearchOptions {
@@ -82,6 +85,7 @@ impl Default for SearchOptions {
             ef: None,
             include_vectors: false,
             include_metadata: true,
+            max_distance: None,
         }
     }
 }
@@ -109,6 +113,53 @@ impl SearchOptions {
     pub fn include_metadata(mut self, yes: bool) -> Self {
         self.include_metadata = yes;
         self
+    }
+
+    #[must_use]
+    pub fn max_distance(mut self, max: f32) -> Self {
+        self.max_distance = Some(max);
+        self
+    }
+}
+
+/// Which points an operation applies to.
+#[derive(Debug, Clone, PartialEq)]
+pub enum PointSelector {
+    /// These ids; ids that do not exist are skipped.
+    Ids(Vec<String>),
+    /// Every point whose metadata matches.
+    Filter(Filter),
+}
+
+/// How a metadata update combines new metadata
+/// with what a point already has.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MetadataMode {
+    /// RFC 7386 JSON Merge Patch: objects merge recursively and `null`
+    /// removes a key.
+    #[default]
+    Merge,
+    /// Replace the whole value; `null` removes the metadata.
+    Replace,
+}
+
+/// Applies `patch` to `target` as an RFC 7386 JSON Merge Patch.
+pub fn merge_patch(target: &mut Value, patch: &Value) {
+    let Value::Object(patch) = patch else {
+        *target = patch.clone();
+        return;
+    };
+    if !target.is_object() {
+        *target = Value::Object(serde_json::Map::new());
+    }
+    let target = target.as_object_mut().expect("just made an object");
+    for (key, value) in patch {
+        if value.is_null() {
+            target.remove(key);
+        } else {
+            merge_patch(target.entry(key.clone()).or_insert(Value::Null), value);
+        }
     }
 }
 
@@ -142,6 +193,34 @@ pub struct CollectionInfo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn merge_patch_follows_rfc_7386() {
+        use serde_json::json;
+        let cases = [
+            (json!({"a": "b"}), json!({"a": "c"}), json!({"a": "c"})),
+            (json!({"a": "b"}), json!({"b": "c"}), json!({"a": "b", "b": "c"})),
+            (json!({"a": "b"}), json!({"a": null}), json!({})),
+            (
+                json!({"a": {"b": "c", "d": 1}}),
+                json!({"a": {"b": null, "e": [1]}}),
+                json!({"a": {"d": 1, "e": [1]}}),
+            ),
+            (json!({"a": [1]}), json!({"a": {"b": 1}}), json!({"a": {"b": 1}})),
+            (json!(["a"]), json!({"a": "b"}), json!({"a": "b"})),
+            (json!({"a": "b"}), json!(["c"]), json!(["c"])),
+            (json!({"a": "foo"}), json!(null), json!(null)),
+            (
+                json!({}),
+                json!({"a": {"bb": {"ccc": null}}}),
+                json!({"a": {"bb": {}}}),
+            ),
+        ];
+        for (mut target, patch, expected) in cases {
+            merge_patch(&mut target, &patch);
+            assert_eq!(target, expected, "patch {patch}");
+        }
+    }
 
     #[test]
     fn point_input_generates_ids() {

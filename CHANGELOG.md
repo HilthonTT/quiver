@@ -6,6 +6,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Metadata updates** without resending vectors: merge (RFC 7386 JSON Merge Patch) or replace, by ids or by filter.
+  REST `POST /collections/{name}/points/metadata`, gRPC `UpdateMetadata`, `Collection::update_metadata`, Rust and Python `update_metadata`.
+- **Count and delete by filter**: `POST /collections/{name}/points/count`, `points/delete` with `{"filter": ...}`
+  (an empty filter is refused), gRPC `Count` and `DeletePoints.filter_json`, and `count`/`delete_where` in every client.
+- **Search by point id** (`{"id": ...}` instead of a vector; the point itself is left out) and **recommendations** from
+  positive and negative example ids (`POST /collections/{name}/recommend`, gRPC `Recommend`). Missing ids give `point_not_found`.
+- **`max_distance`** on searches and recommendations drops hits farther than a threshold.
+
 ### Changed
 
 - **Breaking:** listing points pages by id cursor instead of offset, so changes between pages never skip or repeat points.

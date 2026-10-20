@@ -18,6 +18,14 @@ Metric = Literal["cosine", "euclidean", "dot_product", "manhattan", "hamming"]
 """
 
 
+MetadataMode = Literal["merge", "replace"]
+"""How :meth:`Collection.update_metadata` applies new metadata:
+
+* ``merge`` → RFC 7386 JSON Merge Patch: nested objects merge, ``None`` removes a key
+* ``replace`` → the whole value is replaced (``None`` removes the metadata)
+"""
+
+
 class ArrayLike(Protocol):
     """Anything with a numpy-style ``tolist()`` method."""
 

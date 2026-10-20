@@ -269,3 +269,51 @@ fn scroll_cursor_survives_reopen() {
     assert_eq!(ids, expected);
     assert_eq!(page.next_cursor, None);
 }
+
+#[test]
+fn metadata_updates_and_filtered_deletes_survive_restart() {
+    use quiver_db::{Filter, MetadataMode, PointSelector, StorageKind};
+    let kinds = [StorageKind::File, StorageKind::RocksDb];
+    for storage in kinds.into_iter().filter(|k| k.is_available()) {
+        // With and without a checkpoint after the changes.
+        for checkpoint in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let options = || DbOptions {
+                storage,
+                ..Default::default()
+            };
+            {
+                let db = Database::open_with(dir.path(), options()).unwrap();
+                let c = db.create_collection("docs", CollectionConfig::new(8)).unwrap();
+                c.upsert(points(0..20, 8)).unwrap();
+                c.flush().unwrap();
+                let low = Filter::parse(&json!({"i": {"$lt": 5}})).unwrap();
+                assert_eq!(c.delete_where(&low).unwrap(), 5);
+                let ids = PointSelector::Ids(vec!["p7".into(), "p8".into()]);
+                c.update_metadata(&ids, json!({"tag": "x"}), MetadataMode::Merge)
+                    .unwrap();
+                c.update_metadata(
+                    &PointSelector::Ids(vec!["p9".into()]),
+                    json!(null),
+                    MetadataMode::Replace,
+                )
+                .unwrap();
+                if checkpoint {
+                    c.flush().unwrap();
+                }
+            }
+            let db = Database::open_with(dir.path(), options()).unwrap();
+            let c = db.collection("docs").unwrap();
+            let what = format!("{storage:?}, checkpoint: {checkpoint}");
+            assert_eq!(c.len(), 15, "{what}");
+            assert!(c.get("p3").is_none(), "{what}");
+            assert_eq!(
+                c.get("p7").unwrap().metadata,
+                Some(json!({"i": 7, "tag": "x"})),
+                "{what}"
+            );
+            assert_eq!(c.get("p9").unwrap().metadata, None, "{what}");
+            assert_eq!(c.search(&vec_for(8, 8), 1).unwrap()[0].id, "p8", "{what}");
+        }
+    }
+}

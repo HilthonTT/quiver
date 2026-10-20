@@ -18,6 +18,7 @@ from ._models import (
     CollectionInfo,
     Filter,
     Index,
+    MetadataMode,
     Metric,
     Point,
     PointLike,
@@ -145,7 +146,19 @@ def insert(name: str, point: dict[str, Any]) -> Call[str]:
     )
 
 
+# Ids that `GET /points/{id}` cannot reach, because the server's fixed
+# `/points/...` routes take those paths; they are fetched through lookup.
+_ROUTED_POINT_IDS = frozenset({"lookup", "delete", "count", "metadata"})
+
+
 def get_point(name: str, point_id: str, with_vectors: bool) -> Call[Point | None]:
+    if point_id in _ROUTED_POINT_IDS:
+        return Call(
+            "POST",
+            f"/collections/{_seg(name)}/points/lookup",
+            lambda b: next((Point.from_dict(p) for p in b["points"]), None),
+            json={"ids": [point_id], "with_vectors": with_vectors},
+        )
     return Call(
         "GET",
         f"/collections/{_seg(name)}/points/{_seg(point_id)}",
@@ -186,6 +199,30 @@ def delete_points(name: str, ids: Sequence[str]) -> Call[int]:
     )
 
 
+def _ids(ids: str | Iterable[str]) -> list[str]:
+    # A lone string is one id, not a sequence of one-character ids.
+    return [ids] if isinstance(ids, str) else list(ids)
+
+
+def search_options(
+    k: int,
+    filter: Filter | None,
+    ef: int | None,
+    max_distance: float | None,
+    with_vectors: bool,
+    with_metadata: bool,
+) -> dict[str, Any]:
+    """The settings shared by searches and recommendations."""
+    body: dict[str, Any] = {"k": k, "with_vectors": with_vectors, "with_metadata": with_metadata}
+    if filter is not None:
+        body["filter"] = dict(filter)
+    if ef is not None:
+        body["ef"] = ef
+    if max_distance is not None:
+        body["max_distance"] = max_distance
+    return body
+
+
 def search_body(
     vector: Vector,
     k: int,
@@ -193,18 +230,61 @@ def search_body(
     ef: int | None,
     with_vectors: bool,
     with_metadata: bool,
+    max_distance: float | None = None,
 ) -> dict[str, Any]:
-    body: dict[str, Any] = {
-        "vector": as_list(vector),
-        "k": k,
-        "with_vectors": with_vectors,
-        "with_metadata": with_metadata,
-    }
+    options = search_options(k, filter, ef, max_distance, with_vectors, with_metadata)
+    return {"vector": as_list(vector), **options}
+
+
+def search_by_id_body(point_id: str, options: dict[str, Any]) -> dict[str, Any]:
+    return {"id": point_id, **options}
+
+
+def recommend(
+    name: str, positive: str | Iterable[str], negative: str | Iterable[str], options: dict[str, Any]
+) -> Call[list[SearchResult]]:
+    body = {"positive": _ids(positive), "negative": _ids(negative), **options}
+    return Call(
+        "POST", f"/collections/{_seg(name)}/recommend", lambda b: _hits(b["results"]), json=body
+    )
+
+
+def count(name: str, filter: Filter | None) -> Call[int]:
+    body = {} if filter is None else {"filter": dict(filter)}
+    return Call(
+        "POST", f"/collections/{_seg(name)}/points/count", lambda b: int(b["count"]), json=body
+    )
+
+
+def delete_where(name: str, filter: Filter) -> Call[int]:
+    return Call(
+        "POST",
+        f"/collections/{_seg(name)}/points/delete",
+        lambda b: int(b["deleted"]),
+        json={"filter": dict(filter)},
+    )
+
+
+def update_metadata(
+    name: str,
+    metadata: Any,
+    ids: str | Iterable[str] | None,
+    filter: Filter | None,
+    mode: MetadataMode,
+) -> Call[int]:
+    if (ids is None) == (filter is None):
+        raise ValueError("pass exactly one of ids= and filter=")
+    body: dict[str, Any] = {"metadata": metadata, "mode": mode}
+    if ids is not None:
+        body["ids"] = _ids(ids)
     if filter is not None:
         body["filter"] = dict(filter)
-    if ef is not None:
-        body["ef"] = ef
-    return body
+    return Call(
+        "POST",
+        f"/collections/{_seg(name)}/points/metadata",
+        lambda b: int(b["updated"]),
+        json=body,
+    )
 
 
 def _hits(raw: Iterable[Any]) -> list[SearchResult]:

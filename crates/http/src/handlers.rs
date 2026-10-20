@@ -10,8 +10,8 @@ use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 
 use quiver_db::{
-    Collection, CollectionConfig, CollectionInfo, Database, Filter, IndexConfig, Metric, Point, PointInput,
-    RestoreOptions, SearchOptions, SnapshotInfo,
+    Collection, CollectionConfig, CollectionInfo, Database, Filter, IndexConfig, MetadataMode, Metric, Point,
+    PointInput, PointSelector, RestoreOptions, SearchHit, SearchOptions, SnapshotInfo,
 };
 
 use crate::error::ApiError;
@@ -186,6 +186,26 @@ fn check_ids(ids: &[String]) -> ApiResult<()> {
     Ok(())
 }
 
+/// A filter from a request body; JSON `null` means none.
+fn parse_filter(filter: Option<&Value>) -> ApiResult<Option<Filter>> {
+    match filter {
+        Some(Value::Null) | None => Ok(None),
+        Some(f) => Ok(Some(Filter::parse(f)?)),
+    }
+}
+
+/// Exactly one of `ids` and `filter`.
+fn selector(ids: Option<Vec<String>>, filter: Option<&Value>) -> ApiResult<PointSelector> {
+    match (ids, parse_filter(filter)?) {
+        (Some(ids), None) => {
+            check_ids(&ids)?;
+            Ok(PointSelector::Ids(ids))
+        }
+        (None, Some(filter)) => Ok(PointSelector::Filter(filter)),
+        _ => Err(ApiError::bad_request("give exactly one of `ids` and `filter`")),
+    }
+}
+
 fn yes() -> bool {
     true
 }
@@ -265,15 +285,79 @@ pub async fn scroll_points(
     Ok(Json(json!({ "points": points, "next_cursor": page.next_cursor })))
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct DeleteRequest {
+    #[serde(default)]
+    ids: Option<Vec<String>>,
+    #[serde(default)]
+    filter: Option<Value>,
+}
+
 pub async fn delete_points(
     State(db): State<AppState>,
     Path(name): Path<String>,
-    Json(req): Json<IdsRequest>,
+    Json(req): Json<DeleteRequest>,
 ) -> ApiResult<Json<Value>> {
-    check_ids(&req.ids)?;
+    if req
+        .filter
+        .as_ref()
+        .and_then(Value::as_object)
+        .is_some_and(|f| f.is_empty())
+    {
+        return Err(ApiError::bad_request(
+            "an empty filter would delete every point; drop the collection to delete everything",
+        ));
+    }
+    let selector = selector(req.ids, req.filter.as_ref())?;
     let c = collection(&db, &name)?;
-    let deleted = blocking(move || c.delete(&req.ids)).await?;
+    let deleted = blocking(move || match selector {
+        PointSelector::Ids(ids) => c.delete(&ids),
+        PointSelector::Filter(filter) => c.delete_where(&filter),
+    })
+    .await?;
     Ok(Json(json!({ "deleted": deleted })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CountRequest {
+    #[serde(default)]
+    filter: Option<Value>,
+}
+
+pub async fn count_points(
+    State(db): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<CountRequest>,
+) -> ApiResult<Json<Value>> {
+    let filter = parse_filter(req.filter.as_ref())?;
+    let c = collection(&db, &name)?;
+    let count = blocking(move || Ok(c.count(filter.as_ref()))).await?;
+    Ok(Json(json!({ "count": count })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MetadataRequest {
+    #[serde(default)]
+    ids: Option<Vec<String>>,
+    #[serde(default)]
+    filter: Option<Value>,
+    metadata: Value,
+    #[serde(default)]
+    mode: MetadataMode,
+}
+
+pub async fn update_metadata(
+    State(db): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<MetadataRequest>,
+) -> ApiResult<Json<Value>> {
+    let selector = selector(req.ids, req.filter.as_ref())?;
+    let c = collection(&db, &name)?;
+    let updated = blocking(move || c.update_metadata(&selector, req.metadata, req.mode)).await?;
+    Ok(Json(json!({ "updated": updated })))
 }
 
 pub async fn delete_point(
@@ -291,13 +375,21 @@ pub async fn delete_point(
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SearchRequest {
-    vector: Vec<f32>,
+    /// Exactly one of `vector` and `id`.
+    #[serde(default)]
+    vector: Option<Vec<f32>>,
+    /// Search with this point's vector, leaving the point out of the results.
+    #[serde(default)]
+    id: Option<String>,
     #[serde(default = "default_k")]
     k: usize,
     #[serde(default)]
     filter: Option<Value>,
     #[serde(default)]
     ef: Option<usize>,
+    /// Drop hits farther than this distance.
+    #[serde(default)]
+    max_distance: Option<f32>,
     #[serde(default)]
     with_vectors: bool,
     #[serde(default = "yes")]
@@ -308,21 +400,67 @@ fn default_k() -> usize {
     10
 }
 
-impl SearchRequest {
-    fn options(&self) -> ApiResult<SearchOptions> {
+/// The search settings shared by `search` and `recommend`.
+#[derive(Debug, Clone, Copy)]
+struct Settings<'a> {
+    k: usize,
+    filter: Option<&'a Value>,
+    ef: Option<usize>,
+    max_distance: Option<f32>,
+    with_vectors: bool,
+    with_metadata: bool,
+}
+
+impl Settings<'_> {
+    fn options(self) -> ApiResult<SearchOptions> {
         if self.k == 0 || self.k > MAX_K {
             return Err(ApiError::bad_request(format!("k must be between 1 and {MAX_K}")));
         }
-        let filter = match &self.filter {
-            Some(Value::Null) | None => None,
-            Some(f) => Some(Filter::parse(f)?),
-        };
         Ok(SearchOptions {
-            filter,
+            filter: parse_filter(self.filter)?,
             ef: self.ef,
             include_vectors: self.with_vectors,
             include_metadata: self.with_metadata,
+            max_distance: self.max_distance,
         })
+    }
+}
+
+/// What a validated search runs against.
+enum SearchBy {
+    Vector(Vec<f32>),
+    Id(String),
+}
+
+impl SearchRequest {
+    fn prepare(self) -> ApiResult<(SearchBy, usize, SearchOptions)> {
+        let opts = Settings {
+            k: self.k,
+            filter: self.filter.as_ref(),
+            ef: self.ef,
+            max_distance: self.max_distance,
+            with_vectors: self.with_vectors,
+            with_metadata: self.with_metadata,
+        }
+        .options()?;
+        let by = match (self.vector, self.id) {
+            (Some(v), None) => SearchBy::Vector(v),
+            (None, Some(id)) => SearchBy::Id(id),
+            _ => return Err(ApiError::bad_request("give exactly one of `vector` and `id`")),
+        };
+        Ok((by, self.k, opts))
+    }
+}
+
+fn run_search(
+    c: &Collection,
+    by: &SearchBy,
+    k: usize,
+    opts: &SearchOptions,
+) -> quiver_db::Result<Vec<SearchHit>> {
+    match by {
+        SearchBy::Vector(v) => c.search_with(v, k, opts),
+        SearchBy::Id(id) => c.search_by_id(id, k, opts),
     }
 }
 
@@ -338,8 +476,8 @@ pub async fn search(
     Json(req): Json<SearchRequest>,
 ) -> ApiResult<Json<Value>> {
     let c = collection(&db, &name)?;
-    let opts = req.options()?;
-    let results = blocking(move || c.search_with(&req.vector, req.k, &opts)).await?;
+    let (by, k, opts) = req.prepare()?;
+    let results = blocking(move || run_search(&c, &by, k, &opts)).await?;
     Ok(Json(json!({ "results": results })))
 }
 
@@ -357,15 +495,60 @@ pub async fn search_batch(
     let prepared = req
         .searches
         .into_iter()
-        .map(|s| s.options().map(|o| (s, o)))
+        .map(SearchRequest::prepare)
         .collect::<ApiResult<Vec<_>>>()?;
     let results = blocking(move || {
         prepared
             .iter()
-            .map(|(s, o)| c.search_with(&s.vector, s.k, o))
+            .map(|(by, k, opts)| run_search(&c, by, *k, opts))
             .collect::<Result<Vec<_>, _>>()
     })
     .await?;
+    Ok(Json(json!({ "results": results })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RecommendRequest {
+    positive: Vec<String>,
+    #[serde(default)]
+    negative: Vec<String>,
+    #[serde(default = "default_k")]
+    k: usize,
+    #[serde(default)]
+    filter: Option<Value>,
+    #[serde(default)]
+    ef: Option<usize>,
+    /// Drop hits farther than this distance.
+    #[serde(default)]
+    max_distance: Option<f32>,
+    #[serde(default)]
+    with_vectors: bool,
+    #[serde(default = "yes")]
+    with_metadata: bool,
+}
+
+pub async fn recommend(
+    State(db): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<RecommendRequest>,
+) -> ApiResult<Json<Value>> {
+    if req.positive.len().saturating_add(req.negative.len()) > MAX_IDS {
+        return Err(ApiError::bad_request(format!(
+            "at most {MAX_IDS} example ids per request"
+        )));
+    }
+    let opts = Settings {
+        k: req.k,
+        filter: req.filter.as_ref(),
+        ef: req.ef,
+        max_distance: req.max_distance,
+        with_vectors: req.with_vectors,
+        with_metadata: req.with_metadata,
+    }
+    .options()?;
+    let c = collection(&db, &name)?;
+    let results = blocking(move || c.recommend(&req.positive, &req.negative, req.k, &opts)).await?;
     Ok(Json(json!({ "results": results })))
 }
 

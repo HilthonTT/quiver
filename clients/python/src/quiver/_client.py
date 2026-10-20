@@ -17,6 +17,7 @@ from ._models import (
     Filter,
     Index,
     Metadata,
+    MetadataMode,
     Metric,
     Point,
     PointLike,
@@ -289,6 +290,35 @@ class Collection:
         """Deletes points by id. Returns how many existed."""
         return self._client._run(proto.delete_points(self.name, ids))
 
+    def count(self, filter: Filter | None = None) -> int:
+        """Counts the points, or only those whose metadata matches ``filter``."""
+        return self._client._run(proto.count(self.name, filter))
+
+    def delete_where(self, filter: Filter) -> int:
+        """Deletes every point whose metadata matches ``filter``. Returns how many.
+
+        An empty filter is rejected; delete the collection to remove everything.
+        """
+        return self._client._run(proto.delete_where(self.name, filter))
+
+    def update_metadata(
+        self,
+        metadata: Any,
+        *,
+        ids: str | Sequence[str] | None = None,
+        filter: Filter | None = None,
+        mode: MetadataMode = "merge",
+    ) -> int:
+        """Changes metadata without resending vectors. Returns how many points changed.
+
+        Select points with exactly one of ``ids`` (missing ones are skipped) and
+        ``filter``. ``mode="merge"`` applies ``metadata`` as a JSON Merge Patch
+        (RFC 7386: nested objects merge, ``None`` removes a key);
+        ``mode="replace"`` replaces the whole value (``None`` removes it).
+        """
+        call = proto.update_metadata(self.name, metadata, ids, filter, mode)
+        return self._client._run(call)
+
     def search(
         self,
         vector: Vector,
@@ -296,6 +326,7 @@ class Collection:
         *,
         filter: Filter | None = None,
         ef: int | None = None,
+        max_distance: float | None = None,
         with_vectors: bool = False,
         with_metadata: bool = True,
     ) -> list[SearchResult]:
@@ -306,11 +337,54 @@ class Collection:
             k: Number of results.
             filter: MongoDB-style metadata filter, e.g. ``{"year": {"$gte": 2000}}``.
             ef: HNSW beam width for this query; higher = better recall, slower.
+            max_distance: Drop hits farther than this. With HNSW it applies to
+                the approximate top ``k``.
             with_vectors: Include stored vectors in results.
             with_metadata: Include metadata in results.
         """
-        body = proto.search_body(vector, k, filter, ef, with_vectors, with_metadata)
+        body = proto.search_body(
+            vector, k, filter, ef, with_vectors, with_metadata, max_distance=max_distance
+        )
         return self._client._run(proto.search(self.name, body))
+
+    def search_by_id(
+        self,
+        id: str,
+        k: int = 10,
+        *,
+        filter: Filter | None = None,
+        ef: int | None = None,
+        max_distance: float | None = None,
+        with_vectors: bool = False,
+        with_metadata: bool = True,
+    ) -> list[SearchResult]:
+        """Finds the ``k`` nearest neighbours of point ``id``, leaving it out.
+
+        Raises :class:`NotFoundError` (code ``point_not_found``) if it does not exist.
+        """
+        options = proto.search_options(k, filter, ef, max_distance, with_vectors, with_metadata)
+        body = proto.search_by_id_body(id, options)
+        return self._client._run(proto.search(self.name, body))
+
+    def recommend(
+        self,
+        positive: str | Sequence[str],
+        negative: str | Sequence[str] = (),
+        k: int = 10,
+        *,
+        filter: Filter | None = None,
+        ef: int | None = None,
+        max_distance: float | None = None,
+        with_vectors: bool = False,
+        with_metadata: bool = True,
+    ) -> list[SearchResult]:
+        """Finds points like the ``positive`` example ids and unlike the ``negative`` ones.
+
+        The query is the mean of the positives, pushed away from the mean of
+        the negatives. The examples themselves are never returned.
+        """
+        options = proto.search_options(k, filter, ef, max_distance, with_vectors, with_metadata)
+        return self._client._run(proto.recommend(self.name, positive, negative, options))
 
     def search_batch(
         self,

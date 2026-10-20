@@ -23,6 +23,7 @@ from quiver import (
     Flat,
     InvalidRequestError,
     KDTree,
+    NotFoundError,
 )
 
 URL = os.environ.get("QUIVER_URL")
@@ -93,6 +94,53 @@ def test_scroll_pages_by_cursor_while_points_change(client: Client, name: str) -
     assert seen == sorted(set(seen)), "no point repeated, in id order"
     assert set(seen) >= {p.id for p in col.iter_points()}, "no surviving point skipped"
     assert col.scroll(seen[-1]).points == []
+
+
+def test_data_operations(client: Client, name: str) -> None:
+    col = client.create_collection(name, 2, metric="euclidean", index=Flat())
+    col.upsert((f"x{i}", [float(i), 0.0], {"i": i, "even": i % 2 == 0}) for i in range(10))
+
+    assert col.count() == 10
+    assert col.count({"even": True}) == 5
+
+    assert col.update_metadata({"tag": "low", "even": None}, filter={"i": {"$lt": 3}}) == 3
+    x1 = col.get("x1")
+    assert x1 is not None and x1.metadata == {"i": 1, "tag": "low"}
+    assert col.update_metadata(None, ids=["x1", "missing"], mode="replace") == 1
+    x1 = col.get("x1")
+    assert x1 is not None and x1.metadata is None and x1.vector == [1.0, 0.0]
+
+    hits = col.search_by_id("x4", k=2)
+    assert sorted(h.id for h in hits) == ["x3", "x5"]
+    assert [h.id for h in col.search([0, 0], k=10, max_distance=1.5)] == ["x0", "x1"]
+    assert col.recommend("x4", ["x2"], k=1)[0].id == "x6"
+    hits = col.recommend(["x4", "x5"], k=8)
+    assert len(hits) == 8 and not {"x4", "x5"} & {h.id for h in hits}
+    with pytest.raises(NotFoundError) as info:
+        col.search_by_id("nope")
+    assert info.value.code == "point_not_found"
+
+    with pytest.raises(InvalidRequestError):
+        col.delete_where({})
+    assert col.delete_where({"even": True}) == 3  # x0 and x2 lost "even" above
+    assert col.count() == 7
+
+
+def test_async_data_operations(name: str) -> None:
+    async def main() -> None:
+        assert URL
+        async with AsyncClient(URL, api_key=os.environ.get("QUIVER_API_KEY")) as client:
+            col = await client.create_collection(name, 2, metric="euclidean", index=Flat())
+            await col.upsert([("a", [0, 0], {"k": 1}), ("b", [1, 0]), ("c", [5, 5])])
+            assert await col.count({"k": 1}) == 1
+            assert await col.update_metadata({"k": 2}, ids="b") == 1
+            assert await col.count({"k": {"$exists": True}}) == 2
+            assert [h.id for h in await col.search_by_id("a", k=5)] == ["b", "c"]
+            assert [h.id for h in await col.recommend(["a"], k=1)] == ["b"]
+            assert await col.delete_where({"k": 2}) == 1
+            await client.delete_collection(name)
+
+    asyncio.run(main())
 
 
 def test_errors(client: Client, name: str) -> None:

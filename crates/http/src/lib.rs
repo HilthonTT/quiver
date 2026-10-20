@@ -41,9 +41,11 @@ pub fn router(db: Arc<Database>, options: HttpOptions) -> Router {
         .route("/collections/{name}", get(get_collection))
         .route("/collections/{name}/points", get(scroll_points))
         .route("/collections/{name}/points/lookup", post(lookup_points))
+        .route("/collections/{name}/points/count", post(count_points))
         .route("/collections/{name}/points/{id}", get(get_point))
         .route("/collections/{name}/search", post(search))
         .route("/collections/{name}/search/batch", post(search_batch))
+        .route("/collections/{name}/recommend", post(recommend))
         .route("/collections/{name}/snapshots", get(list_collection_snapshots))
         .route("/snapshots", get(list_snapshots))
         .route("/snapshots/{id}", get(get_snapshot))
@@ -58,6 +60,7 @@ pub fn router(db: Arc<Database>, options: HttpOptions) -> Router {
         .route("/collections/{name}/compact", post(compact_collection))
         .route("/collections/{name}/points", post(upsert_points))
         .route("/collections/{name}/points/delete", post(delete_points))
+        .route("/collections/{name}/points/metadata", post(update_metadata))
         .route(
             "/collections/{name}/points/{id}",
             axum::routing::delete(delete_point),

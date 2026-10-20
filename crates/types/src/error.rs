@@ -17,6 +17,9 @@ pub enum Error {
     #[error("snapshot `{0}` not found")]
     SnapshotNotFound(String),
 
+    #[error("point `{0}` not found")]
+    PointNotFound(String),
+
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
 

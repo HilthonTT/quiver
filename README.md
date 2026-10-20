@@ -12,6 +12,7 @@ A fast, embeddable vector database written from scratch in Rust.
 
 - **Indexes:** HNSW, exact flat search and a k-d tree, with cosine, Euclidean, dot, Manhattan and Hamming metrics.
 - **Filtered search:** MongoDB-style metadata filters (`$gte`, `$in`, `$or`, …) applied during the index traversal.
+- **Data operations:** update metadata in place (merge or replace), count and delete by filter, search by an existing point, recommend from positive and negative examples, and distance thresholds.
 - **Storage:** a checksummed WAL with checkpoints by default, RocksDB behind a feature flag, or in-memory.
 - **Snapshots:** SHA-256-verified `.tar.gz` backups with retention and periodic scheduling.
 - **Access:** REST and gRPC with read-only and read-write API keys, plus a Python client, a Rust client, a terminal UI, or the `quiver-db` crate embedded in-process.

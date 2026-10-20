@@ -10,7 +10,9 @@ use crate::pb;
 pub(crate) fn status(err: Error) -> Status {
     let msg = err.to_string();
     match err {
-        Error::CollectionNotFound(_) | Error::SnapshotNotFound(_) => Status::not_found(msg),
+        Error::CollectionNotFound(_) | Error::SnapshotNotFound(_) | Error::PointNotFound(_) => {
+            Status::not_found(msg)
+        }
         Error::CollectionExists(_) => Status::already_exists(msg),
         Error::DimensionMismatch { .. } | Error::InvalidArgument(_) | Error::InvalidFilter(_) => {
             Status::invalid_argument(msg)

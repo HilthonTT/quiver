@@ -3,7 +3,10 @@
 use std::sync::Arc;
 
 use quiver_db::auth::Role;
-use quiver_db::{Database, Filter, Point, RestoreOptions, SearchOptions};
+use quiver_db::{
+    Collection, Database, Filter, MetadataMode, Point, PointSelector, RestoreOptions, SearchHit,
+    SearchOptions,
+};
 use tonic::{Request, Response, Status};
 
 use crate::auth::require;
@@ -56,28 +59,84 @@ fn check_ids(ids: &[String]) -> Result<(), Status> {
     Ok(())
 }
 
-fn search_options(req: &pb::SearchRequest) -> Result<(usize, SearchOptions), Status> {
-    let k = if req.k == 0 { 10 } else { req.k as usize };
-    if k > MAX_K {
-        return Err(Status::invalid_argument(format!(
-            "k must be between 1 and {MAX_K}"
-        )));
-    }
-    // JSON `null` means no filter, as in the REST API.
-    let filter = json_from_pb(&req.filter_json, "filter_json")?
+/// A JSON filter; empty or JSON `null` means none, as in the REST API.
+fn filter_from_pb(json: &str) -> Result<Option<Filter>, Status> {
+    json_from_pb(json, "filter_json")?
         .filter(|f| !f.is_null())
         .map(|f| Filter::parse(&f))
         .transpose()
-        .map_err(status)?;
-    Ok((
-        k,
-        SearchOptions {
-            filter,
-            ef: req.ef.map(|e| e as usize),
-            include_vectors: req.with_vectors,
-            include_metadata: req.with_metadata.unwrap_or(true),
-        },
-    ))
+        .map_err(status)
+}
+
+/// Either `ids` or a filter, not both. No filter selects the (maybe empty) ids.
+fn selector(ids: Vec<String>, filter_json: &str) -> Result<PointSelector, Status> {
+    check_ids(&ids)?;
+    match filter_from_pb(filter_json)? {
+        None => Ok(PointSelector::Ids(ids)),
+        Some(_) if !ids.is_empty() => Err(Status::invalid_argument(
+            "give either ids or filter_json, not both",
+        )),
+        Some(filter) => Ok(PointSelector::Filter(filter)),
+    }
+}
+
+/// The search settings shared by `Search` and `Recommend`.
+struct Settings<'a> {
+    k: u32,
+    filter_json: &'a str,
+    ef: Option<u32>,
+    max_distance: Option<f32>,
+    with_vectors: bool,
+    with_metadata: Option<bool>,
+}
+
+impl Settings<'_> {
+    fn options(&self) -> Result<(usize, SearchOptions), Status> {
+        let k = if self.k == 0 { 10 } else { self.k as usize };
+        if k > MAX_K {
+            return Err(Status::invalid_argument(format!(
+                "k must be between 1 and {MAX_K}"
+            )));
+        }
+        Ok((
+            k,
+            SearchOptions {
+                filter: filter_from_pb(self.filter_json)?,
+                ef: self.ef.map(|e| e as usize),
+                include_vectors: self.with_vectors,
+                include_metadata: self.with_metadata.unwrap_or(true),
+                max_distance: self.max_distance,
+            },
+        ))
+    }
+}
+
+fn search_options(req: &pb::SearchRequest) -> Result<(usize, SearchOptions), Status> {
+    if req.vector.is_empty() == req.id.is_empty() {
+        return Err(Status::invalid_argument("give either vector or id, not both"));
+    }
+    Settings {
+        k: req.k,
+        filter_json: &req.filter_json,
+        ef: req.ef,
+        max_distance: req.max_distance,
+        with_vectors: req.with_vectors,
+        with_metadata: req.with_metadata,
+    }
+    .options()
+}
+
+fn run_search(
+    c: &Collection,
+    req: &pb::SearchRequest,
+    k: usize,
+    opts: &SearchOptions,
+) -> quiver_db::Result<Vec<SearchHit>> {
+    if req.id.is_empty() {
+        c.search_with(&req.vector, k, opts)
+    } else {
+        c.search_by_id(&req.id, k, opts)
+    }
 }
 
 #[tonic::async_trait]
@@ -185,9 +244,23 @@ impl pb::quiver_server::Quiver for QuiverService {
     async fn delete_points(&self, req: Request<pb::DeletePointsRequest>) -> Rpc<pb::DeletePointsResponse> {
         require(&req, Role::ReadWrite)?;
         let req = req.into_inner();
-        check_ids(&req.ids)?;
+        if json_from_pb(&req.filter_json, "filter_json")?
+            .and_then(|f| f.as_object().map(serde_json::Map::is_empty))
+            .unwrap_or(false)
+        {
+            return Err(Status::invalid_argument(
+                "an empty filter would delete every point; drop the collection to delete everything",
+            ));
+        }
+        let selector = selector(req.ids, &req.filter_json)?;
         let deleted = self
-            .blocking(move |db| db.collection(&req.collection)?.delete(&req.ids))
+            .blocking(move |db| {
+                let c = db.collection(&req.collection)?;
+                match selector {
+                    PointSelector::Ids(ids) => c.delete(&ids),
+                    PointSelector::Filter(filter) => c.delete_where(&filter),
+                }
+            })
             .await?;
         Ok(Response::new(pb::DeletePointsResponse {
             deleted: deleted as u64,
@@ -217,12 +290,80 @@ impl pb::quiver_server::Quiver for QuiverService {
         }))
     }
 
+    async fn count(&self, req: Request<pb::CountRequest>) -> Rpc<pb::CountResponse> {
+        require(&req, Role::ReadOnly)?;
+        let req = req.into_inner();
+        let filter = filter_from_pb(&req.filter_json)?;
+        let count = self
+            .blocking(move |db| Ok(db.collection(&req.collection)?.count(filter.as_ref())))
+            .await?;
+        Ok(Response::new(pb::CountResponse { count: count as u64 }))
+    }
+
+    async fn update_metadata(
+        &self,
+        req: Request<pb::UpdateMetadataRequest>,
+    ) -> Rpc<pb::UpdateMetadataResponse> {
+        require(&req, Role::ReadWrite)?;
+        let req = req.into_inner();
+        let mode = match pb::MetadataMode::try_from(req.mode) {
+            Ok(pb::MetadataMode::Merge) => MetadataMode::Merge,
+            Ok(pb::MetadataMode::Replace) => MetadataMode::Replace,
+            Err(_) => {
+                return Err(Status::invalid_argument(format!(
+                    "unknown metadata mode {}",
+                    req.mode
+                )));
+            }
+        };
+        let metadata = json_from_pb(&req.metadata_json, "metadata_json")?
+            .ok_or_else(|| Status::invalid_argument("metadata_json is required (use `null` to remove)"))?;
+        let selector = selector(req.ids, &req.filter_json)?;
+        let updated = self
+            .blocking(move |db| {
+                db.collection(&req.collection)?
+                    .update_metadata(&selector, metadata, mode)
+            })
+            .await?;
+        Ok(Response::new(pb::UpdateMetadataResponse {
+            updated: updated as u64,
+        }))
+    }
+
+    async fn recommend(&self, req: Request<pb::RecommendRequest>) -> Rpc<pb::SearchResponse> {
+        require(&req, Role::ReadOnly)?;
+        let req = req.into_inner();
+        if req.positive.len().saturating_add(req.negative.len()) > MAX_IDS {
+            return Err(Status::invalid_argument(format!(
+                "at most {MAX_IDS} example ids per request"
+            )));
+        }
+        let (k, opts) = Settings {
+            k: req.k,
+            filter_json: &req.filter_json,
+            ef: req.ef,
+            max_distance: req.max_distance,
+            with_vectors: req.with_vectors,
+            with_metadata: req.with_metadata,
+        }
+        .options()?;
+        let hits = self
+            .blocking(move |db| {
+                db.collection(&req.collection)?
+                    .recommend(&req.positive, &req.negative, k, &opts)
+            })
+            .await?;
+        Ok(Response::new(pb::SearchResponse {
+            hits: hits.into_iter().map(hit_to_pb).collect(),
+        }))
+    }
+
     async fn search(&self, req: Request<pb::SearchRequest>) -> Rpc<pb::SearchResponse> {
         require(&req, Role::ReadOnly)?;
         let req = req.into_inner();
         let (k, opts) = search_options(&req)?;
         let hits = self
-            .blocking(move |db| db.collection(&req.collection)?.search_with(&req.vector, k, &opts))
+            .blocking(move |db| run_search(&*db.collection(&req.collection)?, &req, k, &opts))
             .await?;
         Ok(Response::new(pb::SearchResponse {
             hits: hits.into_iter().map(hit_to_pb).collect(),
@@ -246,7 +387,7 @@ impl pb::quiver_server::Quiver for QuiverService {
                 prepared
                     .iter()
                     .map(|(s, (k, opts))| {
-                        let hits = db.collection(&s.collection)?.search_with(&s.vector, *k, opts)?;
+                        let hits = run_search(&*db.collection(&s.collection)?, s, *k, opts)?;
                         Ok(pb::SearchResponse {
                             hits: hits.into_iter().map(hit_to_pb).collect(),
                         })

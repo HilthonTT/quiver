@@ -25,10 +25,13 @@ service Quiver {
   rpc GetPoints(GetPointsRequest) returns (GetPointsResponse);
   rpc DeletePoints(DeletePointsRequest) returns (DeletePointsResponse);
   rpc Scroll(ScrollRequest) returns (ScrollResponse);
+  rpc Count(CountRequest) returns (CountResponse);
+  rpc UpdateMetadata(UpdateMetadataRequest) returns (UpdateMetadataResponse);
 
   // Search
   rpc Search(SearchRequest) returns (SearchResponse);
   rpc SearchBatch(SearchBatchRequest) returns (SearchBatchResponse);
+  rpc Recommend(RecommendRequest) returns (SearchResponse);
 
   // Snapshots
   rpc CreateSnapshot(CreateSnapshotRequest) returns (SnapshotInfo);
@@ -160,9 +163,13 @@ message GetPointsResponse {
   repeated Point points = 1;
 }
 
+// Give either `ids` or `filter_json`, not both.
 message DeletePointsRequest {
   string collection = 1;
   repeated string ids = 2;
+  // JSON filter: deletes every matching point. `{}` is rejected; drop the
+  // collection to delete everything.
+  string filter_json = 3;
 }
 message DeletePointsResponse {
   uint64 deleted = 1;
@@ -187,6 +194,7 @@ message ScrollResponse {
   optional string next_cursor = 3;
 }
 
+// Give either `vector` or `id`, not both.
 message SearchRequest {
   string collection = 1;
   repeated float vector = 2;
@@ -198,6 +206,10 @@ message SearchRequest {
   bool with_vectors = 6;
   // Defaults to true when unset.
   optional bool with_metadata = 7;
+  // Search with this point's vector; the point itself is left out.
+  string id = 8;
+  // Drop hits farther than this. With HNSW it applies to the approximate top k.
+  optional float max_distance = 9;
 }
 message SearchResponse {
   repeated SearchHit hits = 1;
@@ -209,6 +221,52 @@ message SearchBatchRequest {
 }
 message SearchBatchResponse {
   repeated SearchResponse results = 1;
+}
+
+// Finds points like the positive examples and unlike the negative ones.
+// The examples themselves are left out of the results.
+message RecommendRequest {
+  string collection = 1;
+  // At least one.
+  repeated string positive = 2;
+  repeated string negative = 3;
+  // 0 means the default (10).
+  uint32 k = 4;
+  string filter_json = 5;
+  optional uint32 ef = 6;
+  optional float max_distance = 7;
+  bool with_vectors = 8;
+  // Defaults to true when unset.
+  optional bool with_metadata = 9;
+}
+
+message CountRequest {
+  string collection = 1;
+  // JSON filter; empty counts every point.
+  string filter_json = 2;
+}
+message CountResponse {
+  uint64 count = 1;
+}
+
+enum MetadataMode {
+  // RFC 7386 JSON Merge Patch: objects merge and `null` removes a key.
+  METADATA_MODE_MERGE = 0;
+  // Replace the whole value; `null` removes the metadata.
+  METADATA_MODE_REPLACE = 1;
+}
+
+// Give either `ids` or `filter_json`, not both.
+message UpdateMetadataRequest {
+  string collection = 1;
+  repeated string ids = 2;
+  string filter_json = 3;
+  // Required JSON value (`null` is allowed).
+  string metadata_json = 4;
+  MetadataMode mode = 5;
+}
+message UpdateMetadataResponse {
+  uint64 updated = 1;
 }
 
 message CreateSnapshotRequest {

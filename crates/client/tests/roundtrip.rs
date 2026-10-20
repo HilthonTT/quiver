@@ -122,17 +122,86 @@ async fn full_lifecycle() {
 }
 
 #[tokio::test]
-async fn dot_point_ids_round_trip() {
+async fn data_operations_round_trip() {
+    use quiver_client::{MetadataMode, RecommendRequest, Selector};
+    use quiver_types::{IndexConfig, Metric};
+
+    let server = start(KeyStore::default()).await;
+    let c = Client::new(&server.url).unwrap();
+    let config = CollectionConfig::new(2)
+        .metric(Metric::Euclidean)
+        .index(IndexConfig::Flat);
+    c.create_collection("line", &config).await.unwrap();
+    let points = (0..6)
+        .map(|i| {
+            serde_json::from_value(json!({
+                "id": format!("x{i}"), "vector": [i as f32, 0.0], "metadata": { "i": i, "even": i % 2 == 0 }
+            }))
+            .unwrap()
+        })
+        .collect();
+    c.upsert("line", points).await.unwrap();
+
+    assert_eq!(c.count("line", None).await.unwrap(), 6);
+    assert_eq!(c.count("line", Some(&json!({"even": true}))).await.unwrap(), 3);
+
+    let ids = Selector::Ids(vec!["x1".into(), "missing".into()]);
+    let n = c
+        .update_metadata("line", &ids, &json!({"tag": "t", "i": null}), MetadataMode::Merge)
+        .await
+        .unwrap();
+    assert_eq!(n, 1);
+    let x1 = c.get_point("line", "x1").await.unwrap().unwrap();
+    assert_eq!(x1.metadata, Some(json!({"even": false, "tag": "t"})));
+    let odd = Selector::Filter(json!({"even": false}));
+    let n = c
+        .update_metadata("line", &odd, &json!({"odd": true}), MetadataMode::Replace)
+        .await
+        .unwrap();
+    assert_eq!(n, 3);
+
+    let mut by_id = SearchRequest::by_id("x2", 2);
+    let hits = c.search("line", &by_id).await.unwrap();
+    assert!(hits.iter().all(|h| h.id != "x2") && hits.len() == 2);
+    by_id.max_distance = Some(0.5);
+    assert!(c.search("line", &by_id).await.unwrap().is_empty());
+
+    let mut rec = RecommendRequest::new(vec!["x2".into()], 1);
+    rec.negative = vec!["x0".into()];
+    let hits = c.recommend("line", &rec).await.unwrap();
+    assert_eq!(hits[0].id, "x4", "2·x2 − x0 = (4, 0)");
+    let err = c
+        .recommend("line", &RecommendRequest::new(vec!["nope".into()], 1))
+        .await
+        .unwrap_err();
+    assert!(
+        matches!(err, ClientError::Api { ref code, .. } if code == "point_not_found"),
+        "{err}"
+    );
+
+    assert_eq!(c.delete_where("line", &json!({"odd": true})).await.unwrap(), 3);
+    assert_eq!(c.count("line", None).await.unwrap(), 3);
+    let err = c.delete_where("line", &json!({})).await.unwrap_err();
+    assert!(
+        matches!(err, ClientError::Api { status, .. } if status == 400),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn path_unsafe_point_ids_round_trip() {
     let server = start(KeyStore::default()).await;
     let c = Client::new(&server.url).unwrap();
     c.create_collection("docs", &CollectionConfig::new(2))
         .await
         .unwrap();
-    for id in [".", "..", "..."] {
+    // Dot-segments, and names the server's fixed `points/...` routes take.
+    for id in [".", "..", "...", "lookup", "delete", "count", "metadata"] {
         c.upsert("docs", vec![point(id, vec![1.0, 0.0])]).await.unwrap();
         let got = c.get_point("docs", id).await.unwrap();
         assert_eq!(got.map(|p| p.id).as_deref(), Some(id));
     }
+    assert!(c.get_point("docs", "count2").await.unwrap().is_none());
 }
 
 #[tokio::test]

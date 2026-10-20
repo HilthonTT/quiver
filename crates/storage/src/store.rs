@@ -68,6 +68,12 @@ impl VectorStore {
         self.metadata[slot as usize].as_ref()
     }
 
+    /// Replaces a live slot's metadata in place; its vector and slot stay.
+    pub fn set_metadata(&mut self, slot: u32, metadata: Option<Value>) {
+        debug_assert!(self.is_alive(slot));
+        self.metadata[slot as usize] = metadata;
+    }
+
     pub fn slot_of(&self, id: &str) -> Option<u32> {
         self.id_to_slot.get(id).copied()
     }
