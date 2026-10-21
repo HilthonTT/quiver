@@ -201,3 +201,66 @@ fn concurrent_snapshots_with_retention_all_succeed() {
     assert_eq!(failures, 0);
     assert_eq!(db.list_snapshots(Some("docs")).unwrap().len(), 1);
 }
+
+#[test]
+fn forged_snapshots_with_invalid_points_are_not_restored() {
+    use quiver_db::snapshot::write_archive;
+    use quiver_db::storage::VectorStore;
+
+    let dir = tempfile::tempdir().unwrap();
+    let db = Database::open(dir.path()).unwrap();
+    seed(&db, "docs", 5);
+    let config = CollectionConfig::new(3).metric(Metric::Cosine);
+    let deep = (0..100).fold(json!(1), |v, _| json!([v]));
+    let forgeries: [(&str, [f32; 3], Option<serde_json::Value>); 5] = [
+        ("nan", [f32::NAN, 0.0, 1.0], None),
+        ("huge", [f32::MAX, f32::MAX, 0.0], None),
+        ("zero", [0.0, 0.0, 0.0], None),
+        (
+            &"x".repeat(quiver_db::types::MAX_ID_LEN + 1),
+            [1.0, 0.0, 0.0],
+            None,
+        ),
+        ("deep", [1.0, 0.0, 0.0], Some(deep)),
+    ];
+    for (id, vector, metadata) in forgeries {
+        let mut store = VectorStore::new(3);
+        store.push(id.to_owned(), &vector, metadata);
+        let snap_id = uuid_v4();
+        let path = db.snapshots().unwrap().path(&snap_id).unwrap();
+        write_archive(&path, &snap_id, "docs", &config, &store, None, 0).unwrap();
+
+        let err = db
+            .restore_snapshot(
+                &snap_id,
+                RestoreOptions {
+                    name: None,
+                    replace: true,
+                },
+            )
+            .unwrap_err();
+        assert!(matches!(err, Error::Corrupt(_)), "{id}: {err:?}");
+        assert_eq!(
+            db.collection("docs").unwrap().len(),
+            5,
+            "{id}: existing collection was replaced"
+        );
+    }
+}
+
+/// A random (version 4) UUID, without depending on the `uuid` crate.
+fn uuid_v4() -> String {
+    let n = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_nanos();
+    let h = format!("{n:032x}");
+    format!(
+        "{}-{}-4{}-8{}-{}",
+        &h[0..8],
+        &h[8..12],
+        &h[13..16],
+        &h[17..20],
+        &h[20..32]
+    )
+}

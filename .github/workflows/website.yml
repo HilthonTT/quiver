@@ -8,10 +8,10 @@ on:
     paths: ["website/**", ".github/workflows/website.yml"]
   workflow_dispatch:
 
+# The build job runs `npm ci` (third-party install scripts) on pull requests,
+# so only the deploy job gets the tokens that can publish the site.
 permissions:
   contents: read
-  pages: write
-  id-token: write
 
 concurrency:
   group: pages-${{ github.ref }}
@@ -47,6 +47,9 @@ jobs:
     if: github.event_name != 'pull_request'
     needs: build
     runs-on: ubuntu-latest
+    permissions:
+      pages: write
+      id-token: write
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}

@@ -10,8 +10,8 @@ use quiver_storage::{
     Mutation, Op, Recovered, StorageEngine, StorageKind, StorageOptions, VectorStore, open_engine, state,
 };
 use quiver_types::{
-    CollectionConfig, CollectionInfo, Error, Filter, MAX_ID_LEN, MAX_METADATA_DEPTH, MetadataMode, Point,
-    PointSelector, Result, SearchHit, SearchOptions, merge_patch,
+    CollectionConfig, CollectionInfo, Error, Filter, MAX_ID_LEN, MAX_METADATA_DEPTH, MetadataMode, Metric,
+    Point, PointSelector, Result, SearchHit, SearchOptions, merge_patch,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -174,6 +174,7 @@ impl Collection {
         index: Option<&[u8]>,
     ) -> Result<Index> {
         config.validate()?;
+        check_restored_points(config, store)?;
         match index {
             Some(bytes) => Index::from_bytes(bytes, &config.index, config.metric, store),
             None => Ok(Index::build(&config.index, config.metric, store)),
@@ -697,6 +698,43 @@ fn checked_metadata(id: &str, metadata: Option<Value>) -> Result<Option<Value>> 
         )));
     }
     Ok(metadata.filter(|m| !m.is_null()))
+}
+
+/// Holds a snapshot's points to the rules `validate_point` enforces on
+/// upserts. Uploaded archives are untrusted, and their checksum only proves
+/// they arrived intact, not that a Quiver server wrote them.
+fn check_restored_points(config: &CollectionConfig, store: &VectorStore) -> Result<()> {
+    let corrupt =
+        |slot: u32, what: &str| Error::Corrupt(format!("snapshot point `{}` {what}", store.id(slot)));
+    // Tombstones keep their vectors: the index still measures distances to them.
+    for slot in 0..store.slots() as u32 {
+        let v = store.vector(slot);
+        if v.iter().any(|x| !x.is_finite()) {
+            return Err(corrupt(slot, "has a NaN or infinite component"));
+        }
+        let squared_norm: f64 = v.iter().map(|&x| f64::from(x) * f64::from(x)).sum();
+        if squared_norm > f64::from(f32::MAX) / 4.0 {
+            return Err(corrupt(slot, "has too large a magnitude"));
+        }
+        if config.metric == Metric::Cosine && squared_norm == 0.0 {
+            return Err(corrupt(slot, "is a zero vector in a cosine collection"));
+        }
+    }
+    for slot in store.live_slots() {
+        if store.id(slot).is_empty() || store.id(slot).len() > MAX_ID_LEN {
+            return Err(corrupt(
+                slot,
+                &format!("has an id outside 1..={MAX_ID_LEN} bytes"),
+            ));
+        }
+        if store
+            .metadata(slot)
+            .is_some_and(|m| deeper_than(m, MAX_METADATA_DEPTH))
+        {
+            return Err(corrupt(slot, "has metadata nested too deeply"));
+        }
+    }
+    Ok(())
 }
 
 fn point_at(store: &VectorStore, slot: u32) -> Point {

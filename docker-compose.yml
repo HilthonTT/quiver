@@ -2,9 +2,11 @@ services:
   quiver:
     build: .
     image: quiver:latest
+    # Published on the host's loopback only: with no API key set, anyone who can
+    # reach the ports can read and write. Set a key before removing `127.0.0.1:`.
     ports:
-      - "6900:6900" # REST
-      - "6901:6901" # gRPC
+      - "127.0.0.1:6900:6900" # REST
+      - "127.0.0.1:6901:6901" # gRPC
     volumes:
       - quiver-data:/data
     env_file:

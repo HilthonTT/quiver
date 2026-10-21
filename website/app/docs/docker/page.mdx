@@ -16,13 +16,13 @@ docker compose down                        # the quiver-data volume is kept
 The compose file:
 
 - builds `.` and tags it `quiver:latest`;
-- publishes 6900 (REST) and 6901 (gRPC);
+- publishes 6900 (REST) and 6901 (gRPC) on the host's loopback address only;
 - mounts the `quiver-data` volume at `/data`;
 - passes `QUIVER_API_KEY` (empty by default), `QUIVER_STORAGE` (`file`), `QUIVER_SNAPSHOT_INTERVAL` (`3600`, hourly snapshots) and `RUST_LOG` (`info`), each overridable from your shell or a `.env` file next to it;
 - loads that `.env` into the container too, if it exists;
 - restarts the container unless you stopped it.
 
-Set a key before the ports are reachable from other machines:
+To reach the server from other machines, set a key first, then drop the `127.0.0.1:` prefix from the `ports` entries:
 
 ```bash
 QUIVER_API_KEY=$(openssl rand -hex 32) docker compose up -d
