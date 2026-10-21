@@ -1,4 +1,5 @@
 mod config;
+mod health;
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -20,6 +21,17 @@ const SHUTDOWN_GRACE: Duration = Duration::from_secs(10);
 async fn main() {
     // A missing .env file is fine; real environment variables win over it.
     let dotenv = dotenvy::dotenv();
+    let config = Config::parse();
+    if config.healthcheck {
+        match health::check(&config).await {
+            Ok(()) => return,
+            Err(e) => {
+                eprintln!("unhealthy: {e}");
+                std::process::exit(1);
+            }
+        }
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(EnvFilter::try_from_default_env().unwrap_or_else(|_| EnvFilter::new("info")))
         .init();
@@ -27,7 +39,6 @@ async fn main() {
         tracing::info!(path = %path.display(), "loaded environment file");
     }
 
-    let config = Config::parse();
     if let Err(e) = run(config).await {
         tracing::error!("{e}");
         std::process::exit(1);

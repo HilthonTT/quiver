@@ -28,5 +28,6 @@ ENV QUIVER_HOST=0.0.0.0 \
 VOLUME ["/data"]
 # 6900 = REST, 6901 = gRPC
 EXPOSE 6900 6901
-HEALTHCHECK --interval=30s --timeout=3s CMD ["/bin/sh", "-c", "exec 3<>/dev/tcp/127.0.0.1/6900"]
+# Reads the same QUIVER_* variables as the server, so it follows port changes.
+HEALTHCHECK --interval=30s --timeout=5s CMD ["/usr/local/bin/quiver", "--healthcheck"]
 ENTRYPOINT ["/usr/local/bin/quiver"]

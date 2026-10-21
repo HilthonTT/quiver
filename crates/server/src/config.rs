@@ -80,6 +80,11 @@ pub struct Config {
     /// Allow cross-origin REST requests from any origin.
     #[arg(long, env = "QUIVER_CORS", value_parser = BoolishValueParser::new())]
     pub cors: bool,
+
+    /// Check that a server started with the same settings is healthy, then
+    /// exit 0 (healthy) or 1. For container health checks.
+    #[arg(long)]
+    pub healthcheck: bool,
 }
 
 impl Config {
@@ -108,6 +113,17 @@ impl Config {
     /// The gRPC API address.
     pub fn grpc_addr(&self) -> SocketAddr {
         SocketAddr::new(self.host, self.grpc_port)
+    }
+
+    /// Where `--healthcheck` reaches this server: an unspecified bind
+    /// address (`0.0.0.0`, `::`) is reached over loopback.
+    pub fn probe_addr(&self, port: u16) -> SocketAddr {
+        let host = match self.host {
+            IpAddr::V4(ip) if ip.is_unspecified() => IpAddr::V4(std::net::Ipv4Addr::LOCALHOST),
+            IpAddr::V6(ip) if ip.is_unspecified() => IpAddr::V6(std::net::Ipv6Addr::LOCALHOST),
+            ip => ip,
+        };
+        SocketAddr::new(host, port)
     }
 
     /// Database root, or `None` with `--in-memory`.

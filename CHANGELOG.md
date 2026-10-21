@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Search by point id** (`{"id": ...}` instead of a vector; the point itself is left out) and **recommendations** from
   positive and negative example ids (`POST /collections/{name}/recommend`, gRPC `Recommend`). Missing ids give `point_not_found`.
 - **`max_distance`** on searches and recommendations drops hits farther than a threshold.
+- **`quiver --healthcheck`** probes a running server and exits 0 or 1.
 
 ### Changed
 
@@ -27,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Uploaded snapshots are verified by streaming (manifest first, size and SHA-256 checked) instead of being decoded in memory,
   so an upload that decompresses to far more than its size cannot exhaust memory.
 - Stale `*.partial` files in the snapshot directory are removed at startup once they are an hour old.
+
+### Fixed
+
+- The Docker `HEALTHCHECK` always failed: it used bash's `/dev/tcp` under dash. It now runs `quiver --healthcheck`.
 
 ## [0.2.0] - 2026-10-16
 

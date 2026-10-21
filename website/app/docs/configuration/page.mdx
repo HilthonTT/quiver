@@ -79,6 +79,14 @@ The server refuses to start, with a message, when:
 
 It warns, and carries on, when it listens on an address other than loopback without any API key, and when it runs `--in-memory`.
 
+## Health checks
+
+`quiver --healthcheck`, given the same settings as the running server (flags, `QUIVER_*` variables or `.env`), asks that server's `GET /health` and exits `0` if it answers `200`, or prints why not and exits `1`. It connects over loopback when the server binds an unspecified address such as `0.0.0.0`, and checks the gRPC port instead when the REST API is disabled. The [Docker image](/docs/docker/#the-image) uses it.
+
+```bash
+quiver --healthcheck && echo healthy
+```
+
 ## Shutting down
 
 On `SIGINT` (Ctrl+C) or `SIGTERM` the server stops accepting connections, gives requests in flight 10 seconds to finish, stops the snapshot scheduler, and checkpoints every collection before it exits.

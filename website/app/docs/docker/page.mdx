@@ -63,11 +63,7 @@ docker run -d -p 6900:6900 -p 6901:6901 -v quiver-data:/data \
   -v "$PWD/keys.json:/run/keys.json:ro" -e QUIVER_KEYS_FILE=/run/keys.json quiver:latest
 ```
 
-The image declares a `HEALTHCHECK` that tries to open a TCP connection to port 6900 every 30 seconds.
-
-<Callout type="warn">
-The health check runs `exec 3<>/dev/tcp/127.0.0.1/6900` with `/bin/sh`, and `/dev/tcp` is a bash feature that the image's `/bin/sh` (dash) does not have. As shipped, Docker will report the container as unhealthy even while the server is serving; don't gate other services on it until that is fixed.
-</Callout>
+The image declares a `HEALTHCHECK` that runs `quiver --healthcheck` every 30 seconds. It reads the same `QUIVER_*` variables as the server, asks the REST API for `/health` on the configured port (over loopback when the server binds `0.0.0.0`), and exits 0 when the answer is `200`. With `QUIVER_DISABLE_HTTP` set, it checks that the gRPC port accepts connections instead. `/health` needs no API key, so the check works with authentication on.
 
 ## Backups
 
