@@ -38,11 +38,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Uploaded snapshots are verified by streaming (manifest first, size and SHA-256 checked) instead of being decoded in memory,
   so an upload that decompresses to far more than its size cannot exhaust memory.
 - Stale `*.partial` files in the snapshot directory are removed at startup once they are an hour old.
+- `docker-compose.yml` publishes the ports on `127.0.0.1` only; set an API key before exposing them.
 - `CollectionInfo` gains `field_indexes`; `VectorStore::vector` returns a `Cow<[f32]>`; `write_archive` takes the indexed fields.
 
 ### Fixed
 
 - The Docker `HEALTHCHECK` always failed: it used bash's `/dev/tcp` under dash. It now runs `quiver --healthcheck`.
+- Restoring a snapshot now validates its points (finite vectors within the magnitude limit, no zero vectors under cosine,
+  id lengths, metadata depth) before any existing collection is replaced. A forged upload could otherwise load invalid data.
+- The website build job no longer holds Pages and OIDC write permissions while running `npm ci` on pull requests.
 
 ## [0.2.0] - 2026-10-16
 
