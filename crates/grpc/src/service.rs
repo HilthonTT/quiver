@@ -208,7 +208,11 @@ impl pb::quiver_server::Quiver for QuiverService {
         let req = req.into_inner();
         let config = config_from_pb(&req)?;
         let info = self
-            .blocking(move |db| Ok(db.create_collection(&req.name, config)?.info()))
+            .blocking(move |db| {
+                Ok(db
+                    .create_collection_with_fields(&req.name, config, &req.field_indexes)?
+                    .info())
+            })
             .await?;
         Ok(Response::new(info_to_pb(info)))
     }
@@ -247,6 +251,34 @@ impl pb::quiver_server::Quiver for QuiverService {
                 Ok(c.info())
             })
             .await?;
+        Ok(Response::new(info_to_pb(info)))
+    }
+
+    async fn create_field_index(&self, req: Request<pb::FieldIndexRequest>) -> Rpc<pb::CollectionInfo> {
+        require(&req, Role::ReadWrite)?;
+        let req = req.into_inner();
+        let info = self
+            .blocking(move |db| {
+                let c = db.collection(&req.collection)?;
+                c.create_field_index(&req.field)?;
+                Ok(c.info())
+            })
+            .await?;
+        Ok(Response::new(info_to_pb(info)))
+    }
+
+    async fn drop_field_index(&self, req: Request<pb::FieldIndexRequest>) -> Rpc<pb::CollectionInfo> {
+        require(&req, Role::ReadWrite)?;
+        let req = req.into_inner();
+        let (dropped, info) = self
+            .blocking(move |db| {
+                let c = db.collection(&req.collection)?;
+                Ok((c.drop_field_index(&req.field)?, c.info()))
+            })
+            .await?;
+        if !dropped {
+            return Err(Status::not_found("this field has no index"));
+        }
         Ok(Response::new(info_to_pb(info)))
     }
 

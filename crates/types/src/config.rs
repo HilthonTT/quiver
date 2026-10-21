@@ -9,6 +9,10 @@ pub const MAX_DIMENSION: usize = 65_536;
 pub const MAX_ID_LEN: usize = 512;
 /// Maximum collection-name length.
 pub const MAX_NAME_LEN: usize = 64;
+/// Maximum number of metadata fields a collection can index.
+pub const MAX_FIELD_INDEXES: usize = 32;
+/// Maximum length of an indexed field path, in bytes.
+pub const MAX_FIELD_PATH_LEN: usize = 256;
 /// Maximum nesting depth of point metadata. Stored data is wrapped in a few
 /// more levels and must stay under serde_json's read limit of 128.
 pub const MAX_METADATA_DEPTH: usize = 64;
@@ -178,9 +182,36 @@ pub fn validate_name(name: &str) -> Result<()> {
     }
 }
 
+/// Indexed metadata fields: a dot-separated path, as in filters, of
+/// non-empty segments, not starting with `$` (that marks filter operators).
+pub fn validate_field_path(path: &str) -> Result<()> {
+    let ok = !path.is_empty()
+        && path.len() <= MAX_FIELD_PATH_LEN
+        && !path.starts_with('$')
+        && path.split('.').all(|seg| !seg.is_empty());
+    if ok {
+        Ok(())
+    } else {
+        Err(Error::invalid(format!(
+            "invalid field `{path}`: use a dot-separated path of 1-{MAX_FIELD_PATH_LEN} bytes \
+             with no empty segments, not starting with `$`"
+        )))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn field_path_validation() {
+        for good in ["genre", "stats.views", "a-b_c.d1"] {
+            assert!(validate_field_path(good).is_ok(), "{good}");
+        }
+        for bad in ["", "$and", "a..b", ".a", "a.", &"x".repeat(257)] {
+            assert!(validate_field_path(bad).is_err(), "{bad}");
+        }
+    }
 
     #[test]
     fn name_validation() {

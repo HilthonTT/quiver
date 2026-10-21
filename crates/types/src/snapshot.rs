@@ -23,6 +23,9 @@ pub struct Manifest {
     pub data_bytes: u64,
     /// Lowercase hex SHA-256 of `data.bin`.
     pub data_sha256: String,
+    /// The collection's indexed metadata fields (rebuilt on restore).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub field_indexes: Vec<String>,
 }
 
 /// A snapshot in the registry: its manifest plus the archive's size on disk.

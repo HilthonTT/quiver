@@ -228,7 +228,7 @@ fn forged_snapshots_with_invalid_points_are_not_restored() {
         store.push(id.to_owned(), &vector, metadata);
         let snap_id = uuid_v4();
         let path = db.snapshots().unwrap().path(&snap_id).unwrap();
-        write_archive(&path, &snap_id, "docs", &config, &store, None, 0).unwrap();
+        write_archive(&path, &snap_id, "docs", &config, &[], &store, None, 0).unwrap();
 
         let err = db
             .restore_snapshot(

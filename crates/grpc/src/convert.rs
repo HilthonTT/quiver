@@ -100,6 +100,7 @@ pub(crate) fn info_to_pb(info: CollectionInfo) -> pb::CollectionInfo {
         index: Some(index_to_pb(&info.config.index)),
         count: info.count as u64,
         tombstones: info.tombstones as u64,
+        field_indexes: info.field_indexes,
     }
 }
 
@@ -155,6 +156,7 @@ pub(crate) fn snapshot_to_pb(s: SnapshotInfo) -> pb::SnapshotInfo {
         data_bytes: m.data_bytes,
         data_sha256: m.data_sha256,
         archive_bytes: s.archive_bytes,
+        field_indexes: m.field_indexes,
     }
 }
 

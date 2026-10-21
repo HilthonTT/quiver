@@ -109,6 +109,8 @@ pub struct CreateCollection {
     metric: Metric,
     #[serde(default)]
     index: IndexConfig,
+    #[serde(default)]
+    field_indexes: Vec<String>,
 }
 
 pub async fn list_collections(State(db): State<AppState>) -> ApiResult<Json<Value>> {
@@ -125,7 +127,12 @@ pub async fn create_collection(
         metric: req.metric,
         index: req.index,
     };
-    let info = blocking(move || Ok(db.create_collection(&req.name, config)?.info())).await?;
+    let info = blocking(move || {
+        Ok(db
+            .create_collection_with_fields(&req.name, config, &req.field_indexes)?
+            .info())
+    })
+    .await?;
     tracing::info!(collection = %info.name, dimension = info.config.dimension, "created collection");
     Ok((StatusCode::CREATED, Json(info)))
 }
@@ -155,6 +162,35 @@ pub async fn compact_collection(
 ) -> ApiResult<Json<CollectionInfo>> {
     let c = collection(&db, &name)?;
     let info = blocking(move || c.compact().map(|()| c.info())).await?;
+    Ok(Json(info))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FieldIndexRequest {
+    field: String,
+}
+
+/// Indexes a metadata field; indexing one that already has an index is a no-op.
+pub async fn create_field_index(
+    State(db): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<FieldIndexRequest>,
+) -> ApiResult<Json<CollectionInfo>> {
+    let c = collection(&db, &name)?;
+    let info = blocking(move || c.create_field_index(&req.field).map(|()| c.info())).await?;
+    Ok(Json(info))
+}
+
+pub async fn drop_field_index(
+    State(db): State<AppState>,
+    Path((name, field)): Path<(String, String)>,
+) -> ApiResult<Json<CollectionInfo>> {
+    let c = collection(&db, &name)?;
+    let (dropped, info) = blocking(move || c.drop_field_index(&field).map(|d| (d, c.info()))).await?;
+    if !dropped {
+        return Err(ApiError::not_found("this field has no index"));
+    }
     Ok(Json(info))
 }
 

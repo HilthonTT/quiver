@@ -77,9 +77,10 @@ With keys configured, a call with no key may only use `Health`; any other RPC an
 | `Health` | public | `{status, version}` |
 | `Info` | read | `{version, storage, snapshots_enabled, collections, points}` |
 | `ListCollections`, `GetCollection` | read | |
-| `CreateCollection` | write | `metric` unset means cosine; `index` unset means HNSW with defaults |
+| `CreateCollection` | write | `metric` unset means cosine; `index` unset means HNSW with defaults; optional `field_indexes` |
 | `DropCollection`, `Flush` | write | |
 | `Compact` | write | returns the collection's info |
+| `CreateFieldIndex`, `DropFieldIndex` | write | `collection`, `field`; return the collection's info. Dropping a field with no index is `NOT_FOUND` |
 | `Upsert` | write | an empty `id` gets a generated UUID; returns `upserted` and `ids` |
 | `GetPoints` | read | `ids`, `with_vectors`; missing ids are skipped |
 | `DeletePoints` | write | `ids` or `filter_json`; `{}` is refused |

@@ -324,6 +324,18 @@ impl Client {
         }
     }
 
+    /// Indexes a metadata field (a dot-separated path, as in filters) so
+    /// filters on it only look at matching points.
+    pub async fn create_field_index(&self, collection: &str, field: &str) -> Result<CollectionInfo> {
+        let path = format!("collections/{}/indexes", seg(collection));
+        Self::json(self.request(Method::POST, &path).json(&json!({ "field": field }))).await
+    }
+
+    pub async fn drop_field_index(&self, collection: &str, field: &str) -> Result<CollectionInfo> {
+        let path = format!("collections/{}/indexes/{}", seg(collection), seg(field));
+        Self::json(self.request(Method::DELETE, &path)).await
+    }
+
     /// Fetches several points; missing ids are skipped.
     pub async fn get_points(
         &self,

@@ -1061,3 +1061,36 @@ async fn metrics_need_a_key_when_auth_is_on() {
         .await;
     assert_eq!(res.status(), StatusCode::OK);
 }
+
+#[tokio::test]
+async fn field_indexes_over_rest() {
+    let app = TestApp::new();
+    let (status, body) = app
+        .post(
+            "/collections",
+            json!({"name": "docs", "dimension": 2, "field_indexes": ["genre"]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["field_indexes"], json!(["genre"]));
+
+    let (status, body) = app
+        .post("/collections/docs/indexes", json!({"field": "stats.views"}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["field_indexes"], json!(["genre", "stats.views"]));
+    let (status, _) = app
+        .post("/collections/docs/indexes", json!({"field": "$x"}))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, body) = app
+        .call(Method::DELETE, "/collections/docs/indexes/stats.views", None)
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["field_indexes"], json!(["genre"]));
+    let (status, _) = app
+        .call(Method::DELETE, "/collections/docs/indexes/stats.views", None)
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+}

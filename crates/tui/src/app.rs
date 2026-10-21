@@ -873,6 +873,7 @@ pub(crate) mod tests {
             config: CollectionConfig::new(3),
             count,
             tombstones: 0,
+            field_indexes: Vec::new(),
         }
     }
 

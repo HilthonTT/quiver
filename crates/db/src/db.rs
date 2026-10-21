@@ -9,6 +9,7 @@ use quiver_storage::{StorageKind, StorageOptions, state};
 use quiver_types::{CollectionConfig, CollectionInfo, Error, Result, validate_name};
 
 use crate::collection::{Collection, Env, META_FILE};
+use crate::fields::FieldIndexes;
 use crate::metrics::Metrics;
 
 const COLLECTIONS_DIR: &str = "collections";
@@ -175,6 +176,21 @@ impl Database {
         Ok(collection)
     }
 
+    /// Creates a collection with these metadata fields already indexed.
+    pub fn create_collection_with_fields(
+        &self,
+        name: &str,
+        config: CollectionConfig,
+        field_indexes: &[String],
+    ) -> Result<Arc<Collection>> {
+        FieldIndexes::validate(field_indexes)?;
+        let collection = self.create_collection(name, config)?;
+        for field in field_indexes {
+            collection.create_field_index(field)?;
+        }
+        Ok(collection)
+    }
+
     pub fn get_or_create_collection(&self, name: &str, config: CollectionConfig) -> Result<Arc<Collection>> {
         if let Ok(existing) = self.collection(name) {
             if existing.config() != &config {
@@ -282,6 +298,7 @@ impl Database {
         let collection = Arc::new(Collection::restore(
             &name,
             loaded.manifest.config,
+            &loaded.manifest.field_indexes,
             loaded.store,
             index,
             dir.as_deref(),

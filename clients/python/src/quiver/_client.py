@@ -137,9 +137,14 @@ class Client:
         *,
         metric: Metric = "cosine",
         index: Index | None = None,
+        field_indexes: Sequence[str] = (),
     ) -> Collection:
-        """Creates a collection. Raises :class:`ConflictError` if it exists."""
-        self._run(proto.create_collection(name, dimension, metric, index))
+        """Creates a collection. Raises :class:`ConflictError` if it exists.
+
+        ``field_indexes`` names metadata fields (dot-separated paths) to index,
+        so that filters on them only look at matching points.
+        """
+        self._run(proto.create_collection(name, dimension, metric, index, field_indexes))
         return Collection(self, name)
 
     def get_collection(self, name: str) -> Collection:
@@ -154,6 +159,7 @@ class Client:
         *,
         metric: Metric = "cosine",
         index: Index | None = None,
+        field_indexes: Sequence[str] = (),
     ) -> Collection:
         """Returns the collection, creating it first if it does not exist."""
         try:
@@ -161,7 +167,13 @@ class Client:
         except NotFoundError:
             pass
         try:
-            return self.create_collection(name, dimension, metric=metric, index=index)
+            return self.create_collection(
+                name,
+                dimension,
+                metric=metric,
+                index=index,
+                field_indexes=field_indexes,
+            )
         except ConflictError:
             return Collection(self, name)
 
@@ -407,3 +419,15 @@ class Collection:
     def compact(self) -> CollectionInfo:
         """Reclaims space held by deleted points and rebuilds the index."""
         return self._client._run(proto.compact(self.name))
+
+    def create_field_index(self, field: str) -> CollectionInfo:
+        """Indexes a metadata field (a dot-separated path, as in filters).
+
+        Filters on indexed fields only look at matching points. Indexing a
+        field that already has an index does nothing.
+        """
+        return self._client._run(proto.create_field_index(self.name, field))
+
+    def drop_field_index(self, field: str) -> CollectionInfo:
+        """Drops a field index. Raises :class:`NotFoundError` if there is none."""
+        return self._client._run(proto.drop_field_index(self.name, field))

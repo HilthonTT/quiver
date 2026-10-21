@@ -501,3 +501,21 @@ def test_download_errors_are_raised() -> None:
     c = mock_client(handler)
     with pytest.raises(NotFoundError):
         c.download_snapshot("x", "unused.tar.gz")
+
+
+def test_field_indexes(client: Client, mock: Recorder) -> None:
+    mock.on("POST", "/collections", 201, {**INFO, "field_indexes": ["genre"]})
+    col = client.create_collection("docs", 3, field_indexes=["genre"])
+    assert mock.last_json()["field_indexes"] == ["genre"]
+
+    mock.on("POST", "/collections/docs/indexes", 200, {**INFO, "field_indexes": ["genre", "a.b"]})
+    info = col.create_field_index("a.b")
+    assert mock.last_json() == {"field": "a.b"}
+    assert info.field_indexes == ["genre", "a.b"]
+
+    mock.on("DELETE", "/collections/docs/indexes/a.b", 200, {**INFO, "field_indexes": ["genre"]})
+    assert col.drop_field_index("a.b").field_indexes == ["genre"]
+
+    # Old servers that do not report the field read as no indexes.
+    mock.on("GET", "/collections/docs", 200, INFO)
+    assert col.info().field_indexes == []

@@ -168,3 +168,29 @@ print(matching({}))
 ```text
 ['alien', 'amelie', 'arrival', 'heat']
 ```
+
+## Field indexes
+
+Without an index, a filter is checked against every point. That costs little for a search, which stops once it has `k` hits, but `count`, deletes and metadata updates by filter read the whole collection. Very selective filters also hurt HNSW searches: the graph walk may give up before it reaches enough matches, and return fewer than `k`.
+
+Index the fields you filter on most:
+
+```bash
+curl -X POST localhost:6900/collections/films/indexes -H 'content-type: application/json' \
+  -d '{"field": "genre"}'
+curl -X POST localhost:6900/collections -H 'content-type: application/json' \
+  -d '{"name": "docs", "dimension": 384, "field_indexes": ["user_id", "stats.views"]}'
+```
+
+```python
+films.create_field_index("genre")
+client.create_collection("docs", 384, field_indexes=["user_id", "stats.views"])
+```
+
+A field is a dot-separated path, as in filters; arrays are indexed by element. Up to 32 fields per collection. `DELETE /collections/{name}/indexes/{field}` drops one, and `field_indexes` in the collection's info lists them.
+
+An index answers equality, `$in`, `$gt`/`$gte`/`$lt`/`$lte` on numbers and strings, and `{"$exists": true}`. In an `$and` (or an object with several fields), any indexed condition narrows the points looked at; an `$or` needs every branch indexed. `$ne`, `$nin`, `$not` and `{"$exists": false}` are checked point by point, as are conditions on fields without an index.
+
+Indexes never change results: the full filter is still checked on every point an index returns. When the index narrows a search to 20,000 points or fewer, Quiver scores those points directly instead of searching the vector index, so selective filtered searches become exact.
+
+The list of indexed fields is saved with the collection and carried by snapshots. The indexes themselves are rebuilt from the points when the server starts, which takes a little time on large collections.

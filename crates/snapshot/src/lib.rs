@@ -11,7 +11,7 @@ use sha2::{Digest, Sha256};
 
 use quiver_storage::{VectorStore, state};
 pub use quiver_types::snapshot::{Manifest, SnapshotInfo};
-use quiver_types::{CollectionConfig, Error, Result, validate_name};
+use quiver_types::{CollectionConfig, Error, MAX_FIELD_INDEXES, Result, validate_field_path, validate_name};
 
 /// Version of the archive layout. Bumped on incompatible changes.
 pub const FORMAT_VERSION: u32 = 1;
@@ -64,11 +64,13 @@ fn append(builder: &mut tar::Builder<impl Write>, name: &str, bytes: &[u8], mtim
     Ok(())
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn write_archive(
     path: &Path,
     id: &str,
     collection: &str,
     config: &CollectionConfig,
+    field_indexes: &[String],
     store: &VectorStore,
     index: Option<&[u8]>,
     created_at_ms: u64,
@@ -84,6 +86,7 @@ pub fn write_archive(
         points: store.live(),
         data_bytes: data.len() as u64,
         data_sha256: sha256_hex(&data),
+        field_indexes: field_indexes.to_vec(),
     };
 
     let tmp = path.with_extension("partial");
@@ -130,6 +133,14 @@ fn check_manifest(manifest: &Manifest) -> Result<()> {
     // and response headers.
     validate_name(&manifest.collection)
         .map_err(|_| Error::Corrupt("snapshot has an invalid collection name".into()))?;
+
+    if manifest.field_indexes.len() > MAX_FIELD_INDEXES {
+        return Err(Error::Corrupt("snapshot has too many field indexes".into()));
+    }
+    for field in &manifest.field_indexes {
+        validate_field_path(field)
+            .map_err(|_| Error::Corrupt("snapshot has an invalid field index".into()))?;
+    }
 
     manifest.config.validate()
 }
@@ -364,11 +375,32 @@ impl SnapshotRegistry {
         store: &VectorStore,
         index: Option<&[u8]>,
     ) -> Result<SnapshotInfo> {
+        self.create_with_fields(collection, config, &[], store, index)
+    }
+
+    /// Like [`Self::create`], also recording the collection's indexed fields.
+    pub fn create_with_fields(
+        &self,
+        collection: &str,
+        config: &CollectionConfig,
+        field_indexes: &[String],
+        store: &VectorStore,
+        index: Option<&[u8]>,
+    ) -> Result<SnapshotInfo> {
         let id = uuid::Uuid::new_v4().hyphenated().to_string();
         let path = self.path(&id)?;
         let mut last = self.lock();
         let created_at_ms = now_ms().max(*last + 1);
-        let manifest = write_archive(&path, &id, collection, config, store, index, created_at_ms)?;
+        let manifest = write_archive(
+            &path,
+            &id,
+            collection,
+            config,
+            field_indexes,
+            store,
+            index,
+            created_at_ms,
+        )?;
         *last = created_at_ms;
 
         tracing::info!(snapshot = %id, collection, points = store.live(), "created snapshot");

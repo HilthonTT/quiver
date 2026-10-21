@@ -28,13 +28,15 @@ curl localhost:6900/info
 | Method and route | Role | Body | Answers |
 | --- | --- | --- | --- |
 | `GET /collections` | read | | `{"collections": [CollectionInfo]}` |
-| `POST /collections` | write | `{"name", "dimension", "metric"?, "index"?}` | `201` CollectionInfo |
+| `POST /collections` | write | `{"name", "dimension", "metric"?, "index"?, "field_indexes"?}` | `201` CollectionInfo |
 | `GET /collections/{name}` | read | | CollectionInfo |
 | `DELETE /collections/{name}` | write | | `204` |
 | `POST /collections/{name}/flush` | write | | `204`: checkpoint now |
 | `POST /collections/{name}/compact` | write | | CollectionInfo, after reclaiming deleted slots |
+| `POST /collections/{name}/indexes` | write | `{"field"}` | CollectionInfo; indexing an indexed field does nothing |
+| `DELETE /collections/{name}/indexes/{field}` | write | | CollectionInfo, or `404 not_found` if the field has no index |
 
-A **CollectionInfo** is `{"name", "dimension", "metric", "index", "count", "tombstones"}`, where `index` is `{"type": "hnsw", "m", "ef_construction", "ef_search", "seed"}`, `{"type": "flat"}` or `{"type": "kd_tree", "balance_factor"}`. See [collections & points](/docs/collections/) and [indexes & metrics](/docs/indexes/).
+A **CollectionInfo** is `{"name", "dimension", "metric", "index", "count", "tombstones", "field_indexes"}`, where `index` is `{"type": "hnsw", "m", "ef_construction", "ef_search", "seed"}`, `{"type": "flat"}` or `{"type": "kd_tree", "balance_factor"}`. See [collections & points](/docs/collections/), [indexes & metrics](/docs/indexes/) and [field indexes](/docs/filtering/#field-indexes).
 
 ## Points
 
@@ -97,7 +99,7 @@ curl -X POST localhost:6900/collections/places/search -H 'content-type: applicat
 | `POST /snapshots/{id}/restore` | write | `{"collection"?, "replace"?: false}`, or empty | CollectionInfo |
 | `DELETE /snapshots/{id}` | write | | `204` |
 
-A **SnapshotInfo** is `{"format_version", "id", "collection", "created_at_ms", "quiver_version", "config": {"dimension", "metric", "index"}, "points", "data_bytes", "data_sha256", "archive_bytes"}`. See [snapshots & backups](/docs/snapshots/).
+A **SnapshotInfo** is `{"format_version", "id", "collection", "created_at_ms", "quiver_version", "config": {"dimension", "metric", "index"}, "points", "data_bytes", "data_sha256", "archive_bytes", "field_indexes"?}`. See [snapshots & backups](/docs/snapshots/).
 
 ## Errors
 

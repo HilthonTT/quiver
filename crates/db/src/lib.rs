@@ -1,5 +1,6 @@
 mod collection;
 mod db;
+mod fields;
 pub mod metrics;
 mod scheduler;
 

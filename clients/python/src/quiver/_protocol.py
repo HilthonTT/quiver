@@ -101,15 +101,36 @@ def list_collections() -> Call[list[CollectionInfo]]:
 
 
 def create_collection(
-    name: str, dimension: int, metric: Metric, index: Index | None
+    name: str,
+    dimension: int,
+    metric: Metric,
+    index: Index | None,
+    field_indexes: Sequence[str] = (),
 ) -> Call[CollectionInfo]:
-    body = {
+    body: dict[str, Any] = {
         "name": name,
         "dimension": dimension,
         "metric": metric,
         "index": (index or HNSW()).to_dict(),
     }
+    if field_indexes:
+        body["field_indexes"] = list(field_indexes)
     return Call("POST", "/collections", CollectionInfo.from_dict, json=body)
+
+
+def create_field_index(name: str, field: str) -> Call[CollectionInfo]:
+    return Call(
+        "POST",
+        f"/collections/{_seg(name)}/indexes",
+        CollectionInfo.from_dict,
+        json={"field": field},
+    )
+
+
+def drop_field_index(name: str, field: str) -> Call[CollectionInfo]:
+    return Call(
+        "DELETE", f"/collections/{_seg(name)}/indexes/{_seg(field)}", CollectionInfo.from_dict
+    )
 
 
 def get_collection(name: str) -> Call[CollectionInfo]:

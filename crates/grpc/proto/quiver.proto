@@ -21,6 +21,9 @@ service Quiver {
   rpc DropCollection(DropCollectionRequest) returns (DropCollectionResponse);
   rpc Flush(FlushRequest) returns (FlushResponse);
   rpc Compact(CompactRequest) returns (CollectionInfo);
+  // Indexes a metadata field so filters on it scan matching points only.
+  rpc CreateFieldIndex(FieldIndexRequest) returns (CollectionInfo);
+  rpc DropFieldIndex(FieldIndexRequest) returns (CollectionInfo);
 
   // Points
   rpc Upsert(UpsertRequest) returns (UpsertResponse);
@@ -85,6 +88,8 @@ message CollectionInfo {
   IndexConfig index = 4;
   uint64 count = 5;
   uint64 tombstones = 6;
+  // Indexed metadata fields.
+  repeated string field_indexes = 7;
 }
 
 message Point {
@@ -114,6 +119,7 @@ message SnapshotInfo {
   uint64 data_bytes = 9;
   string data_sha256 = 10;
   uint64 archive_bytes = 11;
+  repeated string field_indexes = 12;
 }
 
 message HealthRequest {}
@@ -142,6 +148,14 @@ message CreateCollectionRequest {
   uint32 dimension = 2;
   Metric metric = 3;
   IndexConfig index = 4;
+  // Metadata fields to index from the start.
+  repeated string field_indexes = 5;
+}
+
+// A metadata field, as a dot-separated path like in filters.
+message FieldIndexRequest {
+  string collection = 1;
+  string field = 2;
 }
 
 message GetCollectionRequest {

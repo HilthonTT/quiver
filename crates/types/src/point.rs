@@ -188,6 +188,9 @@ pub struct CollectionInfo {
     pub count: usize,
     /// Number of deleted slots awaiting compaction.
     pub tombstones: usize,
+    /// Metadata fields with an index, in the order they were added.
+    #[serde(default)]
+    pub field_indexes: Vec<String>,
 }
 
 #[cfg(test)]

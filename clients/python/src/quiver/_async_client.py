@@ -113,9 +113,14 @@ class AsyncClient:
         *,
         metric: Metric = "cosine",
         index: Index | None = None,
+        field_indexes: Sequence[str] = (),
     ) -> AsyncCollection:
-        """Creates a collection. Raises :class:`ConflictError` if it exists."""
-        await self._run(proto.create_collection(name, dimension, metric, index))
+        """Creates a collection. Raises :class:`ConflictError` if it exists.
+
+        ``field_indexes`` names metadata fields (dot-separated paths) to index,
+        so that filters on them only look at matching points.
+        """
+        await self._run(proto.create_collection(name, dimension, metric, index, field_indexes))
         return AsyncCollection(self, name)
 
     async def get_collection(self, name: str) -> AsyncCollection:
@@ -130,6 +135,7 @@ class AsyncClient:
         *,
         metric: Metric = "cosine",
         index: Index | None = None,
+        field_indexes: Sequence[str] = (),
     ) -> AsyncCollection:
         """Returns the collection, creating it first if it does not exist."""
         try:
@@ -137,7 +143,13 @@ class AsyncClient:
         except NotFoundError:
             pass
         try:
-            return await self.create_collection(name, dimension, metric=metric, index=index)
+            return await self.create_collection(
+                name,
+                dimension,
+                metric=metric,
+                index=index,
+                field_indexes=field_indexes,
+            )
         except ConflictError:
             return AsyncCollection(self, name)
 
@@ -381,3 +393,15 @@ class AsyncCollection:
     async def compact(self) -> CollectionInfo:
         """Reclaims space held by deleted points and rebuilds the index."""
         return await self._client._run(proto.compact(self.name))
+
+    async def create_field_index(self, field: str) -> CollectionInfo:
+        """Indexes a metadata field (a dot-separated path, as in filters).
+
+        Filters on indexed fields only look at matching points. Indexing a
+        field that already has an index does nothing.
+        """
+        return await self._client._run(proto.create_field_index(self.name, field))
+
+    async def drop_field_index(self, field: str) -> CollectionInfo:
+        """Drops a field index. Raises :class:`NotFoundError` if there is none."""
+        return await self._client._run(proto.drop_field_index(self.name, field))

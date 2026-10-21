@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use parking_lot::RwLock;
-use quiver_index::Index;
+use quiver_index::{Index, Neighbor, TopK};
 use quiver_snapshot::{SnapshotInfo, SnapshotRegistry};
 use quiver_storage::{
     Mutation, Op, Recovered, StorageEngine, StorageKind, StorageOptions, VectorStore, open_engine, state,
@@ -16,6 +16,8 @@ use quiver_types::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::fields::FieldIndexes;
+
 /// Compact once at least this many slots are tombstoned...
 const COMPACT_MIN_TOMBSTONES: usize = 1_024;
 /// ...and they make up at least this fraction of all slots.
@@ -23,6 +25,9 @@ const COMPACT_RATIO: f64 = 0.3;
 
 pub(crate) const META_FILE: &str = "collection.json";
 const ROCKSDB_DIR: &str = "rocksdb";
+/// Filtered searches whose field-index candidates number at most this many
+/// score every candidate exactly instead of searching the vector index.
+const EXACT_SCAN_MAX_CANDIDATES: usize = 20_000;
 
 static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(0);
 
@@ -39,6 +44,9 @@ pub struct ScrollPage {
 pub(crate) struct CollectionMeta {
     pub config: CollectionConfig,
     pub storage: StorageKind,
+    /// Indexed metadata fields. The indexes themselves are rebuilt on open.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub field_indexes: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -53,6 +61,7 @@ pub(crate) struct Env {
 struct Inner {
     store: VectorStore,
     index: Index,
+    fields: FieldIndexes,
     engine: Box<dyn StorageEngine>,
 }
 
@@ -61,6 +70,8 @@ pub struct Collection {
     name: String,
     config: CollectionConfig,
     storage: StorageKind,
+    /// Holds `collection.json`; `None` for collections that are not persisted.
+    meta_dir: Option<PathBuf>,
     env: Env,
     /// Unique per handle in this process, so a dropped collection and its
     /// same-named replacement are never mistaken for one another.
@@ -85,6 +96,7 @@ impl Collection {
         config.validate()?;
         let storage = env.storage;
 
+        let meta_dir = dir.filter(|_| storage.is_durable()).map(Path::to_path_buf);
         let engine = match (storage.is_durable(), dir) {
             (true, Some(dir)) => {
                 // A leftover directory (e.g. from an interrupted drop) must not
@@ -98,6 +110,7 @@ impl Collection {
                     &CollectionMeta {
                         config: config.clone(),
                         storage,
+                        field_indexes: Vec::new(),
                     },
                 )?;
                 open_engine(storage, Some(&engine_dir(dir, storage)), env.storage_options)?
@@ -108,10 +121,12 @@ impl Collection {
         Ok(Self::from_parts(
             name,
             config.clone(),
+            meta_dir,
             env,
             Inner {
                 store: VectorStore::new(config.dimension),
                 index: Index::new(&config.index, config.metric),
+                fields: FieldIndexes::default(),
                 engine,
             },
         ))
@@ -140,7 +155,13 @@ impl Collection {
             None => Index::build(&meta.config.index, meta.config.metric, &store),
         };
 
-        let mut inner = Inner { store, index, engine };
+        FieldIndexes::validate(&meta.field_indexes)?;
+        let mut inner = Inner {
+            store,
+            index,
+            fields: FieldIndexes::default(),
+            engine,
+        };
         let replayed = replay.len();
         for m in replay {
             match m {
@@ -150,11 +171,13 @@ impl Collection {
                 }
             }
         }
+        inner.fields = FieldIndexes::build(&meta.field_indexes, &inner.store);
         tracing::debug!(collection = name, storage = %meta.storage, points = inner.store.live(), replayed, "opened collection");
 
         let collection = Self::from_parts(
             name,
             meta.config,
+            Some(dir.to_path_buf()),
             Env {
                 storage: meta.storage,
                 ..env
@@ -181,30 +204,42 @@ impl Collection {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn restore(
         name: &str,
         config: CollectionConfig,
+        field_indexes: &[String],
         store: VectorStore,
         index: Index,
         dir: Option<&Path>,
         env: Env,
     ) -> Result<Self> {
+        FieldIndexes::validate(field_indexes)?;
         let collection = Self::create(name, config, dir, env)?;
         {
             let mut inner = collection.inner.write();
             inner.engine.import(&store, &index.to_bytes())?;
+            inner.fields = FieldIndexes::build(field_indexes, &store);
             inner.store = store;
             inner.index = index;
+            collection.write_field_indexes(&inner)?;
         }
 
         Ok(collection)
     }
 
-    fn from_parts(name: &str, config: CollectionConfig, env: Env, inner: Inner) -> Self {
+    fn from_parts(
+        name: &str,
+        config: CollectionConfig,
+        meta_dir: Option<PathBuf>,
+        env: Env,
+        inner: Inner,
+    ) -> Self {
         Self {
             name: name.to_owned(),
             config,
             storage: inner.engine.kind(),
+            meta_dir,
             env,
             instance: NEXT_INSTANCE.fetch_add(1, Ordering::Relaxed),
             generation: AtomicU64::new(0),
@@ -250,7 +285,63 @@ impl Collection {
             config: self.config.clone(),
             count: inner.store.live(),
             tombstones: inner.store.tombstones(),
+            field_indexes: inner.fields.names(),
         }
+    }
+
+    /// Indexes a metadata field (a dot-separated path, as in filters) so
+    /// filters on it look at matching points only. Indexing a field that
+    /// already has an index does nothing.
+    pub fn create_field_index(&self, field: &str) -> Result<()> {
+        let mut inner = self.inner.write();
+        self.ensure_open()?;
+        let mut names = inner.fields.names();
+        if names.iter().any(|n| n == field) {
+            return Ok(());
+        }
+        names.push(field.to_owned());
+        FieldIndexes::validate(&names)?;
+        let built = FieldIndexes::build(&names, &inner.store);
+        let previous = std::mem::replace(&mut inner.fields, built);
+        if let Err(e) = self.write_field_indexes(&inner) {
+            inner.fields = previous;
+            return Err(e);
+        }
+        tracing::info!(collection = %self.name, field, "created field index");
+        Ok(())
+    }
+
+    /// Drops a field index; returns whether there was one.
+    pub fn drop_field_index(&self, field: &str) -> Result<bool> {
+        let mut inner = self.inner.write();
+        self.ensure_open()?;
+        let names: Vec<String> = inner.fields.names().into_iter().filter(|n| n != field).collect();
+        if names.len() == inner.fields.names().len() {
+            return Ok(false);
+        }
+        let built = FieldIndexes::build(&names, &inner.store);
+        let previous = std::mem::replace(&mut inner.fields, built);
+        if let Err(e) = self.write_field_indexes(&inner) {
+            inner.fields = previous;
+            return Err(e);
+        }
+        tracing::info!(collection = %self.name, field, "dropped field index");
+        Ok(true)
+    }
+
+    /// Persists the list of indexed fields, for durable collections.
+    fn write_field_indexes(&self, inner: &Inner) -> Result<()> {
+        let Some(dir) = &self.meta_dir else {
+            return Ok(());
+        };
+        write_meta(
+            dir,
+            &CollectionMeta {
+                config: self.config.clone(),
+                storage: self.storage,
+                field_indexes: inner.fields.names(),
+            },
+        )
     }
 
     pub fn insert(&self, vector: Vec<f32>, metadata: Option<Value>) -> Result<String> {
@@ -298,11 +389,8 @@ impl Collection {
     pub fn delete_where(&self, filter: &Filter) -> Result<usize> {
         let mut inner = self.inner.write();
         self.ensure_open()?;
-        let store = &inner.store;
-        let ids: Vec<String> = store
-            .live_slots()
-            .filter(|&slot| filter.matches(store.metadata(slot)))
-            .map(|slot| store.id(slot).to_owned())
+        let ids: Vec<String> = matching(&inner, filter)
+            .map(|slot| inner.store.id(slot).to_owned())
             .collect();
         if ids.is_empty() {
             return Ok(0);
@@ -320,10 +408,7 @@ impl Collection {
         let store = &inner.store;
         match filter {
             None => store.live(),
-            Some(f) => store
-                .live_slots()
-                .filter(|&slot| f.matches(store.metadata(slot)))
-                .count(),
+            Some(f) => matching(&inner, f).count(),
         }
     }
 
@@ -343,10 +428,7 @@ impl Collection {
         let store = &inner.store;
         let mut slots: Vec<u32> = match selector {
             PointSelector::Ids(ids) => ids.iter().filter_map(|id| store.slot_of(id)).collect(),
-            PointSelector::Filter(f) => store
-                .live_slots()
-                .filter(|&slot| f.matches(store.metadata(slot)))
-                .collect(),
+            PointSelector::Filter(f) => matching(&inner, f).collect(),
         };
         slots.sort_unstable();
         slots.dedup();
@@ -382,8 +464,10 @@ impl Collection {
         inner.engine.log(Op::Upsert { points: &updated })?;
         let n = updated.len();
         // In place: the vectors are unchanged, so the index and slots stay valid.
+        let Inner { store, fields, .. } = &mut *inner;
         for (slot, point) in slots.into_iter().zip(updated) {
-            inner.store.set_metadata(slot, point.metadata);
+            store.set_metadata(slot, point.metadata);
+            fields.update(slot, store);
         }
         self.bump();
         self.maintain(&mut inner)?;
@@ -431,7 +515,7 @@ impl Collection {
         let mut query = vector.to_vec();
         self.validate_vector(&mut query)?;
         let inner = self.inner.read();
-        Ok(search_locked(&inner.store, &inner.index, &query, k, opts, &[]))
+        Ok(search_locked(&inner, self.config.metric, &query, k, opts, &[]))
     }
 
     /// Searches with the stored vector of point `id`, leaving that point out
@@ -445,8 +529,8 @@ impl Collection {
         let mut query = inner.store.vector(slot).to_vec();
         self.validate_vector(&mut query)?;
         Ok(search_locked(
-            &inner.store,
-            &inner.index,
+            &inner,
+            self.config.metric,
             &query,
             k,
             opts,
@@ -508,7 +592,14 @@ impl Collection {
         exclude.extend(neg);
         exclude.sort_unstable();
         exclude.dedup();
-        Ok(search_locked(store, &inner.index, &query, k, opts, &exclude))
+        Ok(search_locked(
+            &inner,
+            self.config.metric,
+            &query,
+            k,
+            opts,
+            &exclude,
+        ))
     }
 
     pub fn flush(&self) -> Result<()> {
@@ -532,9 +623,10 @@ impl Collection {
         let info = {
             let inner = self.inner.read();
             self.ensure_open()?;
-            registry.create(
+            registry.create_with_fields(
                 &self.name,
                 &self.config,
+                &inner.fields.names(),
                 &inner.store,
                 Some(&inner.index.to_bytes()),
             )?
@@ -601,6 +693,7 @@ impl Collection {
     }
 
     fn maintain(&self, inner: &mut Inner) -> Result<()> {
+        inner.fields.maintain(&inner.store);
         let tombstones = inner.store.tombstones();
         if tombstones >= COMPACT_MIN_TOMBSTONES
             && tombstones as f64 >= inner.store.slots() as f64 * COMPACT_RATIO
@@ -625,6 +718,7 @@ impl Collection {
         }
         let index = Index::build(&self.config.index, self.config.metric, &store);
         tracing::debug!(collection = %self.name, reclaimed = old.tombstones(), "compacted collection");
+        inner.fields = FieldIndexes::build(&inner.fields.names(), &store);
         inner.store = store;
         inner.index = index;
     }
@@ -641,23 +735,42 @@ impl Collection {
 /// Runs a search over `store`, never returning the (sorted) `exclude` slots.
 /// They are rejected inside the index so they do not use up any of the `k`.
 fn search_locked(
-    store: &VectorStore,
-    index: &Index,
+    inner: &Inner,
+    metric: Metric,
     query: &[f32],
     k: usize,
     opts: &SearchOptions,
     exclude: &[u32],
 ) -> Vec<SearchHit> {
+    let (store, index) = (&inner.store, &inner.index);
+    let candidates = opts.filter.as_ref().and_then(|f| inner.fields.candidates(f));
     let accept = |slot: u32| {
         store.is_alive(slot)
             && exclude.binary_search(&slot).is_err()
+            && candidates.as_ref().is_none_or(|c| c.binary_search(&slot).is_ok())
             && opts
                 .filter
                 .as_ref()
                 .is_none_or(|f| f.matches(store.metadata(slot)))
     };
-    index
-        .search(query, k, opts.ef, store, &accept)
+    let neighbours = match &candidates {
+        // Few enough to score them all: exact, and cheaper than a graph
+        // walk that would mostly visit points the filter rejects.
+        Some(c) if c.len() <= EXACT_SCAN_MAX_CANDIDATES => {
+            let mut top = TopK::new(k.min(c.len()).max(1));
+            for &slot in c {
+                if accept(slot) {
+                    top.push(Neighbor {
+                        slot,
+                        dist: metric.distance(query, store.vector(slot)),
+                    });
+                }
+            }
+            top.into_sorted()
+        }
+        _ => index.search(query, k, opts.ef, store, &accept),
+    };
+    neighbours
         .into_iter()
         .filter(|n| opts.max_distance.is_none_or(|max| n.dist <= max))
         .map(|n| SearchHit {
@@ -673,16 +786,36 @@ fn search_locked(
 }
 
 fn apply_upsert(inner: &mut Inner, points: Vec<Point>) {
-    let Inner { store, index, .. } = inner;
+    let Inner {
+        store, index, fields, ..
+    } = inner;
     let first = store.slots() as u32;
+    let mut replaced = 0;
     for p in points {
+        replaced += usize::from(store.slot_of(&p.id).is_some());
         store.push(p.id, &p.vector, p.metadata);
     }
-    index.add_batch(first..store.slots() as u32, store);
+    let added = first..store.slots() as u32;
+    index.add_batch(added.clone(), store);
+    fields.add(added, store);
+    fields.removed(replaced);
 }
 
 fn apply_delete(inner: &mut Inner, ids: &[String]) -> usize {
-    ids.iter().filter(|id| inner.store.remove(id)).count()
+    let removed = ids.iter().filter(|id| inner.store.remove(id)).count();
+    inner.fields.removed(removed);
+    removed
+}
+
+/// Live slots matching `filter`, in slot order, through a field index when
+/// one applies.
+fn matching<'a>(inner: &'a Inner, filter: &'a Filter) -> Box<dyn Iterator<Item = u32> + 'a> {
+    let store = &inner.store;
+    let matches = move |&slot: &u32| store.is_alive(slot) && filter.matches(store.metadata(slot));
+    match inner.fields.candidates(filter) {
+        Some(candidates) => Box::new(candidates.into_iter().filter(matches)),
+        None => Box::new(store.live_slots().filter(matches)),
+    }
 }
 
 /// Validates a point's metadata and normalises `null` to `None`: the two

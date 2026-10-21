@@ -609,3 +609,45 @@ async fn rpcs_are_recorded_in_metrics() {
         assert!(text.contains(line), "missing `{line}` in:\n{text}");
     }
 }
+
+#[tokio::test]
+async fn field_indexes_over_grpc() {
+    let db = Arc::new(Database::in_memory());
+    let mut client = start(Arc::clone(&db), KeyStore::default()).await;
+    let info = client
+        .create_collection(pb::CreateCollectionRequest {
+            name: "q".into(),
+            dimension: 2,
+            field_indexes: vec!["genre".into()],
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(info.field_indexes, ["genre"]);
+
+    let field = |f: &str| pb::FieldIndexRequest {
+        collection: "q".into(),
+        field: f.into(),
+    };
+    let info = client
+        .create_field_index(field("year"))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(info.field_indexes, ["genre", "year"]);
+    let info = client
+        .drop_field_index(field("genre"))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(info.field_indexes, ["year"]);
+    assert_eq!(
+        client.drop_field_index(field("genre")).await.unwrap_err().code(),
+        Code::NotFound
+    );
+    assert_eq!(
+        client.create_field_index(field("$bad")).await.unwrap_err().code(),
+        Code::InvalidArgument
+    );
+}

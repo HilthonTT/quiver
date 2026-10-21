@@ -158,6 +158,7 @@ class CollectionInfo:
     index: dict[str, Any] = field(default_factory=dict)
     count: int = 0
     tombstones: int = 0
+    field_indexes: list[str] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> CollectionInfo:
@@ -168,6 +169,7 @@ class CollectionInfo:
             index=dict(data.get("index", {})),
             count=data.get("count", 0),
             tombstones=data.get("tombstones", 0),
+            field_indexes=list(data.get("field_indexes", [])),
         )
 
 
@@ -185,6 +187,7 @@ class SnapshotInfo:
     archive_bytes: int = 0
     data_sha256: str = ""
     quiver_version: str = ""
+    field_indexes: list[str] = field(default_factory=list)
 
     @property
     def created_at(self) -> datetime:
@@ -205,6 +208,7 @@ class SnapshotInfo:
             archive_bytes=data.get("archive_bytes", 0),
             data_sha256=data.get("data_sha256", ""),
             quiver_version=data.get("quiver_version", ""),
+            field_indexes=list(data.get("field_indexes", [])),
         )
 
 

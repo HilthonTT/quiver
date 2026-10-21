@@ -97,6 +97,7 @@ no point `nope`
 | `list_collections()`, `get_collection(name)` | `GET /collections`, `GET /collections/{name}` |
 | `create_collection(name, &config)`, `drop_collection(name)` | `POST /collections`, `DELETE /collections/{name}` |
 | `flush(name)`, `compact(name)` | `POST …/flush`, `POST …/compact` |
+| `create_field_index(collection, field)`, `drop_field_index(collection, field)` | `POST …/indexes`, `DELETE …/indexes/{field}` |
 | `upsert(collection, points)` | `POST …/points`; returns an `UpsertResult` with `upserted` and `ids` |
 | `get_point(collection, id)` | `GET …/points/{id}`; `Ok(None)` if the point is missing |
 | `get_points(collection, ids, with_vectors)` | `POST …/points/lookup`; missing ids are skipped |

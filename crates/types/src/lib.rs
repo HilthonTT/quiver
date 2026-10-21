@@ -7,8 +7,8 @@ mod point;
 pub mod snapshot;
 
 pub use config::{
-    CollectionConfig, HnswParams, IndexConfig, KdTreeParams, MAX_DIMENSION, MAX_ID_LEN, MAX_METADATA_DEPTH,
-    MAX_NAME_LEN, validate_name,
+    CollectionConfig, HnswParams, IndexConfig, KdTreeParams, MAX_DIMENSION, MAX_FIELD_INDEXES,
+    MAX_FIELD_PATH_LEN, MAX_ID_LEN, MAX_METADATA_DEPTH, MAX_NAME_LEN, validate_field_path, validate_name,
 };
 pub use distance::Metric;
 pub use error::{Error, Result};

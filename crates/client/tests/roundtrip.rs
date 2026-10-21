@@ -269,6 +269,18 @@ async fn batch_lookup_maintenance_and_snapshot_transfer() {
     assert_eq!(batch[0][0].id, "a");
     assert!(batch[1].iter().all(|h| h.id != "b"));
 
+    let info = ca.create_field_index("docs", "tag").await.unwrap();
+    assert_eq!(info.field_indexes, ["tag"]);
+    assert_eq!(ca.count("docs", Some(&json!({"tag": "a"}))).await.unwrap(), 1);
+    assert!(
+        ca.drop_field_index("docs", "tag")
+            .await
+            .unwrap()
+            .field_indexes
+            .is_empty()
+    );
+    assert!(ca.drop_field_index("docs", "tag").await.is_err());
+
     ca.delete_points("docs", &["c".to_owned()]).await.unwrap();
     ca.flush("docs").await.unwrap();
     assert_eq!(ca.compact("docs").await.unwrap().count, 2);

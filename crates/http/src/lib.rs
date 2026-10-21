@@ -59,6 +59,11 @@ pub fn router(db: Arc<Database>, options: HttpOptions) -> Router {
         .route("/collections/{name}", axum::routing::delete(drop_collection))
         .route("/collections/{name}/flush", post(flush_collection))
         .route("/collections/{name}/compact", post(compact_collection))
+        .route("/collections/{name}/indexes", post(create_field_index))
+        .route(
+            "/collections/{name}/indexes/{field}",
+            axum::routing::delete(drop_field_index),
+        )
         .route("/collections/{name}/points", post(upsert_points))
         .route("/collections/{name}/points/delete", post(delete_points))
         .route("/collections/{name}/points/metadata", post(update_metadata))
