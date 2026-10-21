@@ -519,3 +519,16 @@ def test_field_indexes(client: Client, mock: Recorder) -> None:
     # Old servers that do not report the field read as no indexes.
     mock.on("GET", "/collections/docs", 200, INFO)
     assert col.info().field_indexes == []
+
+
+def test_quantization(client: Client, mock: Recorder) -> None:
+    mock.on("POST", "/collections", 201, {**INFO, "quantization": "scalar"})
+    client.create_collection("docs", 3, quantization="scalar")
+    assert mock.last_json()["quantization"] == "scalar"
+    client.create_collection("docs", 3)
+    assert "quantization" not in mock.last_json()
+
+    mock.on("GET", "/collections/docs", 200, {**INFO, "quantization": "scalar"})
+    assert client.collection("docs").info().quantization == "scalar"
+    mock.on("GET", "/collections/docs", 200, INFO)
+    assert client.collection("docs").info().quantization == "none"

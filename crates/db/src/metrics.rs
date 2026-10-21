@@ -93,7 +93,14 @@ impl Metrics {
             (
                 "quiver_collection_vector_bytes",
                 "Memory held by stored vectors, tombstones included.",
-                |c| ((c.count + c.tombstones) * c.config.dimension * 4) as u64,
+                |c| {
+                    let slots = c.count + c.tombstones;
+                    match c.config.quantization {
+                        // A code byte per component plus a [min, step] pair.
+                        quiver_types::Quantization::Scalar => (slots * (c.config.dimension + 8)) as u64,
+                        quiver_types::Quantization::None => (slots * c.config.dimension * 4) as u64,
+                    }
+                },
             ),
         ];
         for (name, help, field) in per_collection {

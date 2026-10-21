@@ -15,7 +15,7 @@ Documentation: **[hilthontt.github.io/quiver](https://hilthontt.github.io/quiver
 - **Indexes:** HNSW, exact flat search and a k-d tree, with cosine, Euclidean, dot, Manhattan and Hamming metrics.
 - **Filtered search:** MongoDB-style metadata filters (`$gte`, `$in`, `$or`, …) applied during the index traversal, with optional field indexes that make selective filters fast and exact.
 - **Data operations:** update metadata in place (merge or replace), count and delete by filter, search by an existing point, recommend from positive and negative examples, and distance thresholds.
-- **Storage:** a checksummed WAL with checkpoints by default, RocksDB behind a feature flag, or in-memory.
+- **Storage:** a checksummed WAL with checkpoints by default, RocksDB behind a feature flag, or in-memory; optional 8-bit scalar quantization stores vectors in about a quarter of the memory.
 - **Snapshots:** SHA-256-verified `.tar.gz` backups with retention and periodic scheduling.
 - **Access:** REST and gRPC with read-only and read-write API keys, plus a Python client, a Rust client, a terminal UI, or the `quiver-db` crate embedded in-process.
 - **Operations:** Prometheus metrics at `/metrics`, and `quiver --healthcheck` for container health checks.

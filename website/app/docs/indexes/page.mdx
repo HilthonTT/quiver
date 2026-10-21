@@ -95,6 +95,25 @@ Inserts can unbalance the tree. Once its depth exceeds `balance_factor × log2(n
 The k-d tree does not support `dot_product`: inner products give no distance bound to prune the tree with, so creating that combination fails with `invalid_argument`.
 </Callout>
 
+## Scalar quantization
+
+By default each vector component is a 32-bit float. With `"quantization": "scalar"`, set when the collection is created, each component is stored in one byte instead, plus 8 bytes per vector. That is about a quarter of the memory: 768 dimensions take 776 bytes instead of 3,072.
+
+```bash
+curl -X POST localhost:6900/collections -H 'content-type: application/json' \
+  -d '{"name": "docs", "dimension": 768, "quantization": "scalar"}'
+```
+
+```python
+client.create_collection("docs", 768, quantization="scalar")
+```
+
+Each vector is mapped onto 256 evenly spaced values between its own smallest and largest component. This needs no training, so points can be added at any time. It is lossy: searches use the decoded values, and points read back carry them too, each component within `(max - min) / 510` of what was written. Expect recall to drop slightly (in our tests on random 64-dimensional data, recall@10 stayed above 0.9 against unquantized exact search).
+
+Quantization works with the HNSW and flat indexes and every metric except `hamming`, which compares exact values. It cannot be changed after creation: to switch, restore a snapshot into a new collection created with the setting you want, or re-insert the points.
+
+Only memory shrinks. The write-ahead log, checkpoints and snapshots hold 32-bit floats (the decoded values once a point is stored), so disk use and the file formats stay the same, and opening a collection briefly needs the full-size vectors before quantizing them.
+
 ## Persistence
 
 The file engine saves the index with each checkpoint, so a restart loads the HNSW graph instead of rebuilding it. The RocksDB engine stores only the points and rebuilds the index when it opens a collection. Snapshots carry the index too. See [storage & durability](/docs/storage/).

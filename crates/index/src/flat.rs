@@ -25,7 +25,7 @@ impl FlatIndex {
             let mut top = TopK::new(k);
             for slot in range.map(|s| s as u32) {
                 if accept(slot) {
-                    let dist = self.metric.distance(query, store.vector(slot));
+                    let dist = store.distance(self.metric, query, slot);
                     top.push(Neighbor { slot, dist });
                 }
             }

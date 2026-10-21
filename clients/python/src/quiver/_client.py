@@ -21,6 +21,7 @@ from ._models import (
     Metric,
     Point,
     PointLike,
+    Quantization,
     ScrollPage,
     SearchResult,
     SnapshotInfo,
@@ -138,13 +139,18 @@ class Client:
         metric: Metric = "cosine",
         index: Index | None = None,
         field_indexes: Sequence[str] = (),
+        quantization: Quantization = "none",
     ) -> Collection:
         """Creates a collection. Raises :class:`ConflictError` if it exists.
 
         ``field_indexes`` names metadata fields (dot-separated paths) to index,
-        so that filters on them only look at matching points.
+        so that filters on them only look at matching points. ``quantization="scalar"``
+        stores vectors in about a quarter of the memory; vectors read back are
+        then close to, but not exactly, what was written.
         """
-        self._run(proto.create_collection(name, dimension, metric, index, field_indexes))
+        self._run(
+            proto.create_collection(name, dimension, metric, index, field_indexes, quantization)
+        )
         return Collection(self, name)
 
     def get_collection(self, name: str) -> Collection:
@@ -160,6 +166,7 @@ class Client:
         metric: Metric = "cosine",
         index: Index | None = None,
         field_indexes: Sequence[str] = (),
+        quantization: Quantization = "none",
     ) -> Collection:
         """Returns the collection, creating it first if it does not exist."""
         try:
@@ -173,6 +180,7 @@ class Client:
                 metric=metric,
                 index=index,
                 field_indexes=field_indexes,
+                quantization=quantization,
             )
         except ConflictError:
             return Collection(self, name)

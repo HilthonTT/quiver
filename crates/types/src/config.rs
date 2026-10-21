@@ -24,6 +24,8 @@ pub struct CollectionConfig {
     pub metric: Metric,
     #[serde(default)]
     pub index: IndexConfig,
+    #[serde(default, skip_serializing_if = "Quantization::is_none")]
+    pub quantization: Quantization,
 }
 
 impl CollectionConfig {
@@ -32,7 +34,14 @@ impl CollectionConfig {
             dimension,
             metric: Metric::default(),
             index: IndexConfig::default(),
+            quantization: Quantization::None,
         }
+    }
+
+    #[must_use]
+    pub fn quantization(mut self, quantization: Quantization) -> Self {
+        self.quantization = quantization;
+        self
     }
 
     #[must_use]
@@ -68,7 +77,40 @@ impl CollectionConfig {
             }
         }
 
+        if self.quantization == Quantization::Scalar {
+            if self.metric == Metric::Hamming {
+                return Err(Error::invalid(
+                    "scalar quantization does not support hamming: \
+                     it compares exact values, which quantization rounds",
+                ));
+            }
+            if matches!(self.index, IndexConfig::KdTree(_)) {
+                return Err(Error::invalid("scalar quantization needs an hnsw or flat index"));
+            }
+        }
+
         Ok(())
+    }
+}
+
+/// How vectors are held in memory.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Quantization {
+    /// Full 32-bit floats.
+    #[default]
+    None,
+    /// One byte per component plus 8 bytes per vector (its range), about a
+    /// quarter of the memory. Lossy: searches and returned vectors use the
+    /// decoded values, which differ from the originals by at most
+    /// `(max - min) / 510` per component, where `min`/`max` are taken over
+    /// that vector's components.
+    Scalar,
+}
+
+impl Quantization {
+    pub fn is_none(&self) -> bool {
+        *self == Quantization::None
     }
 }
 
@@ -237,6 +279,25 @@ mod tests {
         assert_eq!(c, IndexConfig::Flat);
         let c: IndexConfig = serde_json::from_str(r#"{"type":"kd_tree"}"#).unwrap();
         assert_eq!(c, IndexConfig::KdTree(KdTreeParams::default()));
+    }
+
+    #[test]
+    fn quantization_serde_and_validation() {
+        let c: CollectionConfig = serde_json::from_str(r#"{"dimension":3}"#).unwrap();
+        assert_eq!(c.quantization, Quantization::None);
+        assert!(!serde_json::to_string(&c).unwrap().contains("quantization"));
+        let c: CollectionConfig = serde_json::from_str(r#"{"dimension":3,"quantization":"scalar"}"#).unwrap();
+        assert_eq!(c.quantization, Quantization::Scalar);
+        assert!(c.validate().is_ok());
+        assert!(c.clone().metric(Metric::Hamming).validate().is_err());
+        assert!(
+            c.clone()
+                .metric(Metric::Euclidean)
+                .index(IndexConfig::KdTree(KdTreeParams::default()))
+                .validate()
+                .is_err()
+        );
+        assert!(c.index(IndexConfig::Flat).validate().is_ok());
     }
 
     #[test]

@@ -11,7 +11,7 @@ use tokio::io::AsyncWriteExt;
 
 use quiver_db::{
     Collection, CollectionConfig, CollectionInfo, Database, Filter, IndexConfig, MetadataMode, Metric, Point,
-    PointInput, PointSelector, RestoreOptions, SearchHit, SearchOptions, SnapshotInfo,
+    PointInput, PointSelector, Quantization, RestoreOptions, SearchHit, SearchOptions, SnapshotInfo,
 };
 
 use crate::error::ApiError;
@@ -111,6 +111,8 @@ pub struct CreateCollection {
     index: IndexConfig,
     #[serde(default)]
     field_indexes: Vec<String>,
+    #[serde(default)]
+    quantization: Quantization,
 }
 
 pub async fn list_collections(State(db): State<AppState>) -> ApiResult<Json<Value>> {
@@ -126,6 +128,7 @@ pub async fn create_collection(
         dimension: req.dimension,
         metric: req.metric,
         index: req.index,
+        quantization: req.quantization,
     };
     let info = blocking(move || {
         Ok(db

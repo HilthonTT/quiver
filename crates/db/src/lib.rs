@@ -16,6 +16,6 @@ pub use quiver_storage::StorageKind;
 pub use quiver_types as types;
 pub use quiver_types::{
     CollectionConfig, CollectionInfo, Error, Filter, HnswParams, IndexConfig, KdTreeParams, MAX_DIMENSION,
-    MAX_ID_LEN, MAX_NAME_LEN, MetadataMode, Metric, Point, PointInput, PointSelector, Result, SearchHit,
-    SearchOptions, auth, distance, filter, merge_patch, new_id, validate_name,
+    MAX_ID_LEN, MAX_NAME_LEN, MetadataMode, Metric, Point, PointInput, PointSelector, Quantization, Result,
+    SearchHit, SearchOptions, auth, distance, filter, merge_patch, new_id, validate_name,
 };

@@ -25,7 +25,7 @@ quiver_request_duration_seconds_bucket{api="http",route="/collections/{name}/sea
 | `quiver_collection_points` | gauge | `collection` | live points |
 | `quiver_collection_tombstones` | gauge | `collection` | deleted slots awaiting [compaction](/docs/collections/#deleting-and-compaction) |
 | `quiver_collection_dimension` | gauge | `collection` | vector dimension |
-| `quiver_collection_vector_bytes` | gauge | `collection` | memory held by vectors, tombstones included |
+| `quiver_collection_vector_bytes` | gauge | `collection` | memory held by vectors, tombstones and [quantization](/docs/indexes/#scalar-quantization) included |
 | `quiver_requests_total` | counter | `api`, `route`, `status` | requests served |
 | `quiver_request_duration_seconds` | histogram | `api`, `route`, `status` | time to produce a response; buckets from 1 ms to 10 s |
 

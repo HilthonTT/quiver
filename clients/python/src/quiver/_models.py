@@ -19,6 +19,7 @@ Metric = Literal["cosine", "euclidean", "dot_product", "manhattan", "hamming"]
 
 
 MetadataMode = Literal["merge", "replace"]
+Quantization = Literal["none", "scalar"]
 """How :meth:`Collection.update_metadata` applies new metadata:
 
 * ``merge`` → RFC 7386 JSON Merge Patch: nested objects merge, ``None`` removes a key
@@ -159,6 +160,7 @@ class CollectionInfo:
     count: int = 0
     tombstones: int = 0
     field_indexes: list[str] = field(default_factory=list)
+    quantization: str = "none"
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> CollectionInfo:
@@ -170,6 +172,7 @@ class CollectionInfo:
             count=data.get("count", 0),
             tombstones=data.get("tombstones", 0),
             field_indexes=list(data.get("field_indexes", [])),
+            quantization=data.get("quantization", "none"),
         )
 
 
@@ -187,6 +190,7 @@ class SnapshotInfo:
     archive_bytes: int = 0
     data_sha256: str = ""
     quiver_version: str = ""
+    quantization: str = "none"
     field_indexes: list[str] = field(default_factory=list)
 
     @property
@@ -208,6 +212,7 @@ class SnapshotInfo:
             archive_bytes=data.get("archive_bytes", 0),
             data_sha256=data.get("data_sha256", ""),
             quiver_version=data.get("quiver_version", ""),
+            quantization=config.get("quantization", "none"),
             field_indexes=list(data.get("field_indexes", [])),
         )
 

@@ -611,19 +611,21 @@ async fn rpcs_are_recorded_in_metrics() {
 }
 
 #[tokio::test]
-async fn field_indexes_over_grpc() {
+async fn quantization_and_field_indexes_over_grpc() {
     let db = Arc::new(Database::in_memory());
     let mut client = start(Arc::clone(&db), KeyStore::default()).await;
     let info = client
         .create_collection(pb::CreateCollectionRequest {
             name: "q".into(),
             dimension: 2,
+            quantization: pb::Quantization::Scalar.into(),
             field_indexes: vec!["genre".into()],
             ..Default::default()
         })
         .await
         .unwrap()
         .into_inner();
+    assert_eq!(info.quantization, i32::from(pb::Quantization::Scalar));
     assert_eq!(info.field_indexes, ["genre"]);
 
     let field = |f: &str| pb::FieldIndexRequest {
@@ -649,5 +651,9 @@ async fn field_indexes_over_grpc() {
     assert_eq!(
         client.create_field_index(field("$bad")).await.unwrap_err().code(),
         Code::InvalidArgument
+    );
+    assert_eq!(
+        db.collection("q").unwrap().config().quantization,
+        quiver_db::Quantization::Scalar
     );
 }

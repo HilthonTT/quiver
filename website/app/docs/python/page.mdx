@@ -55,7 +55,7 @@ Collection('movies') CollectionInfo(name='movies', dimension=4, metric='cosine',
 
 | Client method | Does |
 | --- | --- |
-| `create_collection(name, dimension, metric=, index=, field_indexes=())` | creates it; `ConflictError` if it exists. See [field indexes](/docs/filtering/#field-indexes) |
+| `create_collection(name, dimension, metric=, index=, field_indexes=(), quantization="none")` | creates it; `ConflictError` if it exists. See [field indexes](/docs/filtering/#field-indexes) and [quantization](/docs/indexes/#scalar-quantization) |
 | `get_collection(name)` | a handle to an existing collection; `NotFoundError` otherwise |
 | `get_or_create_collection(name, dimension, ...)` | either of the above |
 | `collection(name)` | a handle, without asking the server |

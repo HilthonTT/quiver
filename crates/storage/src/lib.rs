@@ -198,7 +198,7 @@ mod tests {
         assert_eq!(store.live(), 4);
         assert!(store.slot_of("p1").is_none());
         let p3 = store.slot_of("p3").unwrap();
-        assert_eq!(store.vector(p3), &[3.0, 1.0]);
+        assert_eq!(*store.vector(p3), [3.0, 1.0]);
         assert_eq!(store.metadata(p3), Some(&json!({"i": 3})));
 
         // Import replaces everything.

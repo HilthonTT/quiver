@@ -22,6 +22,7 @@ from ._models import (
     Metric,
     Point,
     PointLike,
+    Quantization,
     ScrollPage,
     SearchResult,
     SnapshotInfo,
@@ -114,13 +115,18 @@ class AsyncClient:
         metric: Metric = "cosine",
         index: Index | None = None,
         field_indexes: Sequence[str] = (),
+        quantization: Quantization = "none",
     ) -> AsyncCollection:
         """Creates a collection. Raises :class:`ConflictError` if it exists.
 
         ``field_indexes`` names metadata fields (dot-separated paths) to index,
-        so that filters on them only look at matching points.
+        so that filters on them only look at matching points. ``quantization="scalar"``
+        stores vectors in about a quarter of the memory; vectors read back are
+        then close to, but not exactly, what was written.
         """
-        await self._run(proto.create_collection(name, dimension, metric, index, field_indexes))
+        await self._run(
+            proto.create_collection(name, dimension, metric, index, field_indexes, quantization)
+        )
         return AsyncCollection(self, name)
 
     async def get_collection(self, name: str) -> AsyncCollection:
@@ -136,6 +142,7 @@ class AsyncClient:
         metric: Metric = "cosine",
         index: Index | None = None,
         field_indexes: Sequence[str] = (),
+        quantization: Quantization = "none",
     ) -> AsyncCollection:
         """Returns the collection, creating it first if it does not exist."""
         try:
@@ -149,6 +156,7 @@ class AsyncClient:
                 metric=metric,
                 index=index,
                 field_indexes=field_indexes,
+                quantization=quantization,
             )
         except ConflictError:
             return AsyncCollection(self, name)

@@ -44,7 +44,7 @@ pub fn encode<W: Write>(w: W, store: &VectorStore, index: Option<&[u8]>) -> Resu
     for slot in 0..store.slots() as u32 {
         w.put_u8(store.is_alive(slot) as u8)?;
         w.put_bytes(store.id(slot).as_bytes())?;
-        w.put_f32s(store.vector(slot))?;
+        w.put_f32s(&store.vector(slot))?;
         match store.metadata(slot) {
             Some(meta) => w.put_bytes(&serde_json::to_vec(meta)?)?,
             None => w.put_u32(0)?,
@@ -172,7 +172,7 @@ mod tests {
             let bytes = encode(Vec::new(), &sample(), index).unwrap();
             let (store, blob) = decode(&bytes, 2).unwrap();
             assert_eq!((store.slots(), store.live()), (2, 1));
-            assert_eq!(store.vector(1), &[3.0, 4.0]);
+            assert_eq!(*store.vector(1), [3.0, 4.0]);
             assert_eq!(blob.as_deref(), index);
         }
     }

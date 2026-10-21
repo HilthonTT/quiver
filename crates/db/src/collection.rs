@@ -11,7 +11,7 @@ use quiver_storage::{
 };
 use quiver_types::{
     CollectionConfig, CollectionInfo, Error, Filter, MAX_ID_LEN, MAX_METADATA_DEPTH, MetadataMode, Metric,
-    Point, PointSelector, Result, SearchHit, SearchOptions, merge_patch,
+    Point, PointSelector, Quantization, Result, SearchHit, SearchOptions, merge_patch,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -124,7 +124,7 @@ impl Collection {
             meta_dir,
             env,
             Inner {
-                store: VectorStore::new(config.dimension),
+                store: empty_store(&config),
                 index: Index::new(&config.index, config.metric),
                 fields: FieldIndexes::default(),
                 engine,
@@ -149,7 +149,15 @@ impl Collection {
             env.storage_options,
         )?;
 
-        let Recovered { store, index, replay } = engine.recover(meta.config.dimension)?;
+        let Recovered {
+            mut store,
+            index,
+            replay,
+        } = engine.recover(meta.config.dimension)?;
+        // Storage holds full floats; quantize before replaying onto them.
+        if meta.config.quantization == Quantization::Scalar {
+            store.quantize();
+        }
         let index = match index {
             Some(bytes) => Index::from_bytes(&bytes, &meta.config.index, meta.config.metric, &store)?,
             None => Index::build(&meta.config.index, meta.config.metric, &store),
@@ -215,6 +223,10 @@ impl Collection {
         env: Env,
     ) -> Result<Self> {
         FieldIndexes::validate(field_indexes)?;
+        let mut store = store;
+        if config.quantization == Quantization::Scalar {
+            store.quantize();
+        }
         let collection = Self::create(name, config, dir, env)?;
         {
             let mut inner = collection.inner.write();
@@ -568,7 +580,7 @@ impl Collection {
         let mean = |slots: &[u32]| {
             let mut sum = vec![0.0f64; self.config.dimension];
             for &slot in slots {
-                for (s, &x) in sum.iter_mut().zip(store.vector(slot)) {
+                for (s, &x) in sum.iter_mut().zip(store.vector(slot).iter()) {
                     *s += f64::from(x);
                 }
             }
@@ -708,11 +720,11 @@ impl Collection {
 
     fn compact_locked(&self, inner: &mut Inner) {
         let old = &inner.store;
-        let mut store = VectorStore::new(self.config.dimension);
+        let mut store = old.empty_like();
         for slot in old.live_slots() {
             store.push(
                 old.id(slot).to_owned(),
-                old.vector(slot),
+                &old.vector(slot),
                 old.metadata(slot).cloned(),
             );
         }
@@ -762,7 +774,7 @@ fn search_locked(
                 if accept(slot) {
                     top.push(Neighbor {
                         slot,
-                        dist: metric.distance(query, store.vector(slot)),
+                        dist: store.distance(metric, query, slot),
                     });
                 }
             }
@@ -868,6 +880,15 @@ fn check_restored_points(config: &CollectionConfig, store: &VectorStore) -> Resu
         }
     }
     Ok(())
+}
+
+/// An empty store for a collection configured as `config`.
+fn empty_store(config: &CollectionConfig) -> VectorStore {
+    let mut store = VectorStore::new(config.dimension);
+    if config.quantization == Quantization::Scalar {
+        store.quantize();
+    }
+    store
 }
 
 fn point_at(store: &VectorStore, slot: u32) -> Point {

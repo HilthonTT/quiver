@@ -1094,3 +1094,44 @@ async fn field_indexes_over_rest() {
         .await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 }
+
+#[tokio::test]
+async fn quantized_collections_over_rest() {
+    let app = TestApp::new();
+    let (status, body) = app
+        .post(
+            "/collections",
+            json!({"name": "q", "dimension": 2, "metric": "euclidean", "quantization": "scalar"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["quantization"], "scalar");
+    let (status, _) = app
+        .post(
+            "/collections/q/points",
+            json!({"points": [{"id": "a", "vector": [0.25, -1.0]}]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    let (_, point) = app.get("/collections/q/points/a").await;
+    let v = point["vector"].as_array().unwrap();
+    assert!(
+        (v[0].as_f64().unwrap() - 0.25).abs() < 0.01 && v[1] == -1.0,
+        "{point}"
+    );
+
+    // Unquantized collections do not mention it.
+    let (_, body) = app
+        .post("/collections", json!({"name": "plain", "dimension": 2}))
+        .await;
+    assert!(body.get("quantization").is_none(), "{body}");
+
+    for bad in [
+        json!({"name": "h", "dimension": 2, "metric": "hamming", "quantization": "scalar"}),
+        json!({"name": "k", "dimension": 2, "metric": "euclidean", "index": {"type": "kd_tree"}, "quantization": "scalar"}),
+        json!({"name": "x", "dimension": 2, "quantization": "binary"}),
+    ] {
+        let (status, body) = app.post("/collections", bad).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    }
+}

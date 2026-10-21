@@ -167,7 +167,7 @@ impl KdTreeIndex {
             if accept(cur) {
                 top.push(Neighbor {
                     slot: cur,
-                    dist: self.metric.distance(query, v),
+                    dist: self.metric.distance(query, &v),
                 });
             }
             let node = self.nodes[cur as usize];
@@ -327,7 +327,7 @@ mod tests {
             let tree = build(&store, metric);
             let flat = FlatIndex::new(metric);
             for q in 0..50 {
-                let query = store.vector(q * 7);
+                let query = &store.vector(q * 7);
                 let expected = flat.search(query, 10, &store, &|_| true);
                 let got = tree.search(query, 10, &store, &|_| true);
                 assert_eq!(distances(&got), distances(&expected), "{metric:?} query {q}");
@@ -341,7 +341,7 @@ mod tests {
         let tree = build(&store, Metric::Euclidean);
         let flat = FlatIndex::new(Metric::Euclidean);
         let accept = |s: u32| s % 7 == 3;
-        let q = store.vector(0);
+        let q = &store.vector(0);
         assert_eq!(
             tree.search(q, 8, &store, &accept),
             flat.search(q, 8, &store, &accept)
@@ -406,7 +406,7 @@ mod tests {
         let tree = build(&store, Metric::Cosine);
         let flat = FlatIndex::new(Metric::Cosine);
         for q in 0..300u32 {
-            let query = store.vector(q);
+            let query = &store.vector(q);
             assert_eq!(
                 tree.search(query, 3, &store, &|_| true),
                 flat.search(query, 3, &store, &|_| true),

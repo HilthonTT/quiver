@@ -50,6 +50,12 @@ service Quiver {
   rpc UploadSnapshot(stream SnapshotChunk) returns (SnapshotInfo);
 }
 
+enum Quantization {
+  QUANTIZATION_NONE = 0;
+  // 8-bit scalar quantization: about a quarter of the memory, lossy.
+  QUANTIZATION_SCALAR = 1;
+}
+
 enum Metric {
   METRIC_UNSPECIFIED = 0; // defaults to cosine
   METRIC_COSINE = 1;
@@ -90,6 +96,7 @@ message CollectionInfo {
   uint64 tombstones = 6;
   // Indexed metadata fields.
   repeated string field_indexes = 7;
+  Quantization quantization = 8;
 }
 
 message Point {
@@ -120,6 +127,7 @@ message SnapshotInfo {
   string data_sha256 = 10;
   uint64 archive_bytes = 11;
   repeated string field_indexes = 12;
+  Quantization quantization = 13;
 }
 
 message HealthRequest {}
@@ -150,6 +158,7 @@ message CreateCollectionRequest {
   IndexConfig index = 4;
   // Metadata fields to index from the start.
   repeated string field_indexes = 5;
+  Quantization quantization = 6;
 }
 
 // A metadata field, as a dot-separated path like in filters.

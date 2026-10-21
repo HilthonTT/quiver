@@ -85,8 +85,8 @@ A collection created with the RocksDB engine cannot be opened by a build without
 
 Whatever the engine, every collection lives in memory:
 
-- each vector takes `4 × dimension` bytes (32-bit floats), plus its id and its metadata;
+- each vector takes `4 × dimension` bytes (32-bit floats), or `dimension + 8` with [scalar quantization](/docs/indexes/#scalar-quantization), plus its id and its metadata;
 - the HNSW index adds each node's neighbour lists: up to `2 × m` links on the bottom layer and `m` on each layer above, at 4 bytes per link; the flat index adds nothing;
 - deleted points keep their slot until [compaction](/docs/collections/#deleting-and-compaction).
 
-A million 768-dimensional vectors are about 3 GB of floats before ids, metadata and the index. [`/metrics`](/docs/monitoring/) reports each collection's vector memory as `quiver_collection_vector_bytes`. Size the machine for the collections you keep open: they are all loaded at startup.
+A million 768-dimensional vectors are about 3 GB of floats (0.8 GB quantized) before ids, metadata and the index. [`/metrics`](/docs/monitoring/) reports each collection's vector memory as `quiver_collection_vector_bytes`. Size the machine for the collections you keep open: they are all loaded at startup.

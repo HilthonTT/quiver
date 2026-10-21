@@ -63,7 +63,7 @@ impl RocksDbEngine {
         for slot in store.live_slots() {
             batch.put(
                 key(store.id(slot)),
-                encode_value(store.vector(slot), store.metadata(slot))?,
+                encode_value(&store.vector(slot), store.metadata(slot))?,
             );
         }
         Ok(())

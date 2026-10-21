@@ -54,7 +54,7 @@ impl HnswIndex {
 
     #[inline]
     fn dist(&self, query: &[f32], slot: u32, store: &VectorStore) -> f32 {
-        self.metric.distance(query, store.vector(slot))
+        store.distance(self.metric, query, slot)
     }
 
     /// Inserts `slot` (which must equal the number of nodes so far).
@@ -75,6 +75,7 @@ impl HnswIndex {
         };
 
         let query = store.vector(slot);
+        let query = &*query;
         let mut ep = Neighbor {
             slot: entry,
             dist: self.dist(query, entry, store),
@@ -122,7 +123,7 @@ impl HnswIndex {
             .iter()
             .map(|&s| Neighbor {
                 slot: s,
-                dist: self.metric.distance(base, store.vector(s)),
+                dist: store.distance(self.metric, &base, s),
             })
             .chain(std::iter::once(Neighbor { slot: to, dist }))
             .collect();
@@ -144,12 +145,12 @@ impl HnswIndex {
             let cv = store.vector(c.slot);
             let diverse = selected
                 .iter()
-                .all(|s| self.metric.distance(cv, store.vector(s.slot)) > c.dist);
+                .all(|s| store.distance(self.metric, &cv, s.slot) > c.dist);
             if diverse {
                 selected.push(c);
             } else if !selected
                 .iter()
-                .any(|s| self.metric.distance(cv, store.vector(s.slot)) == 0.0)
+                .any(|s| store.distance(self.metric, &cv, s.slot) == 0.0)
             {
                 // Exact duplicates of an already selected neighbour are dropped
                 // rather than kept for backfill: a list full of duplicates would
@@ -410,7 +411,7 @@ mod tests {
 
         let mut hits = 0;
         for q in 0..100 {
-            let query = queries.vector(q);
+            let query = &queries.vector(q);
             let truth: Vec<u32> = flat
                 .search(query, k, &store, &|_| true)
                 .iter()
@@ -431,7 +432,7 @@ mod tests {
             hnsw.add(slot, &store);
         }
         let accept = |s: u32| s.is_multiple_of(50); // 2% selectivity
-        let got = hnsw.search(store.vector(1), 10, None, &store, &accept);
+        let got = hnsw.search(&store.vector(1), 10, None, &store, &accept);
         assert_eq!(got.len(), 10);
         assert!(got.iter().all(|n| n.slot % 50 == 0));
 
@@ -439,7 +440,7 @@ mod tests {
         for s in (0..1_000).filter(|s| s % 50 == 0) {
             truth.push(Neighbor {
                 slot: s,
-                dist: Metric::Euclidean.distance(store.vector(1), store.vector(s)),
+                dist: Metric::Euclidean.distance(&store.vector(1), &store.vector(s)),
             });
         }
         let truth: Vec<u32> = truth.into_sorted().iter().map(|n| n.slot).collect();
@@ -505,7 +506,7 @@ mod tests {
         assert_eq!(filtered.len(), 10);
         let self_found = (0..2_000u32)
             .step_by(10)
-            .filter(|&s| hnsw.search(store.vector(s), 1, Some(200), &store, &|_| true)[0].dist == 0.0)
+            .filter(|&s| hnsw.search(&store.vector(s), 1, Some(200), &store, &|_| true)[0].dist == 0.0)
             .count();
         assert_eq!(self_found, 200);
     }

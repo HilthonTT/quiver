@@ -258,7 +258,7 @@ mod tests {
         ] {
             let index = Index::build(&config, Metric::Euclidean, &store);
             let restored = Index::from_bytes(&index.to_bytes(), &config, Metric::Euclidean, &store).unwrap();
-            let q = store.vector(7);
+            let q = &store.vector(7);
             let a = index.search(q, 5, None, &store, &|_| true);
             let b = restored.search(q, 5, None, &store, &|_| true);
             assert_eq!(a, b, "{config:?}");
@@ -274,7 +274,7 @@ mod tests {
             IndexConfig::KdTree(KdTreeParams::default()),
         ] {
             let index = Index::build(&config, Metric::Euclidean, &store);
-            let got = index.search(store.vector(0), usize::MAX, Some(usize::MAX), &store, &|_| true);
+            let got = index.search(&store.vector(0), usize::MAX, Some(usize::MAX), &store, &|_| true);
             assert_eq!(got.len(), 50, "{config:?}");
         }
     }

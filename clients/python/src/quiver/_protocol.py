@@ -22,6 +22,7 @@ from ._models import (
     Metric,
     Point,
     PointLike,
+    Quantization,
     ScrollPage,
     SearchResult,
     SnapshotInfo,
@@ -106,6 +107,7 @@ def create_collection(
     metric: Metric,
     index: Index | None,
     field_indexes: Sequence[str] = (),
+    quantization: Quantization = "none",
 ) -> Call[CollectionInfo]:
     body: dict[str, Any] = {
         "name": name,
@@ -115,6 +117,8 @@ def create_collection(
     }
     if field_indexes:
         body["field_indexes"] = list(field_indexes)
+    if quantization != "none":
+        body["quantization"] = quantization
     return Call("POST", "/collections", CollectionInfo.from_dict, json=body)
 
 

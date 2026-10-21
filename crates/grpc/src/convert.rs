@@ -1,6 +1,6 @@
 use quiver_db::{
-    CollectionConfig, CollectionInfo, Error, HnswParams, IndexConfig, KdTreeParams, Metric, Point, SearchHit,
-    SnapshotInfo, new_id,
+    CollectionConfig, CollectionInfo, Error, HnswParams, IndexConfig, KdTreeParams, Metric, Point,
+    Quantization, SearchHit, SnapshotInfo, new_id,
 };
 use serde_json::Value;
 use tonic::Status;
@@ -89,7 +89,23 @@ pub(crate) fn config_from_pb(req: &pb::CreateCollectionRequest) -> Result<Collec
         dimension: req.dimension as usize,
         metric: metric_from_pb(req.metric)?,
         index: index_from_pb(req.index),
+        quantization: quantization_from_pb(req.quantization)?,
     })
+}
+
+pub(crate) fn quantization_from_pb(q: i32) -> Result<Quantization, Status> {
+    match pb::Quantization::try_from(q).map_err(|_| Status::invalid_argument("unknown quantization"))? {
+        pb::Quantization::None => Ok(Quantization::None),
+        pb::Quantization::Scalar => Ok(Quantization::Scalar),
+    }
+}
+
+pub(crate) fn quantization_to_pb(q: Quantization) -> i32 {
+    match q {
+        Quantization::None => pb::Quantization::None,
+        Quantization::Scalar => pb::Quantization::Scalar,
+    }
+    .into()
 }
 
 pub(crate) fn info_to_pb(info: CollectionInfo) -> pb::CollectionInfo {
@@ -101,6 +117,7 @@ pub(crate) fn info_to_pb(info: CollectionInfo) -> pb::CollectionInfo {
         count: info.count as u64,
         tombstones: info.tombstones as u64,
         field_indexes: info.field_indexes,
+        quantization: quantization_to_pb(info.config.quantization),
     }
 }
 
@@ -157,6 +174,7 @@ pub(crate) fn snapshot_to_pb(s: SnapshotInfo) -> pb::SnapshotInfo {
         data_sha256: m.data_sha256,
         archive_bytes: s.archive_bytes,
         field_indexes: m.field_indexes,
+        quantization: quantization_to_pb(m.config.quantization),
     }
 }
 
