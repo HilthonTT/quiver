@@ -1,6 +1,6 @@
 use quiver_types::Result;
 
-use crate::{Op, Recovered, StorageEngine, StorageKind, VectorStore};
+use crate::{Op, Recovered, StorageEngine, StorageKind, StoreSpec, VectorStore};
 
 /// Keeps no durable state; everything is lost when the process exits.
 #[derive(Debug, Default)]
@@ -11,8 +11,8 @@ impl StorageEngine for MemoryEngine {
         StorageKind::Memory
     }
 
-    fn recover(&mut self, dim: usize) -> Result<Recovered> {
-        Ok(Recovered::empty(dim))
+    fn recover(&mut self, spec: &StoreSpec) -> Result<Recovered> {
+        Recovered::empty(spec)
     }
 
     fn log(&mut self, _op: Op<'_>) -> Result<()> {

@@ -1,10 +1,13 @@
 use std::path::Path;
 
-use quiver_types::{Error, Result};
+use std::borrow::Cow;
+
+use quiver_types::{Error, NamedVectors, Point, Result, SparseVectors};
 use rocksdb::{DB, Direction, IteratorMode, Options, WriteBatch, WriteOptions};
+use serde::{Deserialize, Serialize};
 
 use crate::codec::{Reader, WriteExt};
-use crate::{Op, Recovered, StorageEngine, StorageKind, StorageOptions, VectorStore};
+use crate::{Op, Recovered, StorageEngine, StorageKind, StorageOptions, StoreSpec, VectorStore};
 
 const PREFIX: &[u8] = b"p/";
 
@@ -33,14 +36,32 @@ fn key(id: &str) -> Vec<u8> {
     k
 }
 
-fn encode_value(vector: &[f32], metadata: Option<&serde_json::Value>) -> Result<Vec<u8>> {
-    let mut v = Vec::with_capacity(vector.len() * 4 + 16);
-    v.put_f32s(vector)?;
-    match metadata {
+/// The main vector, the metadata, then (if there are any) the named and
+/// sparse vectors as JSON. Values from before named vectors end after the
+/// metadata.
+fn encode_value(p: &Point) -> Result<Vec<u8>> {
+    let mut v = Vec::with_capacity(p.vector.len() * 4 + 16);
+    v.put_f32s(&p.vector)?;
+    match &p.metadata {
         Some(m) => v.put_bytes(&serde_json::to_vec(m)?)?,
         None => v.put_u32(0)?,
     }
+    if !p.vectors.is_empty() || !p.sparse_vectors.is_empty() {
+        let extra = Extra {
+            vectors: Cow::Borrowed(&p.vectors),
+            sparse_vectors: Cow::Borrowed(&p.sparse_vectors),
+        };
+        v.put_bytes(&serde_json::to_vec(&extra)?)?;
+    }
     Ok(v)
+}
+
+#[derive(Serialize, Deserialize)]
+struct Extra<'a> {
+    #[serde(default)]
+    vectors: Cow<'a, NamedVectors>,
+    #[serde(default)]
+    sparse_vectors: Cow<'a, SparseVectors>,
 }
 
 impl RocksDbEngine {
@@ -61,12 +82,27 @@ impl RocksDbEngine {
 
     fn put_store(&self, batch: &mut WriteBatch, store: &VectorStore) -> Result<()> {
         for slot in store.live_slots() {
-            batch.put(
-                key(store.id(slot)),
-                encode_value(&store.vector(slot), store.metadata(slot))?,
-            );
+            batch.put(key(store.id(slot)), encode_value(&store.point(slot))?);
         }
         Ok(())
+    }
+}
+
+/// Points must match the collection exactly, or pushing them would panic.
+fn check_layout(p: &Point, spec: &StoreSpec) -> Result<()> {
+    let named_ok = p.vectors.len() == spec.named.len()
+        && spec
+            .named
+            .iter()
+            .all(|(name, c)| p.vectors.get(name).is_some_and(|v| v.len() == c.dim));
+    let sparse_ok = p.sparse_vectors.keys().all(|name| spec.sparse.contains(name));
+    if named_ok && sparse_ok {
+        Ok(())
+    } else {
+        Err(Error::Corrupt(format!(
+            "stored point `{}` does not match the collection's vectors",
+            p.id
+        )))
     }
 }
 
@@ -75,8 +111,9 @@ impl StorageEngine for RocksDbEngine {
         StorageKind::RocksDb
     }
 
-    fn recover(&mut self, dim: usize) -> Result<Recovered> {
-        let mut store = VectorStore::new(dim);
+    fn recover(&mut self, spec: &StoreSpec) -> Result<Recovered> {
+        let mut store = VectorStore::with_spec(spec)?;
+        let dim = spec.dim();
         let mut vector = Vec::with_capacity(dim);
         for item in self.db.iterator(IteratorMode::From(PREFIX, Direction::Forward)) {
             let (k, v) = item.map_err(storage_err)?;
@@ -93,7 +130,24 @@ impl StorageEngine for RocksDbEngine {
             } else {
                 Some(serde_json::from_slice(meta)?)
             };
-            store.push(id.to_owned(), &vector, metadata);
+            let extra: Extra<'_> = if r.is_empty() {
+                Extra {
+                    vectors: Cow::Owned(NamedVectors::new()),
+                    sparse_vectors: Cow::Owned(SparseVectors::new()),
+                }
+            } else {
+                serde_json::from_slice(r.bytes()?)?
+            };
+            let point = Point {
+                id: id.to_owned(),
+                vector: std::mem::take(&mut vector),
+                vectors: extra.vectors.into_owned(),
+                sparse_vectors: extra.sparse_vectors.into_owned(),
+                metadata,
+            };
+            check_layout(&point, spec)?;
+            store.push_point(point);
+            vector = Vec::with_capacity(dim);
         }
         Ok(Recovered {
             store,
@@ -107,7 +161,7 @@ impl StorageEngine for RocksDbEngine {
         match op {
             Op::Upsert { points } => {
                 for p in points {
-                    batch.put(key(&p.id), encode_value(&p.vector, p.metadata.as_ref())?);
+                    batch.put(key(&p.id), encode_value(p)?);
                 }
             }
             Op::Delete { ids } => {

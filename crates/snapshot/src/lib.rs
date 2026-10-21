@@ -9,7 +9,7 @@ use flate2::bufread::GzDecoder;
 use flate2::write::GzEncoder;
 use sha2::{Digest, Sha256};
 
-use quiver_storage::{VectorStore, state};
+use quiver_storage::{StoreSpec, VectorStore, state};
 pub use quiver_types::snapshot::{Manifest, SnapshotInfo};
 use quiver_types::{CollectionConfig, Error, MAX_FIELD_INDEXES, Result, validate_field_path, validate_name};
 
@@ -75,20 +75,57 @@ pub fn write_archive(
     index: Option<&[u8]>,
     created_at_ms: u64,
 ) -> Result<Manifest> {
-    let data = state::encode(Vec::new(), store, index)?;
-    let manifest = Manifest {
-        format_version: FORMAT_VERSION,
-        id: id.to_owned(),
-        collection: collection.to_owned(),
-        created_at_ms,
-        quiver_version: env!("CARGO_PKG_VERSION").to_owned(),
-        config: config.clone(),
-        points: store.live(),
-        data_bytes: data.len() as u64,
-        data_sha256: sha256_hex(&data),
-        field_indexes: field_indexes.to_vec(),
-    };
+    // Staged in a file rather than memory: with vectors on disk, the data
+    // can be far larger than the memory the collection takes.
+    let staged = path.with_extension("data.partial");
+    let result = (|| {
+        let mut data = HashingWriter {
+            inner: BufWriter::with_capacity(1 << 20, File::create(&staged)?),
+            hasher: Sha256::new(),
+            len: 0,
+        };
+        state::encode(&mut data, store, index, state::Columns::Inline)?;
+        data.inner.flush()?;
+        let manifest = Manifest {
+            format_version: FORMAT_VERSION,
+            id: id.to_owned(),
+            collection: collection.to_owned(),
+            created_at_ms,
+            quiver_version: env!("CARGO_PKG_VERSION").to_owned(),
+            config: config.clone(),
+            points: store.live(),
+            data_bytes: data.len,
+            data_sha256: hex(&data.hasher.finalize()),
+            field_indexes: field_indexes.to_vec(),
+        };
+        write_tar(path, &manifest, &staged)?;
+        Ok(manifest)
+    })();
+    let _ = fs::remove_file(&staged);
+    result
+}
 
+/// Counts and hashes what passes through.
+struct HashingWriter<W> {
+    inner: W,
+    hasher: Sha256,
+    len: u64,
+}
+
+impl<W: Write> Write for HashingWriter<W> {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let n = self.inner.write(buf)?;
+        self.hasher.update(&buf[..n]);
+        self.len += n as u64;
+        Ok(n)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
+fn write_tar(path: &Path, manifest: &Manifest, data: &Path) -> Result<()> {
     let tmp = path.with_extension("partial");
     let written = (|| {
         let file = BufWriter::new(File::create(&tmp)?);
@@ -100,7 +137,12 @@ pub fn write_archive(
             &serde_json::to_vec_pretty(&manifest)?,
             mtime,
         )?;
-        append(&mut builder, DATA, &data, mtime)?;
+        let mut header = tar::Header::new_gnu();
+        header.set_size(manifest.data_bytes);
+        header.set_mode(0o644);
+        header.set_mtime(mtime);
+        header.set_cksum();
+        builder.append_data(&mut header, DATA, BufReader::new(File::open(data)?))?;
         let file = builder
             .into_inner()?
             .finish()?
@@ -114,7 +156,7 @@ pub fn write_archive(
     if written.is_err() {
         let _ = fs::remove_file(&tmp);
     }
-    written.map(|()| manifest)
+    written
 }
 
 fn check_manifest(manifest: &Manifest) -> Result<()> {
@@ -275,7 +317,8 @@ pub fn read_archive(path: &Path) -> Result<Loaded> {
             manifest.id
         )));
     }
-    let (store, index) = state::decode(&data, manifest.config.dimension)?;
+    let spec = StoreSpec::for_config(&manifest.config, None).staging();
+    let (store, index) = state::decode(&data, &spec)?;
     if store.live() != manifest.points {
         return Err(Error::Corrupt(format!(
             "snapshot {} holds {} points but its manifest says {}",
@@ -644,7 +687,7 @@ mod tests {
 
         // Rewrite the archive with a modified data.bin but the old manifest.
         let mut manifest = info.manifest.clone();
-        let tampered = state::encode(Vec::new(), &store(6), None).unwrap();
+        let tampered = state::encode(Vec::new(), &store(6), None, state::Columns::Inline).unwrap();
         manifest.data_bytes = tampered.len() as u64;
         let file = File::create(&path).unwrap();
         let mut b = tar::Builder::new(GzEncoder::new(file, Compression::fast()));
@@ -689,13 +732,13 @@ mod tests {
         ])));
 
         // Data whose size disagrees with the manifest.
-        let mut data = state::encode(Vec::new(), &store(2), None).unwrap();
+        let mut data = state::encode(Vec::new(), &store(2), None, state::Columns::Inline).unwrap();
         let manifest = manifest_for(&data);
         data.push(0);
         assert!(corrupt(forged(&[(MANIFEST, &manifest), (DATA, &data)])));
 
         // Data before the manifest, so its size cannot be checked first.
-        let data = state::encode(Vec::new(), &store(2), None).unwrap();
+        let data = state::encode(Vec::new(), &store(2), None, state::Columns::Inline).unwrap();
         assert!(corrupt(forged(&[
             (DATA, &data),
             (MANIFEST, &manifest_for(&data))

@@ -55,7 +55,7 @@ types → storage → index → snapshot → quiver → http / grpc → server
 
 ## On-disk format
 
-Snapshot and WAL formats are documented in [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md). If you change them, bump `VERSION` in `snapshot.rs`, keep reading older versions where feasible, and call it out in the changelog.
+Checkpoint and snapshot data use the state format in `crates/storage/src/state.rs`; the snapshot archive layout is in `crates/snapshot`. If you change either, bump its `VERSION` (`FORMAT_VERSION` for archives), keep reading older versions where feasible, and call it out in the changelog.
 
 ## Running the integration tests
 

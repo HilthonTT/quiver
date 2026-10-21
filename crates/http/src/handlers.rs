@@ -129,6 +129,9 @@ pub async fn create_collection(
         metric: req.metric,
         index: req.index,
         quantization: req.quantization,
+        on_disk: false,
+        vectors: Default::default(),
+        sparse_vectors: Default::default(),
     };
     let info = blocking(move || {
         Ok(db
@@ -469,6 +472,7 @@ impl Settings<'_> {
             return Err(ApiError::bad_request(format!("k must be between 1 and {MAX_K}")));
         }
         Ok(SearchOptions {
+            using: None,
             filter: parse_filter(self.filter)?,
             ef: self.ef,
             include_vectors: self.with_vectors,

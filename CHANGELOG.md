@@ -13,6 +13,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   after 10 s. `quiver --healthcheck` probes over TLS. The server warns when API keys are configured on a non-loopback
   address without TLS. Clients: Rust `Client::with_tls` with `TlsOptions`, Python `ca_cert=`/`client_cert=`/`client_key=`,
   TUI `--ca-cert`/`--client-cert`.
+- **Named vectors**: `vectors` at creation adds dense vectors every point carries, each with its own dimension, metric,
+  index, quantization and on-disk setting. Search, search by id, batch search and recommend take `using` to pick one.
+  Points and hits carry them in `vectors`.
+- **Sparse vectors and hybrid search**: `sparse_vectors` at creation (optionally with `"modifier": "idf"` for BM25-style
+  weighting) adds sparse vectors points may carry, searched exactly through an inverted index with `{"sparse": ..., "using": ...}`
+  (distances are negated dot-product scores). `POST /collections/{name}/query` (gRPC `Query`) fuses several dense and sparse
+  searches with weighted reciprocal rank fusion.
+- **On-disk vectors** (`"on_disk": true`, per vector): vectors live in a file next to the collection instead of memory and are
+  read with positional reads. Combined with scalar quantization, the codes stay in memory for the search and the exact vectors
+  on disk re-rank 4×k candidates, so results carry exact distances. Durable storage engines only.
 - **Metadata updates** without resending vectors: merge (RFC 7386 JSON Merge Patch) or replace, by ids or by filter.
   REST `POST /collections/{name}/points/metadata`, gRPC `UpdateMetadata`, `Collection::update_metadata`, Rust and Python `update_metadata`.
 - **Count and delete by filter**: `POST /collections/{name}/points/count`, `points/delete` with `{"filter": ...}`
@@ -34,6 +44,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Checkpoints are written in state format v3 (columnar, with references to on-disk vector files); v2 checkpoints and
+  snapshots still load. Older versions cannot read data written by this one.
+- Snapshot data is staged in a temporary file instead of memory while the archive is written.
+- `quiver_collection_vector_bytes` reports the memory vectors actually take, across all vectors, excluding those on disk.
+- `Collection::config()` returns an owned `CollectionConfig`.
 - `quiver_grpc::serve` takes an optional `ServerTlsConfig`.
 - **Breaking:** listing points pages by id cursor instead of offset, so changes between pages never skip or repeat points.
   Points come back in ascending id order; REST `offset`/`next_offset` are now `cursor`/`next_cursor` (an `offset` parameter is rejected),

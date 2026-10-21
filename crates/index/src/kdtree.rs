@@ -1,6 +1,6 @@
 use std::io::Write;
 
-use quiver_storage::VectorStore;
+use quiver_storage::VectorColumn;
 use quiver_storage::codec::{Reader, WriteExt};
 use quiver_types::{Error, KdTreeParams, Metric, Result};
 
@@ -62,7 +62,7 @@ impl KdTreeIndex {
         }
     }
 
-    pub fn add_batch(&mut self, slots: std::ops::Range<u32>, store: &VectorStore) {
+    pub fn add_batch(&mut self, slots: std::ops::Range<u32>, store: &VectorColumn) {
         let count = slots.len();
         for slot in slots {
             self.insert(slot, store);
@@ -77,7 +77,7 @@ impl KdTreeIndex {
         }
     }
 
-    fn insert(&mut self, slot: u32, store: &VectorStore) {
+    fn insert(&mut self, slot: u32, store: &VectorColumn) {
         assert_eq!(
             slot as usize,
             self.nodes.len(),
@@ -120,7 +120,7 @@ impl KdTreeIndex {
     }
 
     /// Rebuilds a balanced tree over all nodes.
-    fn rebuild(&mut self, store: &VectorStore) {
+    fn rebuild(&mut self, store: &VectorColumn) {
         let mut slots: Vec<u32> = (0..self.nodes.len() as u32).collect();
         let mut depth = 0;
         self.root = self.build(&mut slots, store, 1, &mut depth);
@@ -128,7 +128,7 @@ impl KdTreeIndex {
         self.inserts_since_rebuild = 0;
     }
 
-    fn build(&mut self, slots: &mut [u32], store: &VectorStore, level: usize, depth: &mut usize) -> u32 {
+    fn build(&mut self, slots: &mut [u32], store: &VectorColumn, level: usize, depth: &mut usize) -> u32 {
         if slots.is_empty() {
             return NIL;
         }
@@ -151,7 +151,7 @@ impl KdTreeIndex {
         node
     }
 
-    pub fn search(&self, query: &[f32], k: usize, store: &VectorStore, accept: Accept<'_>) -> Vec<Neighbor> {
+    pub fn search(&self, query: &[f32], k: usize, store: &VectorColumn, accept: Accept<'_>) -> Vec<Neighbor> {
         let mut top = TopK::new(k);
         if self.root == NIL {
             return Vec::new();
@@ -267,7 +267,7 @@ impl KdTreeIndex {
     }
 }
 
-fn widest_axis(slots: &[u32], store: &VectorStore) -> usize {
+fn widest_axis(slots: &[u32], store: &VectorColumn) -> usize {
     let dim = store.dim();
     let mut lo = vec![f32::INFINITY; dim];
     let mut hi = vec![f32::NEG_INFINITY; dim];
@@ -287,7 +287,7 @@ mod tests {
     use super::*;
     use crate::{FlatIndex, random_store};
 
-    fn build(store: &VectorStore, metric: Metric) -> KdTreeIndex {
+    fn build(store: &VectorColumn, metric: Metric) -> KdTreeIndex {
         let mut tree = KdTreeIndex::new(KdTreeParams::default(), metric);
         tree.add_batch(0..store.slots() as u32, store);
         tree
@@ -308,19 +308,19 @@ mod tests {
             let mut store = random_store(2_000, 5, 11);
             if metric == Metric::Hamming {
                 // Hamming is meant for discrete data.
-                let mut q = VectorStore::new(5);
+                let mut q = VectorColumn::new(5);
                 for s in 0..store.slots() as u32 {
                     let v: Vec<f32> = store.vector(s).iter().map(|x| (x * 2.0).round()).collect();
-                    q.push(s.to_string(), &v, None);
+                    q.push(&v);
                 }
                 store = q;
             }
             if metric == Metric::Cosine {
-                let mut q = VectorStore::new(5);
+                let mut q = VectorColumn::new(5);
                 for s in 0..store.slots() as u32 {
                     let mut v = store.vector(s).to_vec();
                     assert!(metric.prepare(&mut v));
-                    q.push(s.to_string(), &v, None);
+                    q.push(&v);
                 }
                 store = q;
             }
@@ -350,10 +350,11 @@ mod tests {
 
     #[test]
     fn sorted_inserts_trigger_rebalancing() {
-        let mut store = VectorStore::new(2);
+        let mut store = VectorColumn::new(2);
         let mut tree = KdTreeIndex::new(KdTreeParams::default(), Metric::Euclidean);
         for i in 0..4_000u32 {
-            let slot = store.push(i.to_string(), &[i as f32, 0.0], None);
+            let slot = store.slots() as u32;
+            store.push(&[i as f32, 0.0]);
             tree.add_batch(slot..slot + 1, &store);
         }
         let limit = 3.0 * 4_000f64.log2();
@@ -395,13 +396,13 @@ mod tests {
 
     #[test]
     fn cosine_matches_brute_force_for_near_parallel_vectors() {
-        let mut store = VectorStore::new(2);
+        let mut store = VectorColumn::new(2);
         let base = random_store(300, 2, 7);
         for s in 0..300u32 {
             let b = base.vector(s);
             let mut v = vec![1.0 + b[0] * 1e-3, 1.0 + b[1] * 1e-3];
             assert!(Metric::Cosine.prepare(&mut v));
-            store.push(s.to_string(), &v, None);
+            store.push(&v);
         }
         let tree = build(&store, Metric::Cosine);
         let flat = FlatIndex::new(Metric::Cosine);
@@ -417,7 +418,7 @@ mod tests {
 
     #[test]
     fn empty_tree() {
-        let store = VectorStore::new(2);
+        let store = VectorColumn::new(2);
         let tree = KdTreeIndex::new(KdTreeParams::default(), Metric::Euclidean);
         assert!(tree.search(&[0.0, 0.0], 3, &store, &|_| true).is_empty());
     }

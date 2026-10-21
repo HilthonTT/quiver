@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 
 use crate::distance::Metric;
@@ -17,8 +19,14 @@ pub const MAX_FIELD_PATH_LEN: usize = 256;
 /// more levels and must stay under serde_json's read limit of 128.
 pub const MAX_METADATA_DEPTH: usize = 64;
 
+/// Maximum number of named dense vectors a collection can have.
+pub const MAX_NAMED_VECTORS: usize = 16;
+/// Maximum number of sparse vectors a collection can have.
+pub const MAX_SPARSE_VECTORS: usize = 16;
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CollectionConfig {
+    /// Dimension of the main vector.
     pub dimension: usize,
     #[serde(default)]
     pub metric: Metric,
@@ -26,6 +34,20 @@ pub struct CollectionConfig {
     pub index: IndexConfig,
     #[serde(default, skip_serializing_if = "Quantization::is_none")]
     pub quantization: Quantization,
+    /// Keep the main vectors in a file instead of memory.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub on_disk: bool,
+    /// Further dense vectors every point carries, by name, each with its
+    /// own dimension, metric and index.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub vectors: BTreeMap<String, VectorConfig>,
+    /// Sparse vectors points may carry, by name, for keyword-style search.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sparse_vectors: BTreeMap<String, SparseVectorConfig>,
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
 }
 
 impl CollectionConfig {
@@ -35,6 +57,9 @@ impl CollectionConfig {
             metric: Metric::default(),
             index: IndexConfig::default(),
             quantization: Quantization::None,
+            on_disk: false,
+            vectors: BTreeMap::new(),
+            sparse_vectors: BTreeMap::new(),
         }
     }
 
@@ -53,6 +78,168 @@ impl CollectionConfig {
     #[must_use]
     pub fn index(mut self, index: IndexConfig) -> Self {
         self.index = index;
+        self
+    }
+
+    #[must_use]
+    pub fn on_disk(mut self, on_disk: bool) -> Self {
+        self.on_disk = on_disk;
+        self
+    }
+
+    /// Adds a named dense vector.
+    #[must_use]
+    pub fn with_vector(mut self, name: impl Into<String>, config: VectorConfig) -> Self {
+        self.vectors.insert(name.into(), config);
+        self
+    }
+
+    /// Adds a named sparse vector.
+    #[must_use]
+    pub fn with_sparse_vector(mut self, name: impl Into<String>, config: SparseVectorConfig) -> Self {
+        self.sparse_vectors.insert(name.into(), config);
+        self
+    }
+
+    /// The main vector's settings.
+    pub fn main_vector(&self) -> VectorConfig {
+        VectorConfig {
+            dimension: self.dimension,
+            metric: self.metric,
+            index: self.index,
+            quantization: self.quantization,
+            on_disk: self.on_disk,
+        }
+    }
+
+    /// Settings of the dense vector `using` names (the main one for `None`).
+    pub fn dense(&self, using: Option<&str>) -> Result<VectorConfig> {
+        match using {
+            None => Ok(self.main_vector()),
+            Some(name) => self.vectors.get(name).copied().ok_or_else(|| {
+                if self.sparse_vectors.contains_key(name) {
+                    Error::invalid(format!("`{name}` is a sparse vector; query it with `sparse`"))
+                } else {
+                    Error::invalid(format!("this collection has no vector named `{name}`"))
+                }
+            }),
+        }
+    }
+
+    /// Settings of the sparse vector `name`.
+    pub fn sparse(&self, name: &str) -> Result<SparseVectorConfig> {
+        self.sparse_vectors.get(name).copied().ok_or_else(|| {
+            if self.vectors.contains_key(name) {
+                Error::invalid(format!("`{name}` is a dense vector; query it with `vector`"))
+            } else {
+                Error::invalid(format!("this collection has no sparse vector named `{name}`"))
+            }
+        })
+    }
+
+    /// Whether any vector lives on disk.
+    pub fn uses_disk(&self) -> bool {
+        self.on_disk || self.vectors.values().any(|v| v.on_disk)
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        self.main_vector().validate()?;
+        if self.vectors.len() > MAX_NAMED_VECTORS {
+            return Err(Error::invalid(format!(
+                "a collection can have at most {MAX_NAMED_VECTORS} named vectors"
+            )));
+        }
+        if self.sparse_vectors.len() > MAX_SPARSE_VECTORS {
+            return Err(Error::invalid(format!(
+                "a collection can have at most {MAX_SPARSE_VECTORS} sparse vectors"
+            )));
+        }
+        for (name, config) in &self.vectors {
+            validate_vector_name(name)?;
+            config
+                .validate()
+                .map_err(|e| Error::invalid(format!("vector `{name}`: {}", message(&e))))?;
+        }
+        for name in self.sparse_vectors.keys() {
+            validate_vector_name(name)?;
+            if self.vectors.contains_key(name) {
+                return Err(Error::invalid(format!(
+                    "`{name}` cannot be both a dense and a sparse vector"
+                )));
+            }
+        }
+        Ok(())
+    }
+}
+
+/// The message of an `InvalidArgument`, for wrapping it with context.
+fn message(e: &Error) -> String {
+    match e {
+        Error::InvalidArgument(msg) => msg.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// Vector names follow the rules for collection names.
+fn validate_vector_name(name: &str) -> Result<()> {
+    validate_name(name).map_err(|_| {
+        Error::invalid(format!(
+            "invalid vector name `{name}`: use 1-{MAX_NAME_LEN} characters from [A-Za-z0-9_-]"
+        ))
+    })
+}
+
+/// Settings of one dense vector: the main one or a named one.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VectorConfig {
+    pub dimension: usize,
+    #[serde(default)]
+    pub metric: Metric,
+    #[serde(default)]
+    pub index: IndexConfig,
+    #[serde(default, skip_serializing_if = "Quantization::is_none")]
+    pub quantization: Quantization,
+    /// Keep these vectors in a file instead of memory. Searches then read
+    /// them from disk (the OS page cache keeps hot ones in memory); with
+    /// scalar quantization, the compact codes stay in memory for the search
+    /// and the exact vectors on disk re-rank the results.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub on_disk: bool,
+}
+
+impl VectorConfig {
+    pub fn new(dimension: usize) -> Self {
+        Self {
+            dimension,
+            metric: Metric::default(),
+            index: IndexConfig::default(),
+            quantization: Quantization::None,
+            on_disk: false,
+        }
+    }
+
+    #[must_use]
+    pub fn metric(mut self, metric: Metric) -> Self {
+        self.metric = metric;
+        self
+    }
+
+    #[must_use]
+    pub fn index(mut self, index: IndexConfig) -> Self {
+        self.index = index;
+        self
+    }
+
+    #[must_use]
+    pub fn quantization(mut self, quantization: Quantization) -> Self {
+        self.quantization = quantization;
+        self
+    }
+
+    #[must_use]
+    pub fn on_disk(mut self, on_disk: bool) -> Self {
+        self.on_disk = on_disk;
         self
     }
 
@@ -90,6 +277,35 @@ impl CollectionConfig {
         }
 
         Ok(())
+    }
+}
+
+/// Settings of one sparse vector.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SparseVectorConfig {
+    /// How query weights are adjusted before scoring.
+    #[serde(default, skip_serializing_if = "SparseModifier::is_none")]
+    pub modifier: SparseModifier,
+}
+
+/// Adjustment applied to sparse query weights.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SparseModifier {
+    /// Scores are plain dot products.
+    #[default]
+    None,
+    /// Each query weight is multiplied by its index's inverse document
+    /// frequency over the collection, `ln(1 + (N - n + 0.5) / (n + 0.5))`
+    /// for `n` of `N` points having it. With term frequencies as values
+    /// (saturated as BM25 does), scores are BM25 scores.
+    Idf,
+}
+
+impl SparseModifier {
+    pub fn is_none(&self) -> bool {
+        *self == SparseModifier::None
     }
 }
 
@@ -298,6 +514,39 @@ mod tests {
                 .is_err()
         );
         assert!(c.index(IndexConfig::Flat).validate().is_ok());
+    }
+
+    #[test]
+    fn named_and_sparse_vectors() {
+        let c: CollectionConfig = serde_json::from_value(serde_json::json!({
+            "dimension": 3,
+            "vectors": {"title": {"dimension": 2, "metric": "dot", "index": {"type": "flat"}}},
+            "sparse_vectors": {"text": {"modifier": "idf"}},
+        }))
+        .unwrap();
+        assert!(c.validate().is_ok());
+        assert_eq!(c.dense(Some("title")).unwrap().dimension, 2);
+        assert_eq!(c.dense(None).unwrap().dimension, 3);
+        assert!(c.dense(Some("text")).is_err());
+        assert!(c.dense(Some("nope")).is_err());
+        assert_eq!(c.sparse("text").unwrap().modifier, SparseModifier::Idf);
+        assert!(c.sparse("title").is_err());
+        assert!(
+            !serde_json::to_string(&CollectionConfig::new(3))
+                .unwrap()
+                .contains("vectors")
+        );
+
+        let both = c.clone().with_vector("text", VectorConfig::new(2));
+        assert!(both.validate().is_err(), "a name can't be dense and sparse");
+        let bad_name = c.clone().with_vector("a b", VectorConfig::new(2));
+        assert!(bad_name.validate().is_err());
+        let bad_dim = c.with_vector("x", VectorConfig::new(0));
+        assert!(bad_dim.validate().is_err());
+        assert!(
+            serde_json::from_str::<VectorConfig>(r#"{"dimension": 2, "dimensions": 3}"#).is_err(),
+            "unknown fields"
+        );
     }
 
     #[test]

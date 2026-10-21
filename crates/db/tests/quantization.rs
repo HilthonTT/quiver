@@ -93,7 +93,7 @@ fn quantized_vectors_survive_restarts_and_snapshots_exactly() {
             },
         )
         .unwrap();
-    assert_eq!(restored.config(), &config);
+    assert_eq!(restored.config(), config);
     for p in &before {
         assert_eq!(&restored.get(&p.id).unwrap(), p);
     }

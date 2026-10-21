@@ -193,7 +193,7 @@ impl Database {
 
     pub fn get_or_create_collection(&self, name: &str, config: CollectionConfig) -> Result<Arc<Collection>> {
         if let Ok(existing) = self.collection(name) {
-            if existing.config() != &config {
+            if existing.config() != config {
                 return Err(Error::invalid(format!(
                     "collection `{name}` exists with a different configuration"
                 )));
@@ -283,8 +283,8 @@ impl Database {
         let name = opts.name.unwrap_or(loaded.manifest.collection);
         validate_name(&name)?;
         // Verify the index before an existing collection is deleted for it.
-        let index =
-            Collection::snapshot_index(&loaded.manifest.config, &loaded.store, loaded.index.as_deref())?;
+        let indexes =
+            Collection::snapshot_indexes(&loaded.manifest.config, &loaded.store, loaded.index.as_deref())?;
 
         let mut collections = self.collections.write();
         if let Some(existing) = collections.remove(&name) {
@@ -300,7 +300,7 @@ impl Database {
             loaded.manifest.config,
             &loaded.manifest.field_indexes,
             loaded.store,
-            index,
+            indexes,
             dir.as_deref(),
             self.env.clone(),
         )?);

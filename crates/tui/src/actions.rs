@@ -206,7 +206,13 @@ impl Executor {
                         return None;
                     }
                 };
-                let point = PointInput { id, vector, metadata };
+                let point = PointInput {
+                    id,
+                    vector,
+                    vectors: Default::default(),
+                    sparse_vectors: Default::default(),
+                    metadata,
+                };
                 match self.rt.block_on(c.upsert(&collection, vec![point])) {
                     Ok(res) => {
                         app.modal = None;
@@ -431,6 +437,8 @@ mod tests {
                     distance: 0.0,
                     metadata: None,
                     vector: None,
+                    vectors: Default::default(),
+                    sparse_vectors: Default::default(),
                 })
                 .collect(),
         )

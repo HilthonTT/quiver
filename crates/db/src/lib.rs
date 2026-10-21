@@ -1,6 +1,7 @@
 mod collection;
 mod db;
 mod fields;
+mod indexes;
 pub mod metrics;
 mod scheduler;
 
@@ -15,7 +16,9 @@ pub use quiver_storage as storage;
 pub use quiver_storage::StorageKind;
 pub use quiver_types as types;
 pub use quiver_types::{
-    CollectionConfig, CollectionInfo, Error, Filter, HnswParams, IndexConfig, KdTreeParams, MAX_DIMENSION,
-    MAX_ID_LEN, MAX_NAME_LEN, MetadataMode, Metric, Point, PointInput, PointSelector, Quantization, Result,
-    SearchHit, SearchOptions, auth, distance, filter, merge_patch, new_id, validate_name,
+    CollectionConfig, CollectionInfo, Error, Filter, Fusion, HnswParams, HybridQuery, IndexConfig,
+    KdTreeParams, MAX_DIMENSION, MAX_ID_LEN, MAX_NAME_LEN, MetadataMode, Metric, NamedVectors, Point,
+    PointInput, PointSelector, Prefetch, Quantization, QueryVector, Result, ScoredHit, SearchHit,
+    SearchOptions, SparseModifier, SparseVector, SparseVectorConfig, SparseVectors, VectorConfig, auth,
+    distance, filter, merge_patch, new_id, validate_name,
 };

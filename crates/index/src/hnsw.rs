@@ -3,7 +3,7 @@ use std::collections::BinaryHeap;
 use std::io::Write;
 
 use quiver_storage::{
-    VectorStore,
+    VectorColumn,
     codec::{Reader, WriteExt},
 };
 use quiver_types::{Error, HnswParams, Metric, Result};
@@ -53,12 +53,12 @@ impl HnswIndex {
     }
 
     #[inline]
-    fn dist(&self, query: &[f32], slot: u32, store: &VectorStore) -> f32 {
+    fn dist(&self, query: &[f32], slot: u32, store: &VectorColumn) -> f32 {
         store.distance(self.metric, query, slot)
     }
 
     /// Inserts `slot` (which must equal the number of nodes so far).
-    pub fn add(&mut self, slot: u32, store: &VectorStore) {
+    pub fn add(&mut self, slot: u32, store: &VectorColumn) {
         assert_eq!(
             slot as usize,
             self.links.len(),
@@ -111,7 +111,7 @@ impl HnswIndex {
         }
     }
 
-    fn connect(&mut self, from: u32, to: u32, dist: f32, layer: usize, store: &VectorStore) {
+    fn connect(&mut self, from: u32, to: u32, dist: f32, layer: usize, store: &VectorColumn) {
         let max = self.max_links(layer);
         let list = &mut self.links[from as usize][layer];
         if list.len() < max {
@@ -132,7 +132,7 @@ impl HnswIndex {
         self.links[from as usize][layer] = pruned.iter().map(|n| n.slot).collect();
     }
 
-    fn select_neighbors(&self, candidates: &[Neighbor], m: usize, store: &VectorStore) -> Vec<Neighbor> {
+    fn select_neighbors(&self, candidates: &[Neighbor], m: usize, store: &VectorColumn) -> Vec<Neighbor> {
         if candidates.len() <= m {
             return candidates.to_vec();
         }
@@ -168,7 +168,7 @@ impl HnswIndex {
         query: &[f32],
         mut best: Neighbor,
         layer: usize,
-        store: &VectorStore,
+        store: &VectorColumn,
     ) -> Neighbor {
         loop {
             let mut improved = false;
@@ -191,7 +191,7 @@ impl HnswIndex {
         entry_points: &[Neighbor],
         ef: usize,
         layer: usize,
-        store: &VectorStore,
+        store: &VectorColumn,
         accept: Accept<'_>,
     ) -> Vec<Neighbor> {
         let mut visited = Visited::new(self.links.len());
@@ -241,7 +241,7 @@ impl HnswIndex {
         query: &[f32],
         k: usize,
         ef: Option<usize>,
-        store: &VectorStore,
+        store: &VectorColumn,
         accept: Accept<'_>,
     ) -> Vec<Neighbor> {
         let Some(entry) = self.entry else {
@@ -388,12 +388,12 @@ mod tests {
     use super::*;
     use crate::{FlatIndex, TopK};
 
-    fn random_store(n: usize, dim: usize, seed: u64) -> VectorStore {
+    fn random_store(n: usize, dim: usize, seed: u64) -> VectorColumn {
         let mut rng = SplitMix64(seed);
-        let mut store = VectorStore::new(dim);
-        for i in 0..n {
+        let mut store = VectorColumn::new(dim);
+        for _ in 0..n {
             let v: Vec<f32> = (0..dim).map(|_| rng.next_f64() as f32 * 2.0 - 1.0).collect();
-            store.push(i.to_string(), &v, None);
+            store.push(&v);
         }
         store
     }
@@ -491,7 +491,7 @@ mod tests {
     fn duplicate_vectors_do_not_disconnect_the_graph() {
         // 1800 copies of one vector plus 200 distinct points.
         let mut rng = SplitMix64(0);
-        let mut store = VectorStore::new(4);
+        let mut store = VectorColumn::new(4);
         let mut hnsw = HnswIndex::new(HnswParams::default(), Metric::Euclidean);
         for i in 0..2_000u32 {
             let v: Vec<f32> = if i % 10 != 0 {
@@ -499,7 +499,7 @@ mod tests {
             } else {
                 (0..4).map(|_| rng.next_f64() as f32).collect()
             };
-            store.push(i.to_string(), &v, None);
+            store.push(&v);
             hnsw.add(i, &store);
         }
         let filtered = hnsw.search(&[0.5; 4], 10, None, &store, &|s| s % 10 == 0);
@@ -513,7 +513,7 @@ mod tests {
 
     #[test]
     fn empty_index_returns_nothing() {
-        let store = VectorStore::new(2);
+        let store = VectorColumn::new(2);
         let hnsw = HnswIndex::new(HnswParams::default(), Metric::Cosine);
         assert!(hnsw.search(&[1.0, 0.0], 5, None, &store, &|_| true).is_empty());
     }

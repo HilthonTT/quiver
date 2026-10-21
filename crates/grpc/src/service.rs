@@ -110,6 +110,7 @@ impl Settings<'_> {
         Ok((
             k,
             SearchOptions {
+                using: None,
                 filter: filter_from_pb(self.filter_json)?,
                 ef: self.ef.map(|e| e as usize),
                 include_vectors: self.with_vectors,

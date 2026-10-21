@@ -1,4 +1,5 @@
 pub mod codec;
+pub mod column;
 mod file;
 mod memory;
 #[cfg(feature = "rocksdb")]
@@ -12,11 +13,12 @@ use std::path::Path;
 use quiver_types::{Error, Point, Result};
 use serde::{Deserialize, Serialize};
 
+pub use column::{ColumnSpec, VectorColumn};
 pub use file::FileEngine;
 pub use memory::MemoryEngine;
 #[cfg(feature = "rocksdb")]
 pub use rocks::RocksDbEngine;
-pub use store::VectorStore;
+pub use store::{StoreSpec, VectorStore};
 
 /// A mutation, as handed to [`StorageEngine::log`].
 #[derive(Debug, Clone, Copy, Serialize)]
@@ -42,12 +44,12 @@ pub struct Recovered {
 }
 
 impl Recovered {
-    pub fn empty(dim: usize) -> Self {
-        Self {
-            store: VectorStore::new(dim),
+    pub fn empty(spec: &StoreSpec) -> Result<Self> {
+        Ok(Self {
+            store: VectorStore::with_spec(spec)?,
             index: None,
             replay: Vec::new(),
-        }
+        })
     }
 }
 
@@ -60,7 +62,8 @@ impl Recovered {
 pub trait StorageEngine: Send + Sync + std::fmt::Debug {
     fn kind(&self) -> StorageKind;
 
-    fn recover(&mut self, dim: usize) -> Result<Recovered>;
+    /// Loads what was persisted into a store laid out as `spec` says.
+    fn recover(&mut self, spec: &StoreSpec) -> Result<Recovered>;
 
     fn log(&mut self, op: Op<'_>) -> Result<()>;
 
@@ -175,19 +178,19 @@ mod tests {
         let open = || open_engine(kind, Some(dir.path()), StorageOptions::default()).unwrap();
         {
             let mut e = open();
-            assert_eq!(e.recover(2).unwrap().store.live(), 0);
+            assert_eq!(e.recover(&StoreSpec::new(2)).unwrap().store.live(), 0);
             e.log(Op::Upsert { points: &points(5) }).unwrap();
             e.log(Op::Delete { ids: &["p1".into()] }).unwrap();
         }
         // Rebuild the expected state the way the database would.
         let mut e = open();
-        let rec = e.recover(2).unwrap();
+        let rec = e.recover(&StoreSpec::new(2)).unwrap();
         let mut store = rec.store;
         for m in rec.replay {
             match m {
                 Mutation::Upsert { points } => {
                     for p in points {
-                        store.push(p.id, &p.vector, p.metadata);
+                        store.push_point(p);
                     }
                 }
                 Mutation::Delete { ids } => ids.iter().for_each(|id| {
@@ -206,10 +209,61 @@ mod tests {
         fresh.push("only".into(), &[9.0, 9.0], None);
         e.import(&fresh, b"idx").unwrap();
         drop(e);
-        let rec = open().recover(2).unwrap();
+        let rec = open().recover(&StoreSpec::new(2)).unwrap();
         assert!(rec.replay.is_empty());
         assert_eq!(rec.store.live(), 1);
         assert!(rec.store.slot_of("only").is_some());
+    }
+
+    /// Named, sparse and on-disk vectors survive every durable engine.
+    fn rich_points_contract(kind: StorageKind) {
+        use quiver_types::{CollectionConfig, SparseVector, VectorConfig};
+        let dir = tempfile::tempdir().unwrap();
+        let config = CollectionConfig::new(2)
+            .on_disk(true)
+            .with_vector("title", VectorConfig::new(3))
+            .with_sparse_vector("text", Default::default());
+        let spec = StoreSpec::for_config(&config, Some(dir.path()));
+        let p = Point::new("a", vec![1.0, 2.0])
+            .with_vector("title", vec![3.0, 4.0, 5.0])
+            .with_sparse_vector("text", SparseVector::new(vec![7], vec![0.5]))
+            .with_metadata(json!({"k": 1}));
+        let engine_dir = dir.path().join("engine");
+        let open = || open_engine(kind, Some(&engine_dir), StorageOptions::default()).unwrap();
+        {
+            let mut e = open();
+            let rec = e.recover(&spec).unwrap();
+            e.log(Op::Upsert {
+                points: std::slice::from_ref(&p),
+            })
+            .unwrap();
+            let mut store = rec.store;
+            store.push_point(p.clone());
+            e.checkpoint(&store, b"").unwrap();
+        }
+        let rec = open().recover(&spec).unwrap();
+        let mut store = rec.store;
+        for m in rec.replay {
+            if let Mutation::Upsert { points } = m {
+                points.into_iter().for_each(|p| {
+                    store.push_point(p);
+                });
+            }
+        }
+        let slot = store.slot_of("a").unwrap();
+        assert_eq!(store.point(slot), p);
+        assert!(store.main().is_on_disk());
+    }
+
+    #[test]
+    fn rich_points_survive_the_file_engine() {
+        rich_points_contract(StorageKind::File);
+    }
+
+    #[cfg(feature = "rocksdb")]
+    #[test]
+    fn rich_points_survive_rocksdb() {
+        rich_points_contract(StorageKind::RocksDb);
     }
 
     #[test]

@@ -1,22 +1,24 @@
 mod flat;
 mod hnsw;
 mod kdtree;
+mod sparse;
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
 
-use quiver_storage::VectorStore;
+use quiver_storage::VectorColumn;
 use quiver_storage::codec::{Reader, WriteExt};
 use quiver_types::{Error, IndexConfig, Metric, Result};
 
 pub use flat::FlatIndex;
 pub use hnsw::HnswIndex;
 pub use kdtree::KdTreeIndex;
+pub use sparse::SparseIndex;
 
 /// A candidate result: a slot and its distance to the query.
 #[derive(Debug, Clone, Copy)]
 pub struct Neighbor {
-    /// Slot in the [`VectorStore`].
+    /// Slot in the [`VectorColumn`].
     pub slot: u32,
     /// Distance to the query (lower is closer).
     pub dist: f32,
@@ -128,19 +130,19 @@ impl Index {
     }
 
     /// Builds an index over every slot of `store`.
-    pub fn build(config: &IndexConfig, metric: Metric, store: &VectorStore) -> Self {
+    pub fn build(config: &IndexConfig, metric: Metric, store: &VectorColumn) -> Self {
         let mut index = Self::new(config, metric);
         index.add_batch(0..store.slots() as u32, store);
         index
     }
 
     /// Makes the record in `slot` searchable. Slots must be added in order.
-    pub fn add(&mut self, slot: u32, store: &VectorStore) {
+    pub fn add(&mut self, slot: u32, store: &VectorColumn) {
         self.add_batch(slot..slot + 1, store);
     }
 
     /// Adds a run of consecutive slots. Lets indexes amortise rebalancing.
-    pub fn add_batch(&mut self, slots: std::ops::Range<u32>, store: &VectorStore) {
+    pub fn add_batch(&mut self, slots: std::ops::Range<u32>, store: &VectorColumn) {
         match self {
             Index::Flat(_) => {}
             Index::Hnsw(h) => slots.for_each(|s| h.add(s, store)),
@@ -156,7 +158,7 @@ impl Index {
         query: &[f32],
         k: usize,
         ef: Option<usize>,
-        store: &VectorStore,
+        store: &VectorColumn,
         accept: Accept<'_>,
     ) -> Vec<Neighbor> {
         // `k` comes straight from API callers; never size buffers beyond the data.
@@ -188,7 +190,7 @@ impl Index {
         bytes: &[u8],
         config: &IndexConfig,
         metric: Metric,
-        store: &VectorStore,
+        store: &VectorColumn,
     ) -> Result<Self> {
         let mut r = Reader::new(bytes);
         let slots = store.slots();
@@ -214,7 +216,7 @@ impl Index {
 
 /// Deterministic pseudo-random vectors for tests.
 #[cfg(test)]
-pub(crate) fn random_store(n: usize, dim: usize, seed: u64) -> VectorStore {
+pub(crate) fn random_store(n: usize, dim: usize, seed: u64) -> VectorColumn {
     let mut state = seed;
     let mut next = || {
         state = state.wrapping_add(0x9E37_79B9_7F4A_7C15);
@@ -223,10 +225,10 @@ pub(crate) fn random_store(n: usize, dim: usize, seed: u64) -> VectorStore {
         z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
         ((z ^ (z >> 31)) >> 40) as f32 / (1u64 << 24) as f32
     };
-    let mut store = VectorStore::new(dim);
-    for i in 0..n {
+    let mut store = VectorColumn::new(dim);
+    for _ in 0..n {
         let v: Vec<f32> = (0..dim).map(|_| next() * 2.0 - 1.0).collect();
-        store.push(i.to_string(), &v, None);
+        store.push(&v);
     }
     store
 }

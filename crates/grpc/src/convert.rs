@@ -90,6 +90,9 @@ pub(crate) fn config_from_pb(req: &pb::CreateCollectionRequest) -> Result<Collec
         metric: metric_from_pb(req.metric)?,
         index: index_from_pb(req.index),
         quantization: quantization_from_pb(req.quantization)?,
+        on_disk: false,
+        vectors: Default::default(),
+        sparse_vectors: Default::default(),
     })
 }
 
@@ -138,6 +141,8 @@ pub(crate) fn point_from_pb(p: pb::Point) -> Result<Point, Status> {
     Ok(Point {
         id: if p.id.is_empty() { new_id() } else { p.id },
         vector: p.vector,
+        vectors: Default::default(),
+        sparse_vectors: Default::default(),
         metadata: json_from_pb(&p.metadata_json, "metadata_json")?,
     })
 }

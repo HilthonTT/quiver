@@ -1,129 +1,102 @@
 use std::borrow::Cow;
-use std::cell::RefCell;
 use std::collections::BTreeMap;
 use std::ops::Bound;
+use std::path::{Path, PathBuf};
 
-use quiver_types::Metric;
+use quiver_types::{CollectionConfig, Metric, Point, Quantization, Result, SparseVector, VectorConfig};
 use serde_json::Value;
 
-/// Vectors, one after another, in one of two layouts.
-#[derive(Debug, Clone)]
-enum Vectors {
-    F32(Vec<f32>),
-    /// Scalar quantization: one code byte per component, decoded as
-    /// `min + code * step` with `[min, step]` stored per vector.
-    Sq8 {
-        codes: Vec<u8>,
-        ranges: Vec<[f32; 2]>,
-    },
+use crate::column::{ColumnSpec, VectorColumn};
+
+/// What a [`VectorStore`] holds besides ids and metadata.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct StoreSpec {
+    /// The main vectors.
+    pub main: ColumnSpec,
+    /// Named dense vectors, sorted by name.
+    pub named: Vec<(String, ColumnSpec)>,
+    /// Names of the sparse vectors, sorted.
+    pub sparse: Vec<String>,
+    /// Where on-disk columns keep their files.
+    pub dir: Option<PathBuf>,
 }
 
-impl Vectors {
-    fn push(&mut self, v: &[f32]) {
-        match self {
-            Vectors::F32(data) => data.extend_from_slice(v),
-            Vectors::Sq8 { codes, ranges } => {
-                let (min, step, code) = quantize(v);
-                codes.extend(code);
-                ranges.push([min, step]);
+impl StoreSpec {
+    /// Main vectors of dimension `dim`, in memory, and nothing else.
+    pub fn new(dim: usize) -> Self {
+        Self {
+            main: ColumnSpec::new(dim),
+            ..Self::default()
+        }
+    }
+
+    /// The layout of a collection configured as `config` whose on-disk
+    /// columns live in `dir`.
+    pub fn for_config(config: &CollectionConfig, dir: Option<&Path>) -> Self {
+        let column = |v: &VectorConfig| ColumnSpec {
+            dim: v.dimension,
+            quantized: v.quantization == Quantization::Scalar,
+            on_disk: v.on_disk,
+        };
+        Self {
+            main: column(&config.main_vector()),
+            named: config
+                .vectors
+                .iter()
+                .map(|(name, v)| (name.clone(), column(v)))
+                .collect(),
+            sparse: config.sparse_vectors.keys().cloned().collect(),
+            dir: dir.map(Path::to_path_buf),
+        }
+    }
+
+    /// The same layout with every column in memory.
+    #[must_use]
+    pub fn in_memory(mut self) -> Self {
+        self.main.on_disk = false;
+        for (_, c) in &mut self.named {
+            c.on_disk = false;
+        }
+        self.dir = None;
+        self
+    }
+
+    /// The same layout in memory only, keeping columns that are on disk
+    /// as exact floats so they can be moved back without loss.
+    #[must_use]
+    pub fn staging(mut self) -> Self {
+        for c in std::iter::once(&mut self.main).chain(self.named.iter_mut().map(|(_, c)| c)) {
+            if c.on_disk {
+                *c = ColumnSpec::new(c.dim);
             }
         }
+        self.dir = None;
+        self
+    }
+
+    /// The main column's dimension.
+    pub fn dim(&self) -> usize {
+        self.main.dim
+    }
+
+    /// Name of the main column, for its file and in state files.
+    pub const MAIN: &'static str = "";
+
+    pub(crate) fn column_file_name(name: &str) -> &str {
+        if name.is_empty() { "main" } else { name }
     }
 }
 
-fn encode(x: f32, min: f32, step: f32) -> u8 {
-    if step > 0.0 {
-        ((f64::from(x) - f64::from(min)) / f64::from(step))
-            .round()
-            .clamp(0.0, 255.0) as u8
-    } else {
-        0
-    }
-}
-
-#[inline]
-fn decode(code: u8, min: f32, step: f32) -> f32 {
-    min + f32::from(code) * step
-}
-
-/// `[min, step]` for quantizing `v`. Of the step nearest `(max - min) / 255`
-/// and its closest neighbouring floats, takes the one that reconstructs `v`
-/// best. Decoded vectors thus get back exactly the step they were decoded
-/// with, and checkpoints (which store decoded values) reload unchanged.
-fn scalar_range(v: &[f32]) -> (f32, f32) {
-    let Some(min) = v.iter().copied().reduce(f32::min) else {
-        return (0.0, 0.0);
-    };
-    let max = v.iter().copied().fold(min, f32::max);
-    // In f64: `max - min` can overflow f32 for finite inputs.
-    let base = ((f64::from(max) - f64::from(min)) / 255.0) as f32;
-    if base == 0.0 {
-        return (min, 0.0);
-    }
-    let error = |step: f32| -> f64 {
-        v.iter()
-            .map(|&x| {
-                let d = f64::from(decode(encode(x, min, step), min, step)) - f64::from(x);
-                d * d
-            })
-            .sum()
-    };
-    let candidates = [
-        base,
-        base.next_down(),
-        base.next_up(),
-        base.next_down().next_down(),
-        base.next_up().next_up(),
-    ];
-    let mut best = (base, error(base));
-    for step in candidates
-        .into_iter()
-        .skip(1)
-        .filter(|s| *s > 0.0 && s.is_finite())
-    {
-        let e = error(step);
-        if e < best.1 {
-            best = (step, e);
-        }
-    }
-    (min, best.0)
-}
-
-/// Quantizes `v` to codes whose decoded values quantize to themselves, so
-/// checkpoints (which store decoded values) reload exactly. Usually the first
-/// encoding already is such a fixed point; rare ones get there in a round
-/// or two, moving each value by far less than the quantization error.
-fn quantize(v: &[f32]) -> (f32, f32, Vec<u8>) {
-    let mut values = v.to_vec();
-    let mut decoded = Vec::with_capacity(v.len());
-    let mut last = (0.0, 0.0, Vec::new());
-    for _ in 0..8 {
-        let (min, step) = scalar_range(&values);
-        let codes: Vec<u8> = values.iter().map(|&x| encode(x, min, step)).collect();
-        decoded.clear();
-        decoded.extend(codes.iter().map(|&c| decode(c, min, step)));
-        let (min2, step2) = scalar_range(&decoded);
-        let stable = decoded
-            .iter()
-            .all(|&x| decode(encode(x, min2, step2), min2, step2) == x);
-        last = (min, step, codes);
-        if stable {
-            break;
-        }
-        std::mem::swap(&mut values, &mut decoded);
-    }
-    last
-}
-
-thread_local! {
-    /// Decoding space for quantized distances, so searches do not allocate.
-    static SCRATCH: RefCell<Vec<f32>> = const { RefCell::new(Vec::new()) };
-}
-
-#[derive(Debug, Clone)]
+/// Points: ids, metadata and vectors, one slot each. Deleting a point
+/// leaves a tombstone in its slot until the collection is compacted.
+#[derive(Debug)]
 pub struct VectorStore {
-    dim: usize,
-    data: Vectors,
+    main: VectorColumn,
+    /// Sorted by name.
+    named: Vec<(String, VectorColumn)>,
+    /// Sorted by name; empty vectors for points without one (and tombstones).
+    sparse: Vec<(String, Vec<SparseVector>)>,
+    dir: Option<PathBuf>,
     ids: Vec<String>,
     metadata: Vec<Option<Value>>,
     alive: Vec<bool>,
@@ -133,10 +106,34 @@ pub struct VectorStore {
 }
 
 impl VectorStore {
+    /// An in-memory store of main vectors only.
     pub fn new(dim: usize) -> Self {
+        Self::from_columns(VectorColumn::new(dim), Vec::new(), &[], None)
+    }
+
+    /// An empty store laid out as `spec` says.
+    pub fn with_spec(spec: &StoreSpec) -> Result<Self> {
+        let dir = spec.dir.as_deref();
+        let main = VectorColumn::create(spec.main, dir, StoreSpec::column_file_name(StoreSpec::MAIN))?;
+        let named = spec
+            .named
+            .iter()
+            .map(|(name, c)| Ok((name.clone(), VectorColumn::create(*c, dir, name)?)))
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self::from_columns(main, named, &spec.sparse, spec.dir.clone()))
+    }
+
+    fn from_columns(
+        main: VectorColumn,
+        named: Vec<(String, VectorColumn)>,
+        sparse: &[String],
+        dir: Option<PathBuf>,
+    ) -> Self {
         Self {
-            dim,
-            data: Vectors::F32(Vec::new()),
+            main,
+            named,
+            sparse: sparse.iter().map(|name| (name.clone(), Vec::new())).collect(),
+            dir,
             ids: Vec::new(),
             metadata: Vec::new(),
             alive: Vec::new(),
@@ -144,47 +141,75 @@ impl VectorStore {
         }
     }
 
-    /// An empty store holding vectors the same way as this one.
-    pub fn empty_like(&self) -> Self {
-        let mut store = Self::new(self.dim);
-        if self.is_quantized() {
-            store.quantize();
+    /// Assembles a store from decoded parts. A later live slot with the same
+    /// id as an earlier one wins, as it would have through `push`.
+    pub(crate) fn from_parts(
+        rows: Vec<(bool, String, Option<Value>)>,
+        main: VectorColumn,
+        named: Vec<(String, VectorColumn)>,
+        sparse: Vec<(String, Vec<SparseVector>)>,
+        dir: Option<PathBuf>,
+    ) -> Self {
+        let mut store = Self::from_columns(main, named, &[], dir);
+        store.sparse = sparse;
+        for (alive, id, metadata) in rows {
+            let slot = store.ids.len() as u32;
+            if alive {
+                if let Some(old) = store.id_to_slot.insert(id.clone(), slot) {
+                    store.alive[old as usize] = false;
+                    store.metadata[old as usize] = None;
+                }
+                store.metadata.push(metadata);
+            } else {
+                store.metadata.push(None);
+            }
+            store.ids.push(id);
+            store.alive.push(alive);
         }
+        let slots = store.ids.len();
+        debug_assert!(store.columns().all(|(_, c)| c.slots() == slots));
+        debug_assert!(store.sparse.iter().all(|(_, v)| v.len() == slots));
         store
     }
 
-    /// Switches to scalar-quantized storage, re-encoding what is held.
-    /// Decoded vectors re-encode to the same codes, so this is idempotent.
-    pub fn quantize(&mut self) {
-        let Vectors::F32(data) = &mut self.data else {
-            return;
-        };
-        let data = std::mem::take(data);
-        let mut q = Vectors::Sq8 {
-            codes: Vec::with_capacity(data.len()),
-            ranges: Vec::with_capacity(self.ids.len()),
-        };
-        for v in data.chunks_exact(self.dim.max(1)) {
-            q.push(v);
+    /// The layout of this store.
+    pub fn spec(&self) -> StoreSpec {
+        StoreSpec {
+            main: self.main.spec(),
+            named: self.named.iter().map(|(n, c)| (n.clone(), c.spec())).collect(),
+            sparse: self.sparse.iter().map(|(n, _)| n.clone()).collect(),
+            dir: self.dir.clone(),
         }
-        self.data = q;
+    }
+
+    /// An empty store holding vectors the same way as this one.
+    pub fn empty_like(&self) -> Result<Self> {
+        Self::with_spec(&self.spec())
+    }
+
+    /// Where on-disk columns keep their files.
+    pub fn dir(&self) -> Option<&Path> {
+        self.dir.as_deref()
+    }
+
+    /// Switches the main column to scalar-quantized codes.
+    pub fn quantize(&mut self) {
+        self.main.quantize();
     }
 
     pub fn is_quantized(&self) -> bool {
-        matches!(self.data, Vectors::Sq8 { .. })
+        self.main.is_quantized()
     }
 
-    /// Bytes of memory the vectors take, tombstones included.
+    /// Bytes of memory the vectors of every column take, tombstones included.
     pub fn vector_bytes(&self) -> usize {
-        match &self.data {
-            Vectors::F32(data) => data.len() * 4,
-            Vectors::Sq8 { codes, ranges } => codes.len() + ranges.len() * 8,
-        }
+        self.columns().map(|(_, c)| c.vector_bytes()).sum()
     }
 
+    /// The main column's dimension.
     #[inline]
     pub fn dim(&self) -> usize {
-        self.dim
+        self.main.dim()
     }
 
     #[inline]
@@ -202,45 +227,73 @@ impl VectorStore {
         self.slots() - self.live()
     }
 
-    /// The vector in `slot`; decoded (so allocated) when quantized.
+    /// The main vectors.
+    pub fn main(&self) -> &VectorColumn {
+        &self.main
+    }
+
+    /// The main column for `None`, else the named one.
+    pub fn column(&self, using: Option<&str>) -> Option<&VectorColumn> {
+        match using {
+            None => Some(&self.main),
+            Some(name) => self
+                .named
+                .binary_search_by(|(n, _)| n.as_str().cmp(name))
+                .ok()
+                .map(|i| &self.named[i].1),
+        }
+    }
+
+    /// Replaces a column with one holding the same vectors differently, and
+    /// returns the old one.
+    pub fn replace_column(&mut self, using: Option<&str>, column: VectorColumn) -> VectorColumn {
+        let slot = match using {
+            None => &mut self.main,
+            Some(name) => {
+                let i = self
+                    .named
+                    .binary_search_by(|(n, _)| n.as_str().cmp(name))
+                    .expect("replacing an existing column");
+                &mut self.named[i].1
+            }
+        };
+        assert_eq!(column.slots(), slot.slots(), "replacement column has every slot");
+        std::mem::replace(slot, column)
+    }
+
+    /// Every dense column with its name ([`StoreSpec::MAIN`] for the main one).
+    pub fn columns(&self) -> impl Iterator<Item = (&str, &VectorColumn)> {
+        std::iter::once((StoreSpec::MAIN, &self.main)).chain(self.named.iter().map(|(n, c)| (n.as_str(), c)))
+    }
+
+    /// The named dense columns, sorted by name.
+    pub fn named(&self) -> impl Iterator<Item = (&str, &VectorColumn)> {
+        self.named.iter().map(|(n, c)| (n.as_str(), c))
+    }
+
+    /// Every slot's vector of the sparse column `name`.
+    pub fn sparse(&self, name: &str) -> Option<&[SparseVector]> {
+        self.sparse
+            .iter()
+            .find(|(n, _)| n == name)
+            .map(|(_, v)| v.as_slice())
+    }
+
+    /// The sparse columns, sorted by name.
+    pub fn sparse_columns(&self) -> impl Iterator<Item = (&str, &[SparseVector])> {
+        self.sparse.iter().map(|(n, v)| (n.as_str(), v.as_slice()))
+    }
+
+    /// The main vector in `slot`; decoded (so allocated) when quantized.
     #[inline]
     pub fn vector(&self, slot: u32) -> Cow<'_, [f32]> {
-        let start = slot as usize * self.dim;
-        match &self.data {
-            Vectors::F32(data) => Cow::Borrowed(&data[start..start + self.dim]),
-            Vectors::Sq8 { codes, ranges } => {
-                let mut out = Vec::with_capacity(self.dim);
-                self.decode_into(codes, ranges, slot, &mut out);
-                Cow::Owned(out)
-            }
-        }
+        self.main.vector(slot)
     }
 
-    fn decode_into(&self, codes: &[u8], ranges: &[[f32; 2]], slot: u32, out: &mut Vec<f32>) {
-        let start = slot as usize * self.dim;
-        let [min, step] = ranges[slot as usize];
-        out.clear();
-        out.extend(
-            codes[start..start + self.dim]
-                .iter()
-                .map(|&c| decode(c, min, step)),
-        );
-    }
-
-    /// `metric`'s distance from `query` to the vector in `slot`, without
-    /// allocating for quantized vectors.
+    /// `metric`'s distance from `query` to the main vector in `slot`.
     #[inline]
     pub fn distance(&self, metric: Metric, query: &[f32], slot: u32) -> f32 {
-        match &self.data {
-            Vectors::F32(data) => {
-                let start = slot as usize * self.dim;
-                metric.distance(query, &data[start..start + self.dim])
-            }
-            Vectors::Sq8 { codes, ranges } => SCRATCH.with_borrow_mut(|buf| {
-                self.decode_into(codes, ranges, slot, buf);
-                metric.distance(query, buf)
-            }),
-        }
+        self.main.distance(metric, query, slot)
     }
 
     #[inline]
@@ -258,7 +311,7 @@ impl VectorStore {
         self.metadata[slot as usize].as_ref()
     }
 
-    /// Replaces a live slot's metadata in place; its vector and slot stay.
+    /// Replaces a live slot's metadata in place; its vectors and slot stay.
     pub fn set_metadata(&mut self, slot: u32, metadata: Option<Value>) {
         debug_assert!(self.is_alive(slot));
         self.metadata[slot as usize] = metadata;
@@ -268,11 +321,61 @@ impl VectorStore {
         self.id_to_slot.get(id).copied()
     }
 
+    /// The point in `slot`, with all its vectors.
+    pub fn point(&self, slot: u32) -> Point {
+        Point {
+            id: self.id(slot).to_owned(),
+            vector: self.vector(slot).into_owned(),
+            vectors: self
+                .named
+                .iter()
+                .map(|(n, c)| (n.clone(), c.vector(slot).into_owned()))
+                .collect(),
+            sparse_vectors: self
+                .sparse
+                .iter()
+                .filter(|(_, v)| !v[slot as usize].is_empty())
+                .map(|(n, v)| (n.clone(), v[slot as usize].clone()))
+                .collect(),
+            metadata: self.metadata(slot).cloned(),
+        }
+    }
+
+    /// Adds a point with main vectors only, replacing any live point with its id.
     pub fn push(&mut self, id: String, vector: &[f32], metadata: Option<Value>) -> u32 {
-        debug_assert_eq!(vector.len(), self.dim);
+        debug_assert!(self.named.is_empty());
+        let mut point = Point::new(id, Vec::new());
+        point.metadata = metadata;
+        self.push_with(point, vector)
+    }
+
+    /// Adds a point, replacing any live point with its id. It must carry
+    /// every named vector of the store and no sparse vector it lacks.
+    pub fn push_point(&mut self, mut point: Point) -> u32 {
+        let vector = std::mem::take(&mut point.vector);
+        self.push_with(point, &vector)
+    }
+
+    fn push_with(&mut self, point: Point, vector: &[f32]) -> u32 {
+        let Point {
+            id,
+            mut vectors,
+            mut sparse_vectors,
+            metadata,
+            ..
+        } = point;
         self.remove(&id);
         let slot = u32::try_from(self.slots()).expect("collection exceeds u32::MAX slots");
-        self.data.push(vector);
+        self.main.push(vector);
+        for (name, column) in &mut self.named {
+            let v = vectors.remove(name).expect("point has every named vector");
+            column.push(&v);
+        }
+        debug_assert!(vectors.is_empty(), "point has unknown named vectors");
+        for (name, column) in &mut self.sparse {
+            column.push(sparse_vectors.remove(name).unwrap_or_default());
+        }
+        debug_assert!(sparse_vectors.is_empty(), "point has unknown sparse vectors");
         self.id_to_slot.insert(id.clone(), slot);
         self.ids.push(id);
         self.metadata.push(metadata);
@@ -280,18 +383,14 @@ impl VectorStore {
         slot
     }
 
-    pub fn push_tombstone(&mut self, id: String, vector: &[f32]) {
-        self.data.push(vector);
-        self.ids.push(id);
-        self.metadata.push(None);
-        self.alive.push(false);
-    }
-
     pub fn remove(&mut self, id: &str) -> bool {
         match self.id_to_slot.remove(id) {
             Some(slot) => {
                 self.alive[slot as usize] = false;
                 self.metadata[slot as usize] = None;
+                for (_, column) in &mut self.sparse {
+                    column[slot as usize] = SparseVector::default();
+                }
                 true
             }
             None => false,
@@ -309,6 +408,19 @@ impl VectorStore {
 
     pub fn live_slots(&self) -> impl Iterator<Item = u32> + '_ {
         (0..self.slots() as u32).filter(|&s| self.is_alive(s))
+    }
+
+    /// Makes on-disk columns durable.
+    pub fn sync(&self) -> Result<()> {
+        for (_, c) in self.columns() {
+            c.sync()?;
+        }
+        Ok(())
+    }
+
+    /// The files of on-disk columns.
+    pub fn disk_files(&self) -> Vec<&Path> {
+        self.columns().filter_map(|(_, c)| c.disk_path()).collect()
     }
 }
 
@@ -351,88 +463,26 @@ mod tests {
     }
 
     #[test]
-    fn quantized_vectors_stay_close_and_reencode_identically() {
-        let vectors = [
-            vec![0.1, -0.7, 0.3, 0.25],
-            vec![5.0, 5.0, 5.0, 5.0],
-            vec![-1e30, 1e30, 0.0, 3.0],
-            vec![1e-8, -1e-8, 0.0, 2e-8],
-        ];
-        let mut s = VectorStore::new(4);
-        for (i, v) in vectors.iter().enumerate() {
-            s.push(i.to_string(), v, None);
-        }
-        let exact = s.clone();
-        s.quantize();
-        assert!(s.is_quantized());
-        assert_eq!(s.vector_bytes(), 4 * (4 + 8));
-        for (i, v) in vectors.iter().enumerate() {
-            let got = s.vector(i as u32);
-            let (lo, hi) = v
-                .iter()
-                .fold((f32::MAX, f32::MIN), |(l, h), &x| (l.min(x), h.max(x)));
-            let tolerance = (f64::from(hi) - f64::from(lo)) / 510.0 * 1.001;
-            for (a, b) in v.iter().zip(got.iter()) {
-                assert!(
-                    (f64::from(*a) - f64::from(*b)).abs() <= tolerance,
-                    "{v:?} -> {got:?}"
-                );
-                assert!(b.is_finite());
-            }
-            let q = [0.2, 0.1, -0.3, 0.5];
-            assert_eq!(
-                s.distance(Metric::Euclidean, &q, i as u32),
-                Metric::Euclidean.distance(&q, &got)
-            );
-        }
+    fn named_and_sparse_columns() {
+        let config = CollectionConfig::new(2)
+            .with_vector("title", VectorConfig::new(3))
+            .with_sparse_vector("text", Default::default());
+        let mut s = VectorStore::with_spec(&StoreSpec::for_config(&config, None)).unwrap();
+        let p = Point::new("a", vec![1.0, 0.0])
+            .with_vector("title", vec![0.0, 1.0, 2.0])
+            .with_sparse_vector("text", SparseVector::new(vec![3], vec![1.5]));
+        let slot = s.push_point(p.clone());
+        assert_eq!(s.point(slot), p);
+        assert_eq!(*s.column(Some("title")).unwrap().vector(slot), [0.0, 1.0, 2.0]);
+        assert!(s.column(Some("nope")).is_none());
+        assert_eq!(s.sparse("text").unwrap()[slot as usize].indices, [3]);
 
-        // Writing decoded values back (as checkpoints do) changes nothing.
-        let mut again = VectorStore::new(4);
-        for slot in 0..s.slots() as u32 {
-            again.push(slot.to_string(), &s.vector(slot), None);
-        }
-        again.quantize();
-        for slot in 0..s.slots() as u32 {
-            assert_eq!(again.vector(slot), s.vector(slot));
-        }
-
-        let mut fresh = s.empty_like();
-        fresh.push("x".into(), exact.vector(0).as_ref(), None);
-        assert!(fresh.is_quantized());
-        assert_eq!(fresh.vector(0), s.vector(0));
-    }
-
-    #[test]
-    fn reencoding_decoded_vectors_is_exact() {
-        let mut state = 7u64;
-        let mut next = || {
-            state = state
-                .wrapping_mul(6364136223846793005)
-                .wrapping_add(1442695040888963407);
-            (state >> 11) as f64 / (1u64 << 53) as f64
-        };
-        let mut misses = 0;
-        let trials = 50_000;
-        for _ in 0..trials {
-            let scale = 10f64.powf(next() * 16.0 - 8.0);
-            let offset = if next() < 0.3 {
-                (next() - 0.5) * scale * 100.0
-            } else {
-                0.0
-            };
-            let v: Vec<f32> = (0..16)
-                .map(|_| (offset + (next() - 0.5) * scale) as f32)
-                .collect();
-            let (min, step, codes) = quantize(&v);
-            let decoded: Vec<f32> = codes.iter().map(|&c| decode(c, min, step)).collect();
-            let (min2, step2) = scalar_range(&decoded);
-            let again: Vec<f32> = decoded
-                .iter()
-                .map(|&x| decode(encode(x, min2, step2), min2, step2))
-                .collect();
-            misses += usize::from(again != decoded);
-        }
-        assert_eq!(misses, 0, "{misses} of {trials} vectors changed when re-encoded");
+        let bare = Point::new("b", vec![0.0, 1.0]).with_vector("title", vec![1.0; 3]);
+        let b = s.push_point(bare.clone());
+        assert_eq!(s.point(b), bare, "missing sparse vectors stay missing");
+        s.remove("a");
+        assert!(s.sparse("text").unwrap()[slot as usize].is_empty());
+        assert_eq!(s.spec(), StoreSpec::for_config(&config, None));
     }
 
     #[test]

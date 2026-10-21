@@ -3,7 +3,9 @@ use std::path::{Path, PathBuf};
 use quiver_types::Result;
 
 use crate::wal::Wal;
-use crate::{Mutation, Op, Recovered, StorageEngine, StorageKind, StorageOptions, VectorStore, state};
+use crate::{
+    Mutation, Op, Recovered, StorageEngine, StorageKind, StorageOptions, StoreSpec, VectorStore, state,
+};
 
 const STATE_FILE: &str = "state.bin";
 const WAL_FILE: &str = "wal.log";
@@ -38,9 +40,11 @@ impl StorageEngine for FileEngine {
         StorageKind::File
     }
 
-    fn recover(&mut self, dim: usize) -> Result<Recovered> {
-        let (store, index) =
-            state::read_file(&self.dir.join(STATE_FILE), dim)?.unwrap_or((VectorStore::new(dim), None));
+    fn recover(&mut self, spec: &StoreSpec) -> Result<Recovered> {
+        let (store, index) = match state::read_file(&self.dir.join(STATE_FILE), spec)? {
+            Some(state) => state,
+            None => (VectorStore::with_spec(spec)?, None),
+        };
         Ok(Recovered {
             store,
             index,

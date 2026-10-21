@@ -14,6 +14,12 @@ const BUCKETS: [f64; 12] = [
     0.001, 0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5, 5.0, 10.0,
 ];
 
+/// A collection, as the per-collection gauges see it.
+struct Row {
+    info: quiver_types::CollectionInfo,
+    vector_bytes: usize,
+}
+
 /// Identifies one request series.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct Key {
@@ -71,43 +77,43 @@ impl Metrics {
             db.snapshots().is_ok()
         );
 
-        let collections = db.list_collections();
+        let collections: Vec<Row> = db
+            .collections()
+            .iter()
+            .map(|c| Row {
+                info: c.info(),
+                vector_bytes: c.vector_bytes(),
+            })
+            .collect();
         gauge_header(w, "quiver_collections", "Number of collections.");
         let _ = writeln!(w, "quiver_collections {}", collections.len());
 
-        type Field = fn(&quiver_types::CollectionInfo) -> u64;
+        type Field = fn(&Row) -> u64;
         let per_collection: [(&str, &str, Field); 4] = [
             (
                 "quiver_collection_points",
                 "Live points in the collection.",
-                |c| c.count as u64,
+                |c| c.info.count as u64,
             ),
             (
                 "quiver_collection_tombstones",
                 "Deleted slots awaiting compaction.",
-                |c| c.tombstones as u64,
+                |c| c.info.tombstones as u64,
             ),
-            ("quiver_collection_dimension", "Vector dimension.", |c| {
-                c.config.dimension as u64
+            ("quiver_collection_dimension", "Main vector dimension.", |c| {
+                c.info.config.dimension as u64
             }),
             (
                 "quiver_collection_vector_bytes",
-                "Memory held by stored vectors, tombstones included.",
-                |c| {
-                    let slots = c.count + c.tombstones;
-                    match c.config.quantization {
-                        // A code byte per component plus a [min, step] pair.
-                        quiver_types::Quantization::Scalar => (slots * (c.config.dimension + 8)) as u64,
-                        quiver_types::Quantization::None => (slots * c.config.dimension * 4) as u64,
-                    }
-                },
+                "Memory held by stored vectors, tombstones included (not vectors kept on disk).",
+                |c| c.vector_bytes as u64,
             ),
         ];
         for (name, help, field) in per_collection {
             gauge_header(w, name, help);
             for c in &collections {
                 // Collection names are [A-Za-z0-9_-], so they need no escaping.
-                let _ = writeln!(w, "{name}{{collection=\"{}\"}} {}", c.name, field(c));
+                let _ = writeln!(w, "{name}{{collection=\"{}\"}} {}", c.info.name, field(c));
             }
         }
 

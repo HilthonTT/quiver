@@ -1,6 +1,6 @@
 use rayon::prelude::*;
 
-use quiver_storage::VectorStore;
+use quiver_storage::VectorColumn;
 use quiver_types::Metric;
 
 use crate::{Accept, Neighbor, TopK};
@@ -19,7 +19,7 @@ impl FlatIndex {
         Self { metric }
     }
 
-    pub fn search(&self, query: &[f32], k: usize, store: &VectorStore, accept: Accept<'_>) -> Vec<Neighbor> {
+    pub fn search(&self, query: &[f32], k: usize, store: &VectorColumn, accept: Accept<'_>) -> Vec<Neighbor> {
         let n = store.slots();
         let scan = |range: std::ops::Range<usize>| {
             let mut top = TopK::new(k);
