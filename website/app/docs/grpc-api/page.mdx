@@ -75,6 +75,7 @@ With keys configured, a call with no key may only use `Health`; any other RPC an
 | RPC | Role | Notes |
 | --- | --- | --- |
 | `Health` | public | `{status, version}` |
+| `Info` | read | `{version, storage, snapshots_enabled, collections, points}` |
 | `ListCollections`, `GetCollection` | read | |
 | `CreateCollection` | write | `metric` unset means cosine; `index` unset means HNSW with defaults |
 | `DropCollection`, `Flush` | write | |
@@ -90,8 +91,9 @@ With keys configured, a call with no key may only use `Health`; any other RPC an
 | `Recommend` | read | `positive`, `negative`, and the search options |
 | `CreateSnapshot`, `DeleteSnapshot`, `RestoreSnapshot` | write | `RestoreSnapshot` takes `id`, `collection` (empty: the original) and `replace` |
 | `ListSnapshots` | read | `collection`, empty for all |
-
-Snapshot download and upload, and fetching one snapshot's manifest, are REST only.
+| `GetSnapshot` | read | `id` |
+| `DownloadSnapshot` | read | `id`; streams the archive as `SnapshotChunk`s of up to 1 MiB |
+| `UploadSnapshot` | write | a client stream of `SnapshotChunk`s, in order, up to 16 GiB in all; `INVALID_ARGUMENT` if the archive is not a valid snapshot |
 
 ## Status codes
 

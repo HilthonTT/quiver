@@ -11,6 +11,8 @@ package quiver.v1;
 
 service Quiver {
   rpc Health(HealthRequest) returns (HealthResponse);
+  // Server-wide statistics.
+  rpc Info(InfoRequest) returns (InfoResponse);
 
   // Collections
   rpc ListCollections(ListCollectionsRequest) returns (ListCollectionsResponse);
@@ -36,8 +38,13 @@ service Quiver {
   // Snapshots
   rpc CreateSnapshot(CreateSnapshotRequest) returns (SnapshotInfo);
   rpc ListSnapshots(ListSnapshotsRequest) returns (ListSnapshotsResponse);
+  rpc GetSnapshot(GetSnapshotRequest) returns (SnapshotInfo);
   rpc DeleteSnapshot(DeleteSnapshotRequest) returns (DeleteSnapshotResponse);
   rpc RestoreSnapshot(RestoreSnapshotRequest) returns (CollectionInfo);
+  // Streams the archive (.tar.gz) in chunks.
+  rpc DownloadSnapshot(DownloadSnapshotRequest) returns (stream SnapshotChunk);
+  // Adds an archive, sent in chunks, to the registry. Needs a read-write key.
+  rpc UploadSnapshot(stream SnapshotChunk) returns (SnapshotInfo);
 }
 
 enum Metric {
@@ -113,6 +120,16 @@ message HealthRequest {}
 message HealthResponse {
   string status = 1;
   string version = 2;
+}
+
+message InfoRequest {}
+message InfoResponse {
+  string version = 1;
+  // Storage engine for new collections: "file", "rocksdb" or "memory".
+  string storage = 2;
+  bool snapshots_enabled = 3;
+  uint64 collections = 4;
+  uint64 points = 5;
 }
 
 message ListCollectionsRequest {}
@@ -281,10 +298,23 @@ message ListSnapshotsResponse {
   repeated SnapshotInfo snapshots = 1;
 }
 
+message GetSnapshotRequest {
+  string id = 1;
+}
+
 message DeleteSnapshotRequest {
   string id = 1;
 }
 message DeleteSnapshotResponse {}
+
+message DownloadSnapshotRequest {
+  string id = 1;
+}
+
+// A piece of a snapshot archive, in order.
+message SnapshotChunk {
+  bytes data = 1;
+}
 
 message RestoreSnapshotRequest {
   string id = 1;

@@ -230,3 +230,62 @@ async fn unreachable_server_is_a_transport_error() {
     let c = Client::new("http://127.0.0.1:9").unwrap();
     assert!(matches!(c.info().await, Err(ClientError::Http(_))));
 }
+
+#[tokio::test]
+async fn batch_lookup_maintenance_and_snapshot_transfer() {
+    let (a, b) = (start(KeyStore::default()).await, start(KeyStore::default()).await);
+    let (ca, cb) = (Client::new(&a.url).unwrap(), Client::new(&b.url).unwrap());
+    ca.create_collection("docs", &CollectionConfig::new(2))
+        .await
+        .unwrap();
+    ca.upsert(
+        "docs",
+        vec![
+            point("a", vec![0.0, 1.0]),
+            point("b", vec![1.0, 0.0]),
+            point("c", vec![1.0, 1.0]),
+        ],
+    )
+    .await
+    .unwrap();
+
+    let ids = ["c".to_owned(), "missing".to_owned(), "a".to_owned()];
+    let points = ca.get_points("docs", &ids, false).await.unwrap();
+    let got: Vec<&str> = points.iter().map(|p| p.id.as_str()).collect();
+    assert_eq!(got, ["c", "a"]);
+    assert!(points[0].vector.is_empty());
+
+    let batch = ca
+        .search_batch(
+            "docs",
+            &[
+                SearchRequest::new(vec![0.0, 1.0], 1),
+                SearchRequest::by_id("b", 2),
+            ],
+        )
+        .await
+        .unwrap();
+    assert_eq!(batch.len(), 2);
+    assert_eq!(batch[0][0].id, "a");
+    assert!(batch[1].iter().all(|h| h.id != "b"));
+
+    ca.delete_points("docs", &["c".to_owned()]).await.unwrap();
+    ca.flush("docs").await.unwrap();
+    assert_eq!(ca.compact("docs").await.unwrap().count, 2);
+
+    let snap = ca.create_snapshot("docs").await.unwrap();
+    assert_eq!(ca.get_snapshot(&snap.manifest.id).await.unwrap(), snap);
+    let archive = ca.download_snapshot(&snap.manifest.id).await.unwrap();
+    assert_eq!(archive.len() as u64, snap.archive_bytes);
+
+    let uploaded = cb.upload_snapshot(archive).await.unwrap();
+    assert_eq!(uploaded.manifest, snap.manifest);
+    let restored = cb.restore_snapshot(&snap.manifest.id, None, false).await.unwrap();
+    assert_eq!(restored.count, 2);
+
+    let bad = cb.upload_snapshot(b"junk".to_vec()).await.unwrap_err();
+    assert!(
+        matches!(bad, ClientError::Api { status, .. } if status == 400),
+        "{bad:?}"
+    );
+}

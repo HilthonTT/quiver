@@ -152,4 +152,4 @@ True
 2
 ```
 
-gRPC has `CreateSnapshot`, `ListSnapshots`, `DeleteSnapshot` and `RestoreSnapshot`; downloads and uploads are REST only.
+gRPC has `CreateSnapshot`, `ListSnapshots`, `GetSnapshot`, `DeleteSnapshot` and `RestoreSnapshot`, and moves archives in 1 MiB chunks with `DownloadSnapshot` (a server stream) and `UploadSnapshot` (a client stream).

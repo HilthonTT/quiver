@@ -1,5 +1,6 @@
 //! The `quiver.v1.Quiver` service implementation.
 
+use std::pin::Pin;
 use std::sync::Arc;
 
 use quiver_db::auth::Role;
@@ -7,7 +8,9 @@ use quiver_db::{
     Collection, Database, Filter, MetadataMode, Point, PointSelector, RestoreOptions, SearchHit,
     SearchOptions,
 };
-use tonic::{Request, Response, Status};
+use tokio::io::AsyncWriteExt;
+use tokio_stream::{Stream, StreamExt};
+use tonic::{Request, Response, Status, Streaming};
 
 use crate::auth::require;
 use crate::convert::*;
@@ -21,6 +24,12 @@ const MAX_BATCH: usize = 256;
 const MAX_SCROLL: usize = 10_000;
 /// Upper bound on ids in one GetPoints or DeletePoints request.
 const MAX_IDS: usize = 10_000;
+/// Largest snapshot upload accepted, as in the REST API.
+const MAX_UPLOAD_BYTES: u64 = 16 << 30;
+/// Size of the chunks a download is sent in.
+const DOWNLOAD_CHUNK_BYTES: usize = 1 << 20;
+
+type ChunkStream = Pin<Box<dyn Stream<Item = Result<pb::SnapshotChunk, Status>> + Send>>;
 
 type Rpc<T> = Result<Response<T>, Status>;
 
@@ -139,12 +148,44 @@ fn run_search(
     }
 }
 
+/// A staging file that is deleted when dropped, unless taken.
+struct StagingFile(Option<std::path::PathBuf>);
+
+impl Drop for StagingFile {
+    fn drop(&mut self) {
+        if let Some(path) = self.0.take() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
 #[tonic::async_trait]
 impl pb::quiver_server::Quiver for QuiverService {
+    type DownloadSnapshotStream = ChunkStream;
     async fn health(&self, _req: Request<pb::HealthRequest>) -> Rpc<pb::HealthResponse> {
         Ok(Response::new(pb::HealthResponse {
             status: "ok".into(),
             version: env!("CARGO_PKG_VERSION").into(),
+        }))
+    }
+
+    async fn info(&self, req: Request<pb::InfoRequest>) -> Rpc<pb::InfoResponse> {
+        require(&req, Role::ReadOnly)?;
+        let (collections, storage, snapshots_enabled) = self
+            .blocking(|db| {
+                Ok((
+                    db.list_collections(),
+                    db.options().storage.to_string(),
+                    db.snapshots().is_ok(),
+                ))
+            })
+            .await?;
+        Ok(Response::new(pb::InfoResponse {
+            version: env!("CARGO_PKG_VERSION").into(),
+            storage,
+            snapshots_enabled,
+            collections: collections.len() as u64,
+            points: collections.iter().map(|c| c.count as u64).sum(),
         }))
     }
 
@@ -416,6 +457,13 @@ impl pb::quiver_server::Quiver for QuiverService {
         }))
     }
 
+    async fn get_snapshot(&self, req: Request<pb::GetSnapshotRequest>) -> Rpc<pb::SnapshotInfo> {
+        require(&req, Role::ReadOnly)?;
+        let id = req.into_inner().id;
+        let info = self.blocking(move |db| db.snapshots()?.get(&id)).await?;
+        Ok(Response::new(snapshot_to_pb(info)))
+    }
+
     async fn delete_snapshot(
         &self,
         req: Request<pb::DeleteSnapshotRequest>,
@@ -439,5 +487,72 @@ impl pb::quiver_server::Quiver for QuiverService {
             })
             .await?;
         Ok(Response::new(info_to_pb(info)))
+    }
+
+    async fn download_snapshot(
+        &self,
+        req: Request<pb::DownloadSnapshotRequest>,
+    ) -> Rpc<Self::DownloadSnapshotStream> {
+        require(&req, Role::ReadOnly)?;
+        let id = req.into_inner().id;
+        let path = self
+            .blocking(move |db| {
+                let reg = db.snapshots()?;
+                // `get` checks that the archive exists and is readable.
+                reg.get(&id)?;
+                reg.path(&id)
+            })
+            .await?;
+        let file = tokio::fs::File::open(&path)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let chunks = tokio_util::io::ReaderStream::with_capacity(file, DOWNLOAD_CHUNK_BYTES).map(|chunk| {
+            chunk
+                .map(|data| pb::SnapshotChunk { data: data.to_vec() })
+                .map_err(|e| Status::internal(e.to_string()))
+        });
+        Ok(Response::new(Box::pin(chunks)))
+    }
+
+    async fn upload_snapshot(&self, req: Request<Streaming<pb::SnapshotChunk>>) -> Rpc<pb::SnapshotInfo> {
+        require(&req, Role::ReadWrite)?;
+        let mut chunks = req.into_inner();
+        let path = self.db.snapshots().map_err(status)?.staging_path();
+        // Removed on every early return, and if the client goes away mid-upload.
+        let mut staging = StagingFile(Some(path.clone()));
+        let mut file = tokio::fs::File::create(&path)
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        let mut received = 0u64;
+        while let Some(chunk) = chunks.next().await {
+            let chunk = chunk?;
+            received = received.saturating_add(chunk.data.len() as u64);
+            if received > MAX_UPLOAD_BYTES {
+                return Err(Status::resource_exhausted(format!(
+                    "snapshot uploads are limited to {MAX_UPLOAD_BYTES} bytes"
+                )));
+            }
+            file.write_all(&chunk.data)
+                .await
+                .map_err(|e| Status::internal(e.to_string()))?;
+        }
+        file.sync_all()
+            .await
+            .map_err(|e| Status::internal(e.to_string()))?;
+        drop(file);
+        // `import_staged` removes the staging file itself from here on.
+        staging.0 = None;
+        let db = Arc::clone(&self.db);
+        let imported = tokio::task::spawn_blocking(move || db.snapshots()?.import_staged(&path))
+            .await
+            .map_err(|e| Status::internal(format!("task failed: {e}")))?;
+        // The archive came from the client: an unreadable one is its error.
+        let info = imported.map_err(|e| match e {
+            quiver_db::Error::Corrupt(_) | quiver_db::Error::Serde(_) | quiver_db::Error::Io(_) => {
+                Status::invalid_argument(format!("invalid snapshot: {e}"))
+            }
+            other => status(other),
+        })?;
+        Ok(Response::new(snapshot_to_pb(info)))
     }
 }

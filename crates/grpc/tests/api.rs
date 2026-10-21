@@ -470,3 +470,122 @@ async fn search_by_id_recommend_and_max_distance() {
         .unwrap_err();
     assert_eq!(err.code(), Code::InvalidArgument);
 }
+
+fn with_snapshots(dir: &std::path::Path) -> Arc<Database> {
+    let db = Database::new(
+        None,
+        quiver_db::DbOptions {
+            storage: quiver_db::StorageKind::Memory,
+            snapshot_dir: Some(dir.to_path_buf()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    db.create_collection("c", CollectionConfig::new(2).index(IndexConfig::Flat))
+        .unwrap()
+        .upsert((0..500).map(|i| Point::new(format!("p{i}"), vec![i as f32, 1.0])))
+        .unwrap();
+    Arc::new(db)
+}
+
+#[tokio::test]
+async fn snapshots_download_and_upload_in_chunks() {
+    let (dir_a, dir_b) = (tempfile::tempdir().unwrap(), tempfile::tempdir().unwrap());
+    let a = with_snapshots(dir_a.path());
+    let snap = a.create_snapshot("c").unwrap();
+    let mut client_a = start(a, keys()).await;
+
+    // Read-only keys may download.
+    let mut stream = client_a
+        .download_snapshot(with_auth(
+            pb::DownloadSnapshotRequest {
+                id: snap.manifest.id.clone(),
+            },
+            "x-api-key",
+            "ro-secret",
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    let mut archive = Vec::new();
+    while let Some(chunk) = stream.message().await.unwrap() {
+        archive.extend_from_slice(&chunk.data);
+    }
+    assert_eq!(archive.len() as u64, snap.archive_bytes);
+
+    let got = client_a
+        .get_snapshot(with_auth(
+            pb::GetSnapshotRequest {
+                id: snap.manifest.id.clone(),
+            },
+            "x-api-key",
+            "ro-secret",
+        ))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(got.points, 500);
+    let info = client_a
+        .info(with_auth(pb::InfoRequest {}, "x-api-key", "ro-secret"))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(
+        (info.collections, info.points, info.snapshots_enabled),
+        (1, 500, true)
+    );
+    assert_eq!(info.storage, "memory");
+
+    let missing = client_a
+        .download_snapshot(with_auth(
+            pb::DownloadSnapshotRequest {
+                id: "00000000-0000-4000-8000-000000000000".into(),
+            },
+            "x-api-key",
+            "ro-secret",
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(missing.code(), Code::NotFound);
+
+    let b = with_snapshots(dir_b.path());
+    let mut client_b = start(Arc::clone(&b), keys()).await;
+    let chunks = |bytes: Vec<u8>| {
+        let chunks: Vec<pb::SnapshotChunk> = bytes
+            .chunks(1000)
+            .map(|c| pb::SnapshotChunk { data: c.to_vec() })
+            .collect();
+        tokio_stream::iter(chunks)
+    };
+
+    // Uploading needs a read-write key.
+    let denied = client_b
+        .upload_snapshot(with_auth(chunks(archive.clone()), "x-api-key", "ro-secret"))
+        .await
+        .unwrap_err();
+    assert_eq!(denied.code(), Code::PermissionDenied);
+
+    let info = client_b
+        .upload_snapshot(with_auth(chunks(archive.clone()), "x-api-key", "rw-secret"))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(info.id, snap.manifest.id);
+    assert_eq!(info.points, 500);
+    assert_eq!(b.list_snapshots(None).unwrap().len(), 1);
+
+    let bad = client_b
+        .upload_snapshot(with_auth(
+            chunks(b"not an archive".to_vec()),
+            "x-api-key",
+            "rw-secret",
+        ))
+        .await
+        .unwrap_err();
+    assert_eq!(bad.code(), Code::InvalidArgument);
+    assert_eq!(
+        std::fs::read_dir(dir_b.path()).unwrap().count(),
+        1,
+        "failed uploads leave nothing behind"
+    );
+}

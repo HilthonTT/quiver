@@ -46,6 +46,8 @@ const RESERVED_POINT_IDS: [&str; 6] = [".", "..", "lookup", "delete", "count", "
 
 /// Overall limit for one request, matching the Python client.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// Limit for snapshot downloads and uploads, which move whole archives.
+const TRANSFER_TIMEOUT: Duration = Duration::from_secs(30 * 60);
 
 /// Server-wide statistics from `GET /info`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -280,6 +282,19 @@ impl Client {
         Ok(())
     }
 
+    /// Writes the collection's pending changes to disk.
+    pub async fn flush(&self, name: &str) -> Result<()> {
+        let path = format!("collections/{}/flush", seg(name));
+        Self::send(self.request(Method::POST, &path)).await?;
+        Ok(())
+    }
+
+    /// Drops deleted points from storage and rebuilds the index.
+    pub async fn compact(&self, name: &str) -> Result<CollectionInfo> {
+        let path = format!("collections/{}/compact", seg(name));
+        Self::json(self.request(Method::POST, &path)).await
+    }
+
     pub async fn upsert(&self, collection: &str, points: Vec<PointInput>) -> Result<UpsertResult> {
         let path = format!("collections/{}/points", seg(collection));
         Self::json(
@@ -307,6 +322,18 @@ impl Client {
             Err(ClientError::Api { ref code, .. }) if code == "point_not_found" => Ok(None),
             Err(e) => Err(e),
         }
+    }
+
+    /// Fetches several points; missing ids are skipped.
+    pub async fn get_points(
+        &self,
+        collection: &str,
+        ids: &[String],
+        with_vectors: bool,
+    ) -> Result<Vec<Point>> {
+        let path = format!("collections/{}/points/lookup", seg(collection));
+        let body = json!({ "ids": ids, "with_vectors": with_vectors });
+        Self::field(self.request(Method::POST, &path).json(&body), "points").await
     }
 
     /// Lists up to `limit` points with ids after `cursor` (from the start if
@@ -384,6 +411,21 @@ impl Client {
         Self::field(self.request(Method::POST, &path).json(req), "results").await
     }
 
+    /// Runs several searches in one request; results are in request order.
+    pub async fn search_batch(
+        &self,
+        collection: &str,
+        reqs: &[SearchRequest],
+    ) -> Result<Vec<Vec<SearchHit>>> {
+        let path = format!("collections/{}/search/batch", seg(collection));
+        Self::field(
+            self.request(Method::POST, &path)
+                .json(&json!({ "searches": reqs })),
+            "results",
+        )
+        .await
+    }
+
     /// Recommends points from positive (and optionally negative) examples,
     /// which are left out of the results.
     pub async fn recommend(&self, collection: &str, req: &RecommendRequest) -> Result<Vec<SearchHit>> {
@@ -403,6 +445,28 @@ impl Client {
             req = req.query(&[("collection", c)]);
         }
         Self::field(req, "snapshots").await
+    }
+
+    pub async fn get_snapshot(&self, id: &str) -> Result<SnapshotInfo> {
+        Self::json(self.request(Method::GET, &format!("snapshots/{}", seg(id)))).await
+    }
+
+    /// Downloads a snapshot archive (`.tar.gz`).
+    pub async fn download_snapshot(&self, id: &str) -> Result<Vec<u8>> {
+        let path = format!("snapshots/{}/download", seg(id));
+        let req = self.request(Method::GET, &path).timeout(TRANSFER_TIMEOUT);
+        Ok(Self::send(req).await?.bytes().await?.to_vec())
+    }
+
+    /// Uploads an archive from [`Self::download_snapshot`], possibly taken on
+    /// another server. Restore it afterwards with [`Self::restore_snapshot`].
+    pub async fn upload_snapshot(&self, archive: Vec<u8>) -> Result<SnapshotInfo> {
+        let req = self
+            .request(Method::POST, "snapshots")
+            .header(reqwest::header::CONTENT_TYPE, "application/gzip")
+            .timeout(TRANSFER_TIMEOUT)
+            .body(archive);
+        Self::json(req).await
     }
 
     /// Restores a snapshot, under `name` if given, else its original name.
