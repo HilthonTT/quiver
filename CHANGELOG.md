@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Search by point id** (`{"id": ...}` instead of a vector; the point itself is left out) and **recommendations** from
   positive and negative example ids (`POST /collections/{name}/recommend`, gRPC `Recommend`). Missing ids give `point_not_found`.
 - **`max_distance`** on searches and recommendations drops hits farther than a threshold.
+- **Prometheus metrics** at `GET /metrics` (read role): per-collection gauges and request counts and latencies for REST and gRPC.
 - **`quiver --healthcheck`** probes a running server and exits 0 or 1.
 - gRPC `Info`, `GetSnapshot`, `DownloadSnapshot` (server stream) and `UploadSnapshot` (client stream), so gRPC covers the REST API.
 - Rust client: `get_points`, `search_batch`, `flush`, `compact`, `get_snapshot`, `download_snapshot` and `upload_snapshot`.

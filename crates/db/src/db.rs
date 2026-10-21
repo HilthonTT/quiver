@@ -9,6 +9,7 @@ use quiver_storage::{StorageKind, StorageOptions, state};
 use quiver_types::{CollectionConfig, CollectionInfo, Error, Result, validate_name};
 
 use crate::collection::{Collection, Env, META_FILE};
+use crate::metrics::Metrics;
 
 const COLLECTIONS_DIR: &str = "collections";
 const SNAPSHOTS_DIR: &str = "snapshots";
@@ -48,6 +49,7 @@ pub struct Database {
     options: DbOptions,
     env: Env,
     collections: RwLock<BTreeMap<String, Arc<Collection>>>,
+    metrics: Metrics,
     /// Held for the lifetime of the database to keep other processes out.
     _lock: Option<File>,
 }
@@ -133,6 +135,7 @@ impl Database {
             options,
             env,
             collections: RwLock::new(collections),
+            metrics: Metrics::default(),
             _lock: lock,
         })
     }
@@ -143,6 +146,11 @@ impl Database {
 
     pub fn options(&self) -> &DbOptions {
         &self.options
+    }
+
+    /// Request metrics, recorded by the REST and gRPC layers.
+    pub fn metrics(&self) -> &Metrics {
+        &self.metrics
     }
 
     fn collection_dir(&self, name: &str) -> Option<PathBuf> {

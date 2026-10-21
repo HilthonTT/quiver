@@ -123,4 +123,4 @@ The ids `.`, `..`, `lookup`, `delete`, `count` and `metadata` cannot be addresse
 - `Http(reqwest::Error)` — no usable answer: connection refused, a timeout, a body that does not decode.
 - `InvalidUrl(String)` — `Client::new` could not use the URL.
 
-The Rust client covers the whole REST API.
+The Rust client covers the whole REST API except `GET /metrics`.

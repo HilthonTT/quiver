@@ -589,3 +589,23 @@ async fn snapshots_download_and_upload_in_chunks() {
         "failed uploads leave nothing behind"
     );
 }
+
+#[tokio::test]
+async fn rpcs_are_recorded_in_metrics() {
+    let db = seeded();
+    let mut client = start(Arc::clone(&db), KeyStore::default()).await;
+    client.health(pb::HealthRequest {}).await.unwrap();
+    let missing = client
+        .get_collection(pb::GetCollectionRequest { name: "nope".into() })
+        .await
+        .unwrap_err();
+    assert_eq!(missing.code(), Code::NotFound);
+
+    let text = db.metrics().render(&db);
+    for line in [
+        "quiver_requests_total{api=\"grpc\",route=\"/quiver.v1.Quiver/Health\",status=\"0\"} 1",
+        "quiver_requests_total{api=\"grpc\",route=\"/quiver.v1.Quiver/GetCollection\",status=\"5\"} 1",
+    ] {
+        assert!(text.contains(line), "missing `{line}` in:\n{text}");
+    }
+}

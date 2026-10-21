@@ -1,0 +1,47 @@
+export const metadata = { title: "Monitoring" };
+
+# Monitoring
+
+The REST API serves metrics for both APIs at `GET /metrics`, in the [Prometheus text format](https://prometheus.io/docs/instrumenting/exposition_formats/). With API keys configured it needs one, like any read route: collection names appear in the labels.
+
+```bash
+curl -H "Authorization: Bearer $QUIVER_API_KEY" localhost:6900/metrics
+```
+
+```text
+quiver_info{version="0.1.0",storage="file",snapshots_enabled="true"} 1
+quiver_collections 1
+quiver_collection_points{collection="books"} 2
+quiver_requests_total{api="http",route="/collections/{name}/search",status="200"} 1
+quiver_request_duration_seconds_bucket{api="http",route="/collections/{name}/search",status="200",le="0.001"} 1
+```
+
+## What is reported
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `quiver_info` | gauge | `version`, `storage`, `snapshots_enabled` | always 1 |
+| `quiver_collections` | gauge | | number of collections |
+| `quiver_collection_points` | gauge | `collection` | live points |
+| `quiver_collection_tombstones` | gauge | `collection` | deleted slots awaiting [compaction](/docs/collections/#deleting-and-compaction) |
+| `quiver_collection_dimension` | gauge | `collection` | vector dimension |
+| `quiver_collection_vector_bytes` | gauge | `collection` | memory held by vectors, tombstones included |
+| `quiver_requests_total` | counter | `api`, `route`, `status` | requests served |
+| `quiver_request_duration_seconds` | histogram | `api`, `route`, `status` | time to produce a response; buckets from 1 ms to 10 s |
+
+`api` is `http` or `grpc`. For REST, `route` is the route template (`/collections/{name}/points/{id}`, never a real id), or `unmatched` for unknown paths, and `status` is the HTTP status code. For gRPC, `route` is the method path (`/quiver.v1.Quiver/Search`) and `status` the numeric gRPC code (`0` is OK, `5` NOT_FOUND). A streaming download that fails after its first chunk still counts as `0`. Requests rejected for a missing or wrong key are counted too.
+
+Counters start from zero when the server starts. With `--disable-http` there is no `/metrics`; gRPC calls are still counted, but nothing serves them.
+
+## Scraping
+
+```yaml
+scrape_configs:
+  - job_name: quiver
+    authorization:
+      credentials: your-read-only-key
+    static_configs:
+      - targets: ["quiver:6900"]
+```
+
+Give Prometheus a read-only key.

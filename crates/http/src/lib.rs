@@ -50,6 +50,7 @@ pub fn router(db: Arc<Database>, options: HttpOptions) -> Router {
         .route("/snapshots", get(list_snapshots))
         .route("/snapshots/{id}", get(get_snapshot))
         .route("/snapshots/{id}/download", get(download_snapshot))
+        .route("/metrics", get(metrics))
         .route_layer(guard(Role::ReadOnly));
 
     let upload_limit = options.max_upload_bytes.unwrap_or(16 << 30);
@@ -80,7 +81,8 @@ pub fn router(db: Arc<Database>, options: HttpOptions) -> Router {
         .merge(read)
         .merge(write)
         .fallback(|| async { ApiError::not_found("no such route") })
-        .with_state(db)
+        .with_state(Arc::clone(&db))
+        .layer(middleware::from_fn_with_state(db, track))
         .layer(DefaultBodyLimit::max(options.max_body_bytes.unwrap_or(64 << 20)))
         .layer(TraceLayer::new_for_http());
 
@@ -89,6 +91,24 @@ pub fn router(db: Arc<Database>, options: HttpOptions) -> Router {
     }
 
     app
+}
+
+/// Records every request's latency and status under its route template.
+async fn track(
+    axum::extract::State(db): axum::extract::State<Arc<Database>>,
+    req: axum::extract::Request,
+    next: middleware::Next,
+) -> axum::response::Response {
+    let route = req
+        .extensions()
+        .get::<axum::extract::MatchedPath>()
+        .map_or("unmatched", |p| p.as_str())
+        .to_owned();
+    let start = std::time::Instant::now();
+    let res = next.run(req).await;
+    db.metrics()
+        .record("http", &route, res.status().as_str(), start.elapsed());
+    res
 }
 
 /// Serves `router` on `listener` until `shutdown` resolves.

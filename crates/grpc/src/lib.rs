@@ -1,5 +1,6 @@
 mod auth;
 mod convert;
+mod metrics;
 mod service;
 use std::sync::Arc;
 
@@ -8,6 +9,7 @@ use quiver_db::auth::KeyStore;
 use tokio_stream::wrappers::TcpListenerStream;
 
 pub use auth::Authenticator;
+pub use metrics::MetricsLayer;
 pub use service::QuiverService;
 
 #[allow(missing_docs, unused_qualifications, clippy::all, clippy::pedantic)]
@@ -40,6 +42,7 @@ pub async fn serve(
     shutdown: impl Future<Output = ()> + Send,
 ) -> Result<(), tonic::transport::Error> {
     tonic::transport::Server::builder()
+        .layer(MetricsLayer::new(Arc::clone(&db)))
         .add_service(service(db, keys))
         .serve_with_incoming_shutdown(TcpListenerStream::new(listener), shutdown)
         .await

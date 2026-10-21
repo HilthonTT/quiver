@@ -8,7 +8,7 @@ With no API keys configured, authentication is off and anyone who can reach the 
 
 | Role | May |
 | --- | --- |
-| `readonly` | every read: list and get collections and points, count, search, recommend, list and download snapshots, `/info` |
+| `readonly` | every read: list and get collections and points, count, search, recommend, list and download snapshots, `/info` and `/metrics` |
 | `readwrite` | everything, including creating and dropping collections, writes, snapshots, uploads and restores |
 
 `GET /`, `GET /health` and the gRPC `Health` call need no key. Give read-only keys to anything that only queries.

@@ -1,5 +1,6 @@
 mod collection;
 mod db;
+pub mod metrics;
 mod scheduler;
 
 pub use collection::{Collection, ScrollPage};

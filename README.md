@@ -18,6 +18,7 @@ Documentation: **[hilthontt.github.io/quiver](https://hilthontt.github.io/quiver
 - **Storage:** a checksummed WAL with checkpoints by default, RocksDB behind a feature flag, or in-memory.
 - **Snapshots:** SHA-256-verified `.tar.gz` backups with retention and periodic scheduling.
 - **Access:** REST and gRPC with read-only and read-write API keys, plus a Python client, a Rust client, a terminal UI, or the `quiver-db` crate embedded in-process.
+- **Operations:** Prometheus metrics at `/metrics`, and `quiver --healthcheck` for container health checks.
 
 ## Quick start
 

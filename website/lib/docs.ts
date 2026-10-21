@@ -48,6 +48,7 @@ export const docs: DocSection[] = [
     title: "Operating Quiver",
     links: [
       { title: "Configuration", href: "/docs/configuration/" },
+      { title: "Monitoring", href: "/docs/monitoring/" },
       { title: "Storage & durability", href: "/docs/storage/" },
       { title: "Security & API keys", href: "/docs/security/" },
       { title: "Docker", href: "/docs/docker/" },

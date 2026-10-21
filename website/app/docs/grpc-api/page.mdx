@@ -95,6 +95,8 @@ With keys configured, a call with no key may only use `Health`; any other RPC an
 | `DownloadSnapshot` | read | `id`; streams the archive as `SnapshotChunk`s of up to 1 MiB |
 | `UploadSnapshot` | write | a client stream of `SnapshotChunk`s, in order, up to 16 GiB in all; `INVALID_ARGUMENT` if the archive is not a valid snapshot |
 
+Every RPC is counted in the REST API's [`/metrics`](/docs/monitoring/).
+
 ## Status codes
 
 | Status | When |

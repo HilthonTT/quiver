@@ -1003,3 +1003,61 @@ async fn read_only_keys_can_count_and_recommend_but_not_change_points() {
         .await;
     assert_eq!(status, StatusCode::FORBIDDEN);
 }
+
+#[tokio::test]
+async fn metrics_count_requests_by_route_template() {
+    let app = TestApp::seeded().await;
+    app.post("/collections/books/search", json!({"vector": [1.0, 0.0], "k": 1}))
+        .await;
+    app.get("/collections/books/points/nope").await;
+    app.get("/no/such/route").await;
+
+    let res = app
+        .raw(Request::get("/metrics").body(Body::empty()).unwrap())
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+    assert!(
+        res.headers()["content-type"]
+            .to_str()
+            .unwrap()
+            .starts_with("text/plain; version=0.0.4")
+    );
+    let text = String::from_utf8(res.into_body().collect().await.unwrap().to_bytes().to_vec()).unwrap();
+    for line in [
+        "quiver_collection_points{collection=\"books\"}",
+        "quiver_requests_total{api=\"http\",route=\"/collections/{name}/search\",status=\"200\"} 1",
+        "quiver_requests_total{api=\"http\",route=\"/collections/{name}/points/{id}\",status=\"404\"} 1",
+        "quiver_requests_total{api=\"http\",route=\"unmatched\",status=\"404\"} 1",
+    ] {
+        assert!(text.contains(line), "missing `{line}` in:\n{text}");
+    }
+    assert!(!text.contains("/nope"), "raw paths must not become labels");
+}
+
+#[tokio::test]
+async fn metrics_need_a_key_when_auth_is_on() {
+    let keys = KeyStore::new(vec![ApiKey {
+        name: "viewer".into(),
+        role: Role::ReadOnly,
+        key: "ro".into(),
+    }])
+    .unwrap();
+    let mut app = TestApp::with_options(HttpOptions {
+        keys: Arc::new(keys),
+        ..Default::default()
+    });
+    assert_eq!(
+        app.call(Method::GET, "/metrics", None).await.0,
+        StatusCode::UNAUTHORIZED
+    );
+    app.key = Some("ro");
+    let res = app
+        .raw(
+            Request::get("/metrics")
+                .header("authorization", "Bearer ro")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    assert_eq!(res.status(), StatusCode::OK);
+}

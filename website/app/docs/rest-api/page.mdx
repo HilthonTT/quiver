@@ -11,6 +11,7 @@ JSON over HTTP, on port 6900 by default. Request bodies must be sent with `conte
 | `GET /` | public | `{"name", "version", "docs"}` |
 | `GET /health` | public | `{"status": "ok", "version"}` |
 | `GET /info` | read | `{"version", "storage", "snapshots_enabled", "collections", "points"}` |
+| `GET /metrics` | read | Prometheus text format; see [monitoring](/docs/monitoring/) |
 
 ```bash
 curl localhost:6900/health

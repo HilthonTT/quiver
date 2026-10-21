@@ -85,6 +85,19 @@ pub async fn info(State(db): State<AppState>) -> ApiResult<Json<Value>> {
     })))
 }
 
+/// Prometheus text-format metrics.
+pub async fn metrics(State(db): State<AppState>) -> ApiResult<Response> {
+    let text = {
+        let db = Arc::clone(&db);
+        blocking(move || Ok(db.metrics().render(&db))).await?
+    };
+    Ok((
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4; charset=utf-8")],
+        text,
+    )
+        .into_response())
+}
+
 /// The fields of [`CollectionConfig`] spelled out (rather than flattened)
 /// so that unknown or misspelt fields are rejected.
 #[derive(Debug, Deserialize)]
