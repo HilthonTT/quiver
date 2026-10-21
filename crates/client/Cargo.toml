@@ -19,6 +19,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 
 [dev-dependencies]
+rcgen.workspace = true
 quiver-db.workspace = true
 quiver-http.workspace = true
 tempfile.workspace = true

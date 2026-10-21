@@ -37,6 +37,9 @@ pub enum ClientError {
     /// The base URL could not be parsed.
     #[error("invalid server URL `{0}`")]
     InvalidUrl(String),
+    /// [`TlsOptions`] holds no usable certificate.
+    #[error("invalid TLS settings: {0}")]
+    Tls(String),
 }
 
 pub type Result<T> = std::result::Result<T, ClientError>;
@@ -48,6 +51,26 @@ const RESERVED_POINT_IDS: [&str; 6] = [".", "..", "lookup", "delete", "count", "
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 /// Limit for snapshot downloads and uploads, which move whole archives.
 const TRANSFER_TIMEOUT: Duration = Duration::from_secs(30 * 60);
+
+/// TLS settings for [`Client::with_tls`].
+#[derive(Clone, Default)]
+pub struct TlsOptions {
+    /// PEM certificates to trust in addition to the public roots, e.g. the
+    /// CA that signed the server's certificate.
+    pub ca_pem: Option<Vec<u8>>,
+    /// A PEM client certificate chain followed by its private key, for
+    /// servers started with `--tls-client-ca`.
+    pub identity_pem: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for TlsOptions {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TlsOptions")
+            .field("ca_pem", &self.ca_pem.is_some())
+            .field("identity_pem", &self.identity_pem.is_some())
+            .finish()
+    }
+}
 
 /// Server-wide statistics from `GET /info`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -191,17 +214,41 @@ impl Client {
         Self::with_timeout(base_url.as_ref(), REQUEST_TIMEOUT)
     }
 
+    /// Creates a client for an `https://` server whose certificate is signed
+    /// by a private CA, or that wants a client certificate (mutual TLS).
+    pub fn with_tls(base_url: impl AsRef<str>, tls: &TlsOptions) -> Result<Self> {
+        Self::build(base_url.as_ref(), REQUEST_TIMEOUT, Some(tls))
+    }
+
     fn with_timeout(raw: &str, timeout: Duration) -> Result<Self> {
+        Self::build(raw, timeout, None)
+    }
+
+    fn build(raw: &str, timeout: Duration, tls: Option<&TlsOptions>) -> Result<Self> {
         // A trailing slash makes `Url::join` append rather than replace the last segment.
         let base = Url::parse(&format!("{}/", raw.trim_end_matches('/')))
             .map_err(|_| ClientError::InvalidUrl(raw.to_owned()))?;
         if !matches!(base.scheme(), "http" | "https") {
             return Err(ClientError::InvalidUrl(raw.to_owned()));
         }
-        let http = reqwest::Client::builder()
+        let mut http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
-            .timeout(timeout)
-            .build()?;
+            .timeout(timeout);
+        if let Some(tls) = tls {
+            if let Some(pem) = &tls.ca_pem {
+                let certs = reqwest::Certificate::from_pem_bundle(pem)?;
+                if certs.is_empty() {
+                    return Err(ClientError::Tls("no certificate in ca_pem".into()));
+                }
+                for cert in certs {
+                    http = http.add_root_certificate(cert);
+                }
+            }
+            if let Some(pem) = &tls.identity_pem {
+                http = http.identity(reqwest::Identity::from_pem(pem)?);
+            }
+        }
+        let http = http.build()?;
         Ok(Self {
             base,
             http,

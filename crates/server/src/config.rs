@@ -7,6 +7,22 @@ use clap::builder::BoolishValueParser;
 use quiver_db::auth::{ApiKey, KeyStore, Role};
 use quiver_db::{DbOptions, StorageKind};
 
+/// The contents of the TLS files.
+#[derive(Clone)]
+pub struct TlsPem {
+    pub cert: Vec<u8>,
+    pub key: Vec<u8>,
+    pub client_ca: Option<Vec<u8>>,
+}
+
+impl std::fmt::Debug for TlsPem {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("TlsPem")
+            .field("client_ca", &self.client_ca.is_some())
+            .finish_non_exhaustive()
+    }
+}
+
 /// Quiver: a vector database server with REST and gRPC APIs.
 #[derive(Debug, Clone, Parser)]
 #[command(version, about, max_term_width = 100)]
@@ -76,6 +92,19 @@ pub struct Config {
     /// Maximum REST request body size in MiB.
     #[arg(long, env = "QUIVER_MAX_BODY_MB", default_value_t = 64)]
     pub max_body_mb: usize,
+
+    /// PEM certificate chain to serve both APIs over TLS (needs --tls-key).
+    #[arg(long, env = "QUIVER_TLS_CERT", requires = "tls_key")]
+    pub tls_cert: Option<PathBuf>,
+
+    /// PEM private key for --tls-cert.
+    #[arg(long, env = "QUIVER_TLS_KEY", requires = "tls_cert")]
+    pub tls_key: Option<PathBuf>,
+
+    /// PEM CA certificates; clients must present a certificate one of them
+    /// signed (mutual TLS). Needs --tls-cert.
+    #[arg(long, env = "QUIVER_TLS_CLIENT_CA", requires = "tls_cert")]
+    pub tls_client_ca: Option<PathBuf>,
 
     /// Allow cross-origin REST requests from any origin.
     #[arg(long, env = "QUIVER_CORS", value_parser = BoolishValueParser::new())]
@@ -151,6 +180,20 @@ impl Config {
         (self.snapshot_interval > 0).then(|| Duration::from_secs(self.snapshot_interval))
     }
 
+    /// The PEM files named by the --tls-* options, if TLS is enabled.
+    pub fn tls_pem(&self) -> Result<Option<TlsPem>, String> {
+        let (Some(cert), Some(key)) = (&self.tls_cert, &self.tls_key) else {
+            return Ok(None);
+        };
+        let read =
+            |path: &PathBuf| std::fs::read(path).map_err(|e| format!("cannot read {}: {e}", path.display()));
+        Ok(Some(TlsPem {
+            cert: read(cert)?,
+            key: read(key)?,
+            client_ca: self.tls_client_ca.as_ref().map(read).transpose()?,
+        }))
+    }
+
     /// Builds the key store from --keys-file, --api-key and --readonly-api-key.
     pub fn key_store(&self) -> Result<KeyStore, String> {
         let mut keys = match &self.keys_file {
@@ -177,13 +220,13 @@ impl Config {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Serialises tests that read or change `QUIVER_*` environment variables.
     static ENV: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
+    pub(crate) fn env_lock() -> std::sync::MutexGuard<'static, ()> {
         ENV.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
@@ -260,6 +303,16 @@ mod tests {
             .validate()
             .is_ok()
         );
+    }
+
+    #[test]
+    fn tls_options_go_together() {
+        assert!(Config::try_parse_from(["quiver", "--tls-cert", "c.pem"]).is_err());
+        assert!(Config::try_parse_from(["quiver", "--tls-key", "k.pem"]).is_err());
+        assert!(Config::try_parse_from(["quiver", "--tls-client-ca", "ca.pem"]).is_err());
+        let c = parse(&["--tls-cert", "c.pem", "--tls-key", "k.pem"]);
+        assert!(c.tls_pem().is_err(), "missing files");
+        assert!(parse(&[]).tls_pem().unwrap().is_none());
     }
 
     #[test]

@@ -7,7 +7,7 @@ mod ui;
 use std::time::Duration;
 
 use clap::Parser;
-use quiver_client::Client;
+use quiver_client::{Client, TlsOptions};
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
 
 use crate::actions::Executor;
@@ -26,6 +26,15 @@ struct Args {
     #[arg(long, env = "QUIVER_API_KEY", hide_env_values = true)]
     api_key: Option<String>,
 
+    /// PEM CA certificate to trust for an `https://` server with a private CA.
+    #[arg(long, env = "QUIVER_CA_CERT")]
+    ca_cert: Option<std::path::PathBuf>,
+
+    /// PEM client certificate followed by its key, for servers that require
+    /// one (mutual TLS).
+    #[arg(long, env = "QUIVER_CLIENT_CERT")]
+    client_cert: Option<std::path::PathBuf>,
+
     /// OpenAI-compatible embeddings endpoint, e.g.
     /// http://localhost:11434/v1/embeddings (Ollama). Enables text input.
     #[arg(long, env = "QUIVER_EMBEDDING_URL")]
@@ -42,7 +51,11 @@ struct Args {
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let args = Args::parse();
-    let client = Client::new(args.url.clone())?.with_api_key(args.api_key.unwrap_or_default());
+    let tls = TlsOptions {
+        ca_pem: args.ca_cert.as_ref().map(std::fs::read).transpose()?,
+        identity_pem: args.client_cert.as_ref().map(std::fs::read).transpose()?,
+    };
+    let client = Client::with_tls(&args.url, &tls)?.with_api_key(args.api_key.unwrap_or_default());
     let embedder = args
         .embedding_url
         .map(|url| {

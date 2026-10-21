@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **TLS** for both APIs: `--tls-cert`/`--tls-key` (PEM; `QUIVER_TLS_CERT`/`QUIVER_TLS_KEY`), and `--tls-client-ca` to require
+  client certificates (mutual TLS). REST negotiates HTTP/2 or HTTP/1.1 over ALPN; handshakes run concurrently and time out
+  after 10 s. `quiver --healthcheck` probes over TLS. The server warns when API keys are configured on a non-loopback
+  address without TLS. Clients: Rust `Client::with_tls` with `TlsOptions`, Python `ca_cert=`/`client_cert=`/`client_key=`,
+  TUI `--ca-cert`/`--client-cert`.
 - **Metadata updates** without resending vectors: merge (RFC 7386 JSON Merge Patch) or replace, by ids or by filter.
   REST `POST /collections/{name}/points/metadata`, gRPC `UpdateMetadata`, `Collection::update_metadata`, Rust and Python `update_metadata`.
 - **Count and delete by filter**: `POST /collections/{name}/points/count`, `points/delete` with `{"filter": ...}`
@@ -29,6 +34,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `quiver_grpc::serve` takes an optional `ServerTlsConfig`.
 - **Breaking:** listing points pages by id cursor instead of offset, so changes between pages never skip or repeat points.
   Points come back in ascending id order; REST `offset`/`next_offset` are now `cursor`/`next_cursor` (an `offset` parameter is rejected),
   likewise in gRPC `Scroll`, `Collection::scroll` and the Rust client. In Python, `scroll(cursor=, limit=)` returns one `ScrollPage`

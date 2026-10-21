@@ -1,5 +1,6 @@
 pub mod error;
 pub mod handlers;
+pub mod tls;
 
 mod auth;
 
@@ -15,6 +16,8 @@ use tower_http::cors::CorsLayer;
 use tower_http::trace::TraceLayer;
 
 use crate::error::ApiError;
+
+pub use tls::{TlsListener, serve_tls, server_config as tls_config};
 
 /// Settings that shape the HTTP layer.
 #[derive(Debug, Clone, Default)]

@@ -41,6 +41,40 @@ fn point(id: &str, vector: Vec<f32>) -> PointInput {
 }
 
 #[tokio::test]
+async fn talks_to_a_tls_server_with_a_private_ca() {
+    use quiver_client::TlsOptions;
+    let key = rcgen::KeyPair::generate().unwrap();
+    let cert = rcgen::CertificateParams::new(vec!["localhost".into()])
+        .unwrap()
+        .self_signed(&key)
+        .unwrap();
+    let config =
+        quiver_http::tls_config(cert.pem().as_bytes(), key.serialize_pem().as_bytes(), None).unwrap();
+    let router = quiver_http::router(Arc::new(Database::in_memory()), HttpOptions::default());
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let url = format!("https://localhost:{}", listener.local_addr().unwrap().port());
+    tokio::spawn(quiver_http::serve_tls(
+        listener,
+        config,
+        router,
+        std::future::pending(),
+    ));
+
+    assert!(Client::new(&url).unwrap().info().await.is_err(), "untrusted");
+    let tls = TlsOptions {
+        ca_pem: Some(cert.pem().into_bytes()),
+        ..Default::default()
+    };
+    let info = Client::with_tls(&url, &tls).unwrap().info().await.unwrap();
+    assert_eq!(info.collections, 0);
+    let bad = TlsOptions {
+        ca_pem: Some(b"not a certificate".to_vec()),
+        ..Default::default()
+    };
+    assert!(Client::with_tls(&url, &bad).is_err());
+}
+
+#[tokio::test]
 async fn full_lifecycle() {
     let server = start(KeyStore::default()).await;
     let c = Client::new(&server.url).unwrap();

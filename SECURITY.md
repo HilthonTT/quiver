@@ -19,11 +19,14 @@ Quiver is pre-1.0. Only the latest release and `main` receive security fixes.
   disabled and anyone who can reach the ports can read and write. The server logs a warning
   when it listens on a non-loopback address without keys. Use `--keys-file`, `--api-key` or
   `--readonly-api-key`, and give read-only keys to anything that only queries.
-- **Terminate TLS in front of Quiver.** The REST (`6900`) and gRPC (`6901`) APIs speak plain
-  HTTP; put a reverse proxy or load balancer with TLS in front of them, or keep them on a
-  private network. The default bind address is `127.0.0.1`; the Docker image binds `0.0.0.0`.
-- **Protect the keys file and data directory.** Keys are stored in plain text in the keys file;
-  restrict its permissions. The data and snapshot directories hold all stored vectors and metadata.
+- **Use TLS off localhost.** Without it the REST (`6900`) and gRPC (`6901`) APIs speak plain
+  HTTP, so API keys cross the network in the clear. Start the server with `--tls-cert` and
+  `--tls-key` (PEM files) to serve both APIs over TLS, add `--tls-client-ca` to require client
+  certificates, or terminate TLS in a reverse proxy and keep Quiver on a private network. The
+  server logs a warning when it has API keys but no TLS on a non-loopback address. The default
+  bind address is `127.0.0.1`; the Docker image binds `0.0.0.0`.
+- **Protect the keys file, TLS key and data directory.** Keys are stored in plain text in the
+  keys file; restrict its permissions, and those of the TLS private key. The data and snapshot directories hold all stored vectors and metadata.
 - **Leave `--cors` off** unless a browser application on another origin needs direct access.
 - **Size limits:** JSON bodies are capped at 64 MiB; lower it with `--max-body-mb` if your
   workload allows. Snapshot uploads are capped at 16 GiB and need a read-write key.

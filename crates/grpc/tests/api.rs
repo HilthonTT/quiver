@@ -15,9 +15,50 @@ async fn start(db: Arc<Database>, keys: KeyStore) -> QuiverClient<Channel> {
         listener,
         db,
         Arc::new(keys),
+        None,
         std::future::pending(),
     ));
     QuiverClient::connect(format!("http://{addr}")).await.unwrap()
+}
+
+#[tokio::test]
+async fn serves_over_tls() {
+    use tonic::transport::{Certificate, ClientTlsConfig};
+    let key = rcgen::KeyPair::generate().unwrap();
+    let cert = rcgen::CertificateParams::new(vec!["localhost".into()])
+        .unwrap()
+        .self_signed(&key)
+        .unwrap();
+    let tls = quiver_grpc::tls_config(cert.pem().as_bytes(), key.serialize_pem().as_bytes(), None);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let port = listener.local_addr().unwrap().port();
+    tokio::spawn(quiver_grpc::serve(
+        listener,
+        Arc::new(Database::in_memory()),
+        Arc::new(KeyStore::default()),
+        Some(tls),
+        std::future::pending(),
+    ));
+
+    let channel = Channel::from_shared(format!("https://localhost:{port}"))
+        .unwrap()
+        .tls_config(
+            ClientTlsConfig::new()
+                .ca_certificate(Certificate::from_pem(cert.pem()))
+                .domain_name("localhost"),
+        )
+        .unwrap()
+        .connect()
+        .await
+        .unwrap();
+    let mut client = QuiverClient::new(channel);
+    client.health(pb::HealthRequest {}).await.unwrap();
+
+    // Plain-text clients get nowhere.
+    let plain = QuiverClient::connect(format!("http://127.0.0.1:{port}")).await;
+    if let Ok(mut plain) = plain {
+        assert!(plain.health(pb::HealthRequest {}).await.is_err());
+    }
 }
 
 fn keys() -> KeyStore {

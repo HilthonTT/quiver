@@ -7,6 +7,7 @@ use std::sync::Arc;
 use quiver_db::Database;
 use quiver_db::auth::KeyStore;
 use tokio_stream::wrappers::TcpListenerStream;
+use tonic::transport::{Certificate, Identity, ServerTlsConfig};
 
 pub use auth::Authenticator;
 pub use metrics::MetricsLayer;
@@ -34,14 +35,30 @@ pub fn service(
     tonic::service::interceptor::InterceptedService::new(server, Authenticator::new(keys))
 }
 
-/// Serves the gRPC API on `listener` until `shutdown` resolves.
+/// TLS settings for [`serve`] from a PEM certificate chain and private key.
+/// With `client_ca_pem`, clients must present a certificate it signed.
+pub fn tls_config(cert_pem: &[u8], key_pem: &[u8], client_ca_pem: Option<&[u8]>) -> ServerTlsConfig {
+    let config = ServerTlsConfig::new().identity(Identity::from_pem(cert_pem, key_pem));
+    match client_ca_pem {
+        Some(ca) => config.client_ca_root(Certificate::from_pem(ca)),
+        None => config,
+    }
+}
+
+/// Serves the gRPC API on `listener` until `shutdown` resolves, over TLS
+/// when `tls` is given.
 pub async fn serve(
     listener: tokio::net::TcpListener,
     db: Arc<Database>,
     keys: Arc<KeyStore>,
+    tls: Option<ServerTlsConfig>,
     shutdown: impl Future<Output = ()> + Send,
 ) -> Result<(), tonic::transport::Error> {
-    tonic::transport::Server::builder()
+    let mut builder = tonic::transport::Server::builder();
+    if let Some(tls) = tls {
+        builder = builder.tls_config(tls)?;
+    }
+    builder
         .layer(MetricsLayer::new(Arc::clone(&db)))
         .add_service(service(db, keys))
         .serve_with_incoming_shutdown(TcpListenerStream::new(listener), shutdown)

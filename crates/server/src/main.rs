@@ -48,6 +48,16 @@ async fn main() {
 async fn run(config: Config) -> Result<(), BoxError> {
     config.validate()?;
     let keys = Arc::new(config.key_store()?);
+    // Load the certificates before anything else, so bad ones fail fast.
+    let tls = config.tls_pem()?;
+    let http_tls = match &tls {
+        Some(pem) => Some(quiver_http::tls_config(
+            &pem.cert,
+            &pem.key,
+            pem.client_ca.as_deref(),
+        )?),
+        None => None,
+    };
 
     let db = {
         let (root, opts) = (config.root(), config.db_options());
@@ -58,6 +68,11 @@ async fn run(config: Config) -> Result<(), BoxError> {
     }
     if keys.is_empty() && !config.host.is_loopback() {
         tracing::warn!("listening on a non-loopback address without API keys; anyone can read and write");
+    }
+    if !keys.is_empty() && tls.is_none() && !config.host.is_loopback() {
+        tracing::warn!(
+            "API keys are sent in plain text; set --tls-cert and --tls-key or terminate TLS in a proxy"
+        );
     }
 
     let scheduler = config.snapshot_every().map(|every| {
@@ -89,15 +104,23 @@ async fn run(config: Config) -> Result<(), BoxError> {
                 permissive_cors: config.cors,
             },
         );
-        tracing::info!(addr = %config.http_addr(), "REST API listening");
+        tracing::info!(addr = %config.http_addr(), tls = http_tls.is_some(), "REST API listening");
         let shutdown = stopped();
-        tasks.spawn(async move { Ok(quiver_http::serve(listener, router, shutdown).await?) });
+        match http_tls {
+            Some(tls) => {
+                tasks.spawn(async move { Ok(quiver_http::serve_tls(listener, tls, router, shutdown).await?) })
+            }
+            None => tasks.spawn(async move { Ok(quiver_http::serve(listener, router, shutdown).await?) }),
+        };
     }
     if !config.disable_grpc {
         let listener = tokio::net::TcpListener::bind(config.grpc_addr()).await?;
-        tracing::info!(addr = %config.grpc_addr(), "gRPC API listening");
+        tracing::info!(addr = %config.grpc_addr(), tls = tls.is_some(), "gRPC API listening");
+        let grpc_tls = tls
+            .as_ref()
+            .map(|pem| quiver_grpc::tls_config(&pem.cert, &pem.key, pem.client_ca.as_deref()));
         let (db, keys, shutdown) = (Arc::clone(&db), Arc::clone(&keys), stopped());
-        tasks.spawn(async move { Ok(quiver_grpc::serve(listener, db, keys, shutdown).await?) });
+        tasks.spawn(async move { Ok(quiver_grpc::serve(listener, db, keys, grpc_tls, shutdown).await?) });
     }
     tracing::info!(
         version = env!("CARGO_PKG_VERSION"),

@@ -11,7 +11,7 @@ from typing import Any, TypeVar
 import httpx
 
 from . import _protocol as proto
-from ._client import DEFAULT_TIMEOUT, DEFAULT_URL, _decode, _headers
+from ._client import DEFAULT_TIMEOUT, DEFAULT_URL, _decode, _headers, _verify
 from ._errors import ConflictError, NotFoundError, QuiverConnectionError
 from ._models import (
     CollectionInfo,
@@ -44,8 +44,13 @@ class AsyncClient:
         url: Server base URL.
         api_key: Sent as ``Authorization: Bearer <api_key>`` if given.
         timeout: Request timeout in seconds.
-        http_client: Bring your own :class:`httpx.AsyncClient` (``url``, ``api_key``
-            and ``timeout`` are then ignored).
+        ca_cert: PEM file of CA certificates to trust for an ``https://`` server
+            whose certificate a private CA signed.
+        client_cert: PEM client certificate (optionally followed by its key),
+            for servers that require one (mutual TLS).
+        client_key: PEM private key for ``client_cert``, if kept separately.
+        http_client: Bring your own :class:`httpx.AsyncClient` (``url``, ``api_key``,
+            ``timeout`` and the TLS options are then ignored).
     """
 
     def __init__(
@@ -54,10 +59,16 @@ class AsyncClient:
         *,
         api_key: str | None = None,
         timeout: float = DEFAULT_TIMEOUT,
+        ca_cert: str | os.PathLike[str] | None = None,
+        client_cert: str | os.PathLike[str] | None = None,
+        client_key: str | os.PathLike[str] | None = None,
         http_client: httpx.AsyncClient | None = None,
     ) -> None:
         self._http = http_client or httpx.AsyncClient(
-            base_url=url.rstrip("/"), headers=_headers(api_key), timeout=timeout
+            base_url=url.rstrip("/"),
+            headers=_headers(api_key),
+            timeout=timeout,
+            verify=_verify(ca_cert, client_cert, client_key),
         )
 
     async def _run(self, call: proto.Call[T]) -> T:

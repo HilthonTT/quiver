@@ -29,6 +29,7 @@ tonic-prost-build.workspace = true
 protox.workspace = true
 
 [dev-dependencies]
+rcgen.workspace = true
 tempfile.workspace = true
 
 [lints]

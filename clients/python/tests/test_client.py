@@ -532,3 +532,15 @@ def test_quantization(client: Client, mock: Recorder) -> None:
     assert client.collection("docs").info().quantization == "scalar"
     mock.on("GET", "/collections/docs", 200, INFO)
     assert client.collection("docs").info().quantization == "none"
+
+
+def test_tls_options(tmp_path: Path) -> None:
+    from quiver._client import _verify
+
+    assert _verify(None, None, None) is True
+    with pytest.raises(ValueError):
+        _verify(None, None, tmp_path / "key.pem")
+    with pytest.raises(OSError):
+        Client("https://localhost:6900", ca_cert=tmp_path / "missing.pem")
+    with pytest.raises(OSError):
+        AsyncClient("https://localhost:6900", client_cert=tmp_path / "missing.pem")

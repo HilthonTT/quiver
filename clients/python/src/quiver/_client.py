@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import ssl
 from collections.abc import Iterable, Iterator, Sequence
 from pathlib import Path
 from types import TracebackType
@@ -41,6 +42,27 @@ def _headers(api_key: str | None) -> dict[str, str]:
     return headers
 
 
+def _verify(
+    ca_cert: str | os.PathLike[str] | None,
+    client_cert: str | os.PathLike[str] | None,
+    client_key: str | os.PathLike[str] | None,
+) -> ssl.SSLContext | bool:
+    """TLS verification for httpx: the system defaults unless a private CA
+    or a client certificate is given."""
+    if ca_cert is None and client_cert is None:
+        if client_key is not None:
+            raise ValueError("client_key needs client_cert")
+        return True
+    context = ssl.create_default_context(cafile=None if ca_cert is None else os.fspath(ca_cert))
+    if client_cert is not None:
+        context.load_cert_chain(
+            os.fspath(client_cert), None if client_key is None else os.fspath(client_key)
+        )
+    elif client_key is not None:
+        raise ValueError("client_key needs client_cert")
+    return context
+
+
 def _decode(response: httpx.Response) -> Any:
     if not response.content:
         return None
@@ -64,8 +86,13 @@ class Client:
         url: Server base URL.
         api_key: Sent as ``Authorization: Bearer <api_key>`` if given.
         timeout: Request timeout in seconds.
-        http_client: Bring your own :class:`httpx.Client` (``url``, ``api_key``
-            and ``timeout`` are then ignored).
+        ca_cert: PEM file of CA certificates to trust for an ``https://`` server
+            whose certificate a private CA signed.
+        client_cert: PEM client certificate (optionally followed by its key),
+            for servers that require one (mutual TLS).
+        client_key: PEM private key for ``client_cert``, if kept separately.
+        http_client: Bring your own :class:`httpx.Client` (``url``, ``api_key``,
+            ``timeout`` and the TLS options are then ignored).
     """
 
     def __init__(
@@ -74,10 +101,16 @@ class Client:
         *,
         api_key: str | None = None,
         timeout: float = DEFAULT_TIMEOUT,
+        ca_cert: str | os.PathLike[str] | None = None,
+        client_cert: str | os.PathLike[str] | None = None,
+        client_key: str | os.PathLike[str] | None = None,
         http_client: httpx.Client | None = None,
     ) -> None:
         self._http = http_client or httpx.Client(
-            base_url=url.rstrip("/"), headers=_headers(api_key), timeout=timeout
+            base_url=url.rstrip("/"),
+            headers=_headers(api_key),
+            timeout=timeout,
+            verify=_verify(ca_cert, client_cert, client_key),
         )
 
     # --- plumbing -------------------------------------------------------
