@@ -57,6 +57,10 @@ Vectors can be lists, tuples or numpy arrays. Large iterables (including generat
 | `search_by_id(id, k=10, ...)` | Neighbours of an existing point (which is left out) |
 | `recommend(positive, negative=(), k=10, ...)` | Points like the positive examples and unlike the negative ones |
 | `search_batch(vectors, k=10, ...)` | Many searches in one request |
+| `search_sparse(vector, k=10, using=...)` | Sparse (keyword) search; `distance` is the negated score |
+| `query(prefetch, k=10, filter=None, rrf_k=60)` | Hybrid search: fuse several dense and sparse searches |
+| `update(index=, quantization=, on_disk=, vectors=, sparse_vectors=)` | Change settings (may rebuild indexes) |
+| `rename(new_name)` | Rename the collection; the handle follows it |
 | `get(id)` / `get_many(ids)` | Fetch points (`get` returns `None` if missing) |
 | `scroll(cursor=None, limit=100)` | One page of points in id order, with `next_cursor` |
 | `iter_points(page_size=500)` | Iterate over every point, following the cursors |
@@ -66,6 +70,8 @@ Vectors can be lists, tuples or numpy arrays. Large iterables (including generat
 | `info()` / `len(col)` | Configuration and point count |
 | `flush()` / `compact()` | Force a checkpoint / reclaim deleted space |
 | `create_snapshot()` / `snapshots()` | Back up this collection / list its backups |
+
+Every search method takes `using="name"` to search a named vector instead of the main one.
 
 Distances are always **lower = closer**: `1 - cos` for cosine, L2 for Euclidean, `-(a·b)` for dot product, L1 for Manhattan, and the count of differing components for Hamming.
 
@@ -106,6 +112,55 @@ movies.search([1.0, 0.0, 0.0, 0.1], k=10, max_distance=0.3)  # only close hits
 
 `max_distance` drops hits farther than the threshold; results are still capped
 at `k`, and with HNSW the threshold applies to the approximate top `k`.
+
+### Named vectors, sparse vectors and hybrid search
+
+```python
+from quiver import Flat, Point, Prefetch, SparseVectorParams, VectorParams
+
+papers = client.create_collection(
+    "papers",
+    dimension=4,
+    vectors={"title": VectorParams(2, metric="euclidean", index=Flat())},
+    sparse_vectors={"text": SparseVectorParams("idf")},  # BM25-style weighting
+)
+papers.upsert(
+    [
+        Point(
+            "p1",
+            [0.1, 0.2, 0.3, 0.4],
+            vectors={"title": [0.5, 0.5]},
+            sparse_vectors={"text": {17: 1.0, 4: 0.5}},
+        )
+    ]
+)
+papers.search([0.5, 0.5], k=5, using="title")
+papers.search_sparse({17: 1.0}, k=5, using="text")
+papers.query(
+    [Prefetch(vector=[0.1, 0.2, 0.3, 0.4]), Prefetch(sparse={17: 1.0}, using="text", weight=2.0)],
+    k=10,
+)
+```
+
+Every point must carry every named vector; sparse vectors (a `SparseVector(indices, values)`
+or an `{index: value}` dict) are optional. `query` returns `ScoredResult`s, highest `score` first.
+
+### Settings, renames and aliases
+
+```python
+papers.update(index={"ef_search": 128}, on_disk=True)  # dict: merged into the index settings
+papers.rename("papers-v1")
+client.set_alias("papers", "papers-v1")  # create, or atomically re-point
+client.list_aliases()  # {"papers": "papers-v1"}
+client.delete_alias("papers")
+```
+
+### TLS
+
+```python
+Client("https://quiver.internal:6900", api_key="...", ca_cert="ca.pem")
+Client("https://quiver.internal:6900", client_cert="client.pem", client_key="client-key.pem")
+```
 
 ### Snapshots (backups)
 

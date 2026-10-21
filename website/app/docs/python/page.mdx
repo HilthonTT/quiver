@@ -31,7 +31,10 @@ print(client.info())
 | `url` | `http://localhost:6900` | the server's REST address |
 | `api_key` | none | sent as `Authorization: Bearer <key>` |
 | `timeout` | `30.0` | seconds per request |
-| `http_client` | none | your own `httpx.Client` (then `url`, `api_key` and `timeout` are ignored) |
+| `ca_cert` | none | PEM file of CA certificates to trust, for an `https://` server with a private CA |
+| `client_cert` | none | PEM client certificate (optionally followed by its key), for [mutual TLS](/docs/security/#tls) |
+| `client_key` | none | PEM key for `client_cert`, if kept separately |
+| `http_client` | none | your own `httpx.Client` (then `url`, `api_key`, `timeout` and the TLS arguments are ignored) |
 
 `Client` is a context manager (`with Client(...) as client:`), and `close()` releases its connection pool.
 
@@ -50,17 +53,20 @@ print(movies, movies.info())
 ```
 
 ```text
-Collection('movies') CollectionInfo(name='movies', dimension=4, metric='cosine', index={'type': 'hnsw', 'm': 16, 'ef_construction': 128, 'ef_search': 64, 'seed': 6512614579346866177}, count=0, tombstones=0)
+Collection('movies') CollectionInfo(name='movies', dimension=4, metric='cosine', index={'type': 'hnsw', 'm': 16, 'ef_construction': 128, 'ef_search': 64, 'seed': 6512614579346866177}, count=0, tombstones=0, field_indexes=[], quantization='none', on_disk=False, vectors={}, sparse_vectors={})
 ```
 
 | Client method | Does |
 | --- | --- |
-| `create_collection(name, dimension, metric=, index=, field_indexes=(), quantization="none")` | creates it; `ConflictError` if it exists. See [field indexes](/docs/filtering/#field-indexes) and [quantization](/docs/indexes/#scalar-quantization) |
+| `create_collection(name, dimension, metric=, index=, field_indexes=(), quantization="none", on_disk=False, vectors=None, sparse_vectors=None)` | creates it; `ConflictError` if it exists. See [field indexes](/docs/filtering/#field-indexes), [quantization](/docs/indexes/#scalar-quantization), [on disk](/docs/storage/#vectors-on-disk) and [named vectors](#named-and-sparse-vectors) |
 | `get_collection(name)` | a handle to an existing collection; `NotFoundError` otherwise |
 | `get_or_create_collection(name, dimension, ...)` | either of the above |
 | `collection(name)` | a handle, without asking the server |
 | `list_collections()` | every collection's `CollectionInfo` |
 | `delete_collection(name)` | drops it |
+| `rename_collection(name, new_name)` | renames it; returns a handle under the new name |
+| `list_aliases()` | `{alias: collection}` |
+| `set_alias(alias, collection)` / `delete_alias(alias)` | create or re-point / remove an [alias](/docs/collections/#aliases) |
 | `health()`, `info()` | server status; version, storage engine and totals |
 
 `HNSW(m=16, ef_construction=128, ef_search=64, seed=None)` and `KDTree(balance_factor=3)` carry the [index parameters](/docs/indexes/).
@@ -112,10 +118,12 @@ print([hit.id for hit in movies.search(query, k=2)])
 | `upsert(points, batch_size=1000)` | insert or replace points; returns the count written |
 | `insert(vector, metadata=None, id=None)` | insert one point; returns its id |
 | `get(id, with_vectors=True)` / `get_many(ids, with_vectors=True)` | fetch points |
-| `search(vector, k=10, filter=, ef=, max_distance=, with_vectors=False, with_metadata=True)` | [search](/docs/searching/) |
-| `search_by_id(id, k=10, ...)` | neighbours of a stored point, without it |
-| `recommend(positive, negative=(), k=10, ...)` | like the positives, unlike the negatives |
-| `search_batch(vectors, k=10, filter=, ef=, ...)` | up to 256 searches in one request |
+| `search(vector, k=10, filter=, ef=, max_distance=, with_vectors=False, with_metadata=True, using=None)` | [search](/docs/searching/); `using` names a named vector |
+| `search_by_id(id, k=10, ..., using=None)` | neighbours of a stored point, without it |
+| `recommend(positive, negative=(), k=10, ..., using=None)` | like the positives, unlike the negatives |
+| `search_batch(vectors, k=10, filter=, ef=, ..., using=None)` | up to 256 searches in one request |
+| `search_sparse(vector, k=10, using=, filter=, max_distance=, ...)` | [sparse search](/docs/searching/#sparse-search) |
+| `query(prefetch, k=10, filter=, rrf_k=60, ...)` | [hybrid search](/docs/searching/#hybrid-search); returns `ScoredResult`s |
 | `scroll(cursor=None, limit=100, with_vectors=False)` | one `ScrollPage` in id order |
 | `iter_points(page_size=500, with_vectors=False)` | every point, following the cursors |
 | `count(filter=None)` | how many points (match) |
@@ -124,9 +132,48 @@ print([hit.id for hit in movies.search(query, k=2)])
 | `info()` / `len(collection)` | configuration and count |
 | `flush()` / `compact()` | force a checkpoint / reclaim deleted slots |
 | `create_field_index(field)` / `drop_field_index(field)` | index a metadata field / drop its index |
+| `update(index=, quantization=, on_disk=, vectors=, sparse_vectors=)` | [change settings](/docs/collections/#changing-settings); returns the `CollectionInfo` |
+| `rename(new_name)` | rename the collection; the handle follows it |
 | `create_snapshot()` / `snapshots()` | back this collection up / list its snapshots |
 
-Search results are `SearchResult(id, distance, metadata, vector)` objects. Snapshot methods on the client are `list_snapshots(collection=None)`, `get_snapshot(id)`, `download_snapshot(id, path)`, `upload_snapshot(path_or_bytes)`, `restore_snapshot(id, collection=None, replace=False)` and `delete_snapshot(id)`; see [snapshots](/docs/snapshots/).
+Search results are `SearchResult(id, distance, metadata, vector, vectors, sparse_vectors)` objects. Snapshot methods on the client are `list_snapshots(collection=None)`, `get_snapshot(id)`, `download_snapshot(id, path)`, `upload_snapshot(path_or_bytes)`, `restore_snapshot(id, collection=None, replace=False)` and `delete_snapshot(id)`; see [snapshots](/docs/snapshots/).
+
+## Named and sparse vectors
+
+```python
+from quiver import Flat, Point, Prefetch, SparseVector, SparseVectorParams, VectorParams
+
+papers = client.create_collection(
+    "papers",
+    dimension=4,
+    vectors={"title": VectorParams(2, metric="euclidean", index=Flat())},
+    sparse_vectors={"text": SparseVectorParams("idf")},  # or just ["text"]
+)
+papers.upsert([
+    Point("p1", [0.1, 0.2, 0.3, 0.4], {"year": 2021},
+          vectors={"title": [0.5, 0.5]}, sparse_vectors={"text": {17: 1.0, 4: 0.5}}),
+])
+papers.search([0.5, 0.5], k=5, using="title")
+papers.search_sparse(SparseVector([17], [1.0]), k=5, using="text")
+hits = papers.query(
+    [Prefetch(vector=[0.1, 0.2, 0.3, 0.4]), Prefetch(sparse={17: 1.0}, using="text", weight=2.0)],
+    k=10,
+)
+print([(h.id, h.score) for h in hits])
+```
+
+`VectorParams(dimension, metric="cosine", index=None, quantization="none", on_disk=False)` configures a named vector. Sparse vectors are `SparseVector(indices, values)` or a `{index: value}` dict. `Prefetch(vector=` or `sparse=, using=None, limit=None, weight=1.0, ef=None, max_distance=None)` is one search of a hybrid query.
+
+## Settings, renames and aliases
+
+```python
+papers.update(index={"ef_search": 128}, vectors={"title": {"on_disk": True}})
+papers.rename("papers-v1")            # papers.name is now "papers-v1"
+client.set_alias("papers", "papers-v1")
+print(client.list_aliases())          # {'papers': 'papers-v1'}
+```
+
+`index=` takes an index object, which replaces the settings, or a dict merged into them.
 
 ## Errors
 
@@ -137,8 +184,8 @@ Every exception derives from `QuiverError` and carries `.status_code` and `.code
 | `InvalidRequestError` | 400, 413, 415, 422 and other 4xx |
 | `AuthenticationError` | 401: a missing or wrong API key |
 | `PermissionDeniedError` | 403: a read-only key used for a write |
-| `NotFoundError` | 404: no such collection, point, snapshot or route |
-| `ConflictError` | 409: the collection already exists |
+| `NotFoundError` | 404: no such collection, alias, point, snapshot or route |
+| `ConflictError` | 409: the name is taken by a collection or an alias |
 | `ServerError` | 5xx |
 | `QuiverConnectionError` | the server could not be reached |
 

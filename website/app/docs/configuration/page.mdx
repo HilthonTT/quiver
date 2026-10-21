@@ -44,6 +44,16 @@ QUIVER_HTTP_PORT=8080 quiver --data-dir /var/lib/quiver
 
 The three combine. With none of them, authentication is off. See [security & API keys](/docs/security/).
 
+## TLS
+
+| Flag | Environment | Default | Meaning |
+| --- | --- | --- | --- |
+| `--tls-cert` | `QUIVER_TLS_CERT` | none | PEM certificate chain; serve both APIs over TLS (needs `--tls-key`) |
+| `--tls-key` | `QUIVER_TLS_KEY` | none | PEM private key for `--tls-cert` |
+| `--tls-client-ca` | `QUIVER_TLS_CLIENT_CA` | none | PEM CA certificates; clients must present a certificate they signed (mutual TLS) |
+
+See [security](/docs/security/#tls).
+
 ## Snapshots
 
 | Flag | Environment | Default | Meaning |
@@ -74,14 +84,15 @@ The server refuses to start, with a message, when:
 - `--storage rocksdb` is asked of a build without the `rocksdb` feature;
 - `--snapshot-interval` is set with `--in-memory` but without `--snapshot-dir`;
 - the keys file cannot be read, or two keys are the same, or one is empty;
+- `--tls-cert` or `--tls-key` is given without the other, or the TLS files cannot be read or parsed;
 - the data directory is already open in another process;
 - a collection's files are corrupt (see [storage](/docs/storage/#when-something-is-wrong)).
 
-It warns, and carries on, when it listens on an address other than loopback without any API key, and when it runs `--in-memory`.
+It warns, and carries on, when it listens on an address other than loopback without any API key, or with API keys but without TLS, and when it runs `--in-memory`.
 
 ## Health checks
 
-`quiver --healthcheck`, given the same settings as the running server (flags, `QUIVER_*` variables or `.env`), asks that server's `GET /health` and exits `0` if it answers `200`, or prints why not and exits `1`. It connects over loopback when the server binds an unspecified address such as `0.0.0.0`, and checks the gRPC port instead when the REST API is disabled. The [Docker image](/docs/docker/#the-image) uses it.
+`quiver --healthcheck`, given the same settings as the running server (flags, `QUIVER_*` variables or `.env`), asks that server's `GET /health` and exits `0` if it answers `200`, or prints why not and exits `1`. It connects over loopback when the server binds an unspecified address such as `0.0.0.0`, and checks the gRPC port instead when the REST API is disabled. With `--tls-cert` it speaks TLS (without verifying the certificate); with `--tls-client-ca` as well, it only checks that the port accepts connections. The [Docker image](/docs/docker/#the-image) uses it.
 
 ```bash
 quiver --healthcheck && echo healthy
@@ -93,4 +104,4 @@ On `SIGINT` (Ctrl+C) or `SIGTERM` the server stops accepting connections, gives 
 
 ## The terminal UI
 
-`quiver-tui` has its own flags and variables, `QUIVER_URL`, `QUIVER_API_KEY` and `QUIVER_EMBEDDING_*`, listed on the [terminal UI](/docs/tui/#options) page. It does not read `.env`.
+`quiver-tui` has its own flags and variables, `QUIVER_URL`, `QUIVER_API_KEY`, `QUIVER_CA_CERT`, `QUIVER_CLIENT_CERT` and `QUIVER_EMBEDDING_*`, listed on the [terminal UI](/docs/tui/#options) page. It does not read `.env`.

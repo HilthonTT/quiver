@@ -2,7 +2,7 @@ export const metadata = { title: "Collections & points" };
 
 # Collections & points
 
-Everything in Quiver lives in a **collection**: a named set of points that share a vector dimension, a distance metric and an index. A **point** is an id, a vector and optional JSON metadata.
+Everything in Quiver lives in a **collection**: a named set of points that share a vector dimension, a distance metric and an index. A **point** is an id, a vector and optional JSON metadata. A collection can also give its points [named vectors](#named-and-sparse-vectors) of other dimensions, and sparse vectors for keyword search.
 
 ## Collections
 
@@ -23,10 +23,76 @@ curl -X POST localhost:6900/collections -H 'content-type: application/json' \
 | `dimension` | 1 to 65,536 |
 | `metric` | `cosine` (default), `euclidean`, `dot_product` (or `dot`), `manhattan` (or `l1`), `hamming` |
 | `index` | `{"type": "hnsw"}` (default), `{"type": "flat"}` or `{"type": "kd_tree"}`, with optional parameters |
+| `quantization` | `none` (default) or `scalar`; see [indexes & metrics](/docs/indexes/) |
+| `on_disk` | `false` (default); `true` keeps the vectors in a file, see [storage](/docs/storage/#vectors-on-disk) |
+| `vectors` | named dense vectors, see [below](#named-and-sparse-vectors) |
+| `sparse_vectors` | named sparse vectors, see [below](#named-and-sparse-vectors) |
 
-The configuration is fixed once the collection exists. Creating a name that is taken answers `409 already_exists`; the Python and Rust `get_or_create_collection` return the existing collection instead. In the embedded crate, `get_or_create_collection` with a different configuration is an error.
+The dimension, the metric and the set of named and sparse vectors are fixed once the collection exists; index, quantization and on-disk settings can [change later](#changing-settings). Creating a name that is taken answers `409 already_exists`; the Python and Rust `get_or_create_collection` return the existing collection instead. In the embedded crate, `get_or_create_collection` with a different configuration is an error.
 
 `count` is the number of live points. `tombstones` counts deleted points whose slots have not been reclaimed yet; see [compaction](#deleting-and-compaction).
+
+## Named and sparse vectors
+
+A point always has its main `vector`. A collection can add **named dense vectors**, say an embedding of the title next to one of the body, each with its own dimension, metric, index, quantization and `on_disk` setting. Every point must carry every named vector.
+
+It can also add **sparse vectors**: vectors given by their non-zero components, typically term weights from a tokenizer or a model like SPLADE, for keyword-style search. Points may leave them out. A sparse vector's `modifier` is `none` (plain dot products) or `idf`, which weights each query term by its inverse document frequency in the collection; with term frequencies as values that gives BM25 scores.
+
+```bash
+curl -X POST localhost:6900/collections -H 'content-type: application/json' -d '{
+  "name": "papers",
+  "dimension": 4,
+  "vectors": {"title": {"dimension": 2, "metric": "euclidean", "index": {"type": "flat"}}},
+  "sparse_vectors": {"text": {"modifier": "idf"}}
+}'
+curl -X POST localhost:6900/collections/papers/points -H 'content-type: application/json' -d '{
+  "points": [{
+    "id": "p1",
+    "vector": [0.1, 0.2, 0.3, 0.4],
+    "vectors": {"title": [0.5, 0.5]},
+    "sparse_vectors": {"text": {"indices": [17, 4], "values": [1.0, 0.5]}}
+  }]
+}'
+```
+
+Names follow the rules for collection names, and one name cannot be both dense and sparse. Sparse vectors need as many `values` as `indices`, unique indices and finite values; they are stored sorted by index, without zeros. Points come back with `vectors` and `sparse_vectors` when vectors are requested. [Searching](/docs/searching/#named-vectors) explains how to query them.
+
+## Changing settings
+
+`PATCH /collections/{name}` changes the index, quantization and on-disk settings of the main vector and of named vectors, and the `modifier` of sparse vectors. Absent fields stay as they are. `index` is a JSON Merge Patch over the current index settings: `{"ef_search": 128}` changes just that parameter, while a different `type` replaces the index (its other parameters take their defaults).
+
+```bash
+curl -X PATCH localhost:6900/collections/papers -H 'content-type: application/json' -d '{
+  "index": {"ef_search": 128},
+  "quantization": "scalar",
+  "vectors": {"title": {"on_disk": true}},
+  "sparse_vectors": {"text": {"modifier": "none"}}
+}'
+```
+
+It answers the collection's info. Any index change other than `ef_search` rebuilds that index, and `on_disk` moves the vectors to or from disk; both can take a while on a large collection. Searches carry on meanwhile, writes wait. Dimensions, metrics and the set of vectors cannot change: unknown fields such as `dimension` are rejected with `400 invalid_body`.
+
+## Renaming
+
+`POST /collections/{name}/rename` with `{"name": "new-name"}` renames a collection, files included, and answers its info. Aliases that pointed to it follow it; snapshots keep the name they were taken under. In the embedded crate, handles to the old collection are closed, as if it had been dropped; use the one `rename_collection` returns.
+
+## Aliases
+
+An alias is a second name for a collection, usable wherever a collection is named: searches, upserts, snapshots and so on. Re-pointing an alias is atomic, so clients can query `products` while you build `products-v2` and switch over in one step:
+
+```bash
+curl -X PUT localhost:6900/aliases/products -H 'content-type: application/json'   -d '{"collection": "products-v1"}'
+# later, once products-v2 is ready
+curl -X PUT localhost:6900/aliases/products -H 'content-type: application/json'   -d '{"collection": "products-v2"}'
+curl localhost:6900/aliases
+curl -X DELETE localhost:6900/aliases/products
+```
+
+```json
+{"aliases":[{"alias":"products","collection":"products-v2"}]}
+```
+
+Aliases and collections share one namespace: a collection cannot take an alias's name (`409 already_exists`), and aliases point to collections, not to other aliases. Dropping or renaming a collection needs its own name, not an alias. Dropping a collection removes the aliases pointing to it, and a snapshot cannot be restored under a name an alias holds. Aliases are saved in `aliases.json` in the data directory.
 
 ## Points
 
@@ -69,9 +135,9 @@ The ids `.`, `..`, `lookup`, `delete`, `count` and `metadata` cannot be fetched 
 
 Every vector, stored or used as a query, must:
 
-- have exactly the collection's dimension (`dimension_mismatch` for a query; an upsert names the point in an `invalid_argument` error);
+- have exactly the dimension of its vector (the main one or a named one) (`dimension_mismatch` for a query; an upsert names the point in an `invalid_argument` error);
 - contain only finite numbers (JSON cannot carry NaN or infinity anyway, but the embedded API and gRPC check);
-- not be all zeros, with the cosine metric;
+- not be all zeros, with the cosine metric (each named vector has its own metric);
 - have a squared length of at most `f32::MAX / 4` (about 8.5 × 10³⁷), so that every distance between two valid vectors stays finite. Larger vectors fail with `vector magnitude too large`.
 
 With the **cosine** metric, vectors are normalised to unit length when they are stored, and queries are normalised too. A point you read back has the normalised vector:
@@ -115,6 +181,8 @@ The delete answers `204 No Content` with an empty body, or `404 point_not_found`
 | Dimension | 1–65,536 |
 | Point id | 1–512 bytes |
 | Metadata depth | 64 levels |
+| Named dense vectors | 16 per collection |
+| Sparse vectors | 16 per collection, 65,536 non-zero values each |
 | Ids per lookup or delete request | 10,000 |
 | REST request body | 64 MiB (`--max-body-mb`) |
 | gRPC message | 64 MiB |

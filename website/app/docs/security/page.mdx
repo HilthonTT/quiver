@@ -8,8 +8,8 @@ With no API keys configured, authentication is off and anyone who can reach the 
 
 | Role | May |
 | --- | --- |
-| `readonly` | every read: list and get collections and points, count, search, recommend, list and download snapshots, `/info` and `/metrics` |
-| `readwrite` | everything, including creating and dropping collections, writes, snapshots, uploads and restores |
+| `readonly` | every read: list and get collections and points, count, search, recommend, hybrid queries, list aliases, list and download snapshots, `/info` and `/metrics` |
+| `readwrite` | everything, including creating, changing, renaming and dropping collections, setting and deleting aliases, writes, snapshots, uploads and restores |
 
 `GET /`, `GET /health` and the gRPC `Health` call need no key. Give read-only keys to anything that only queries.
 
@@ -58,7 +58,27 @@ No key or an unknown key answers `401 unauthorized` (`UNAUTHENTICATED` over gRPC
 
 ## TLS
 
-Quiver speaks plain HTTP on both ports. Put a reverse proxy or load balancer that terminates TLS in front of it, or keep it on a private network; the proxy must speak HTTP/2 to the backend for gRPC. Keys sent over plain HTTP can be read by anyone on the path.
+Give the server a PEM certificate chain and private key and both APIs speak TLS only, REST over HTTP/1.1 and HTTP/2 (negotiated with ALPN):
+
+```bash
+quiver --host 0.0.0.0 --api-key "$WRITE_KEY" --tls-cert cert.pem --tls-key key.pem
+QUIVER_TLS_CERT=cert.pem QUIVER_TLS_KEY=key.pem quiver
+curl --cacert ca.pem https://quiver.internal:6900/health
+```
+
+For **mutual TLS**, add `--tls-client-ca ca.pem` (`QUIVER_TLS_CLIENT_CA`): clients must then present a certificate one of its CAs signed, on both ports. API keys still apply on top. The certificates are read once at startup, and the server refuses to start if they do not parse or the key does not match; restart it to pick up renewed ones.
+
+Without TLS, keys sent over the network can be read by anyone on the path, and the server warns at startup when it has keys, no TLS and a non-loopback address. A reverse proxy or load balancer that terminates TLS works too; it must speak HTTP/2 to the backend for gRPC.
+
+The clients trust the public CAs by default. For a private CA or a client certificate:
+
+| Client | CA certificate | Client certificate |
+| --- | --- | --- |
+| Python | `Client(url, ca_cert="ca.pem")` | `client_cert="client.pem"`, and `client_key="key.pem"` if separate |
+| Rust | `Client::with_tls(url, &TlsOptions { ca_pem: Some(..), .. })` | `identity_pem`: the certificate chain followed by its key |
+| Terminal UI | `--ca-cert` / `QUIVER_CA_CERT` | `--client-cert` / `QUIVER_CLIENT_CERT`, certificate then key |
+
+`quiver --healthcheck` with the same `--tls-*` settings speaks TLS to the server without verifying its certificate, since it only checks that the local server answers. With `--tls-client-ca` it has no client certificate to offer, so it only checks that the port accepts connections.
 
 ## Deploying safely
 

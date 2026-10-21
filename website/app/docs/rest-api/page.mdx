@@ -28,21 +28,33 @@ curl localhost:6900/info
 | Method and route | Role | Body | Answers |
 | --- | --- | --- | --- |
 | `GET /collections` | read | | `{"collections": [CollectionInfo]}` |
-| `POST /collections` | write | `{"name", "dimension", "metric"?, "index"?, "quantization"?, "field_indexes"?}` | `201` CollectionInfo |
+| `POST /collections` | write | `{"name", "dimension", "metric"?, "index"?, "quantization"?, "on_disk"?, "vectors"?, "sparse_vectors"?, "field_indexes"?}` | `201` CollectionInfo |
 | `GET /collections/{name}` | read | | CollectionInfo |
-| `DELETE /collections/{name}` | write | | `204` |
+| `PATCH /collections/{name}` | write | `{"index"?, "quantization"?, "on_disk"?, "vectors"?: {name: {"index"?, "quantization"?, "on_disk"?}}, "sparse_vectors"?: {name: {"modifier"}}}` | CollectionInfo, after rebuilding what changed |
+| `POST /collections/{name}/rename` | write | `{"name"}` | CollectionInfo under the new name |
+| `DELETE /collections/{name}` | write | | `204`; also removes its aliases |
 | `POST /collections/{name}/flush` | write | | `204`: checkpoint now |
 | `POST /collections/{name}/compact` | write | | CollectionInfo, after reclaiming deleted slots |
 | `POST /collections/{name}/indexes` | write | `{"field"}` | CollectionInfo; indexing an indexed field does nothing |
 | `DELETE /collections/{name}/indexes/{field}` | write | | CollectionInfo, or `404 not_found` if the field has no index |
 
-A **CollectionInfo** is `{"name", "dimension", "metric", "index", "quantization"?, "count", "tombstones", "field_indexes"}`, where `index` is `{"type": "hnsw", "m", "ef_construction", "ef_search", "seed"}`, `{"type": "flat"}` or `{"type": "kd_tree", "balance_factor"}`, and `quantization` is `"scalar"` or left out. See [collections & points](/docs/collections/), [indexes & metrics](/docs/indexes/#scalar-quantization) and [field indexes](/docs/filtering/#field-indexes).
+A **CollectionInfo** is `{"name", "dimension", "metric", "index", "quantization"?, "on_disk"?, "vectors"?, "sparse_vectors"?, "count", "tombstones", "field_indexes"}`, where `index` is `{"type": "hnsw", "m", "ef_construction", "ef_search", "seed"}`, `{"type": "flat"}` or `{"type": "kd_tree", "balance_factor"}`, and `quantization` is `"scalar"` or left out. `vectors` maps names to `{"dimension", "metric", "index", "quantization"?, "on_disk"?}`, and `sparse_vectors` names to `{"modifier"?: "idf"}`; both, and `on_disk`, are left out when unset. In `PATCH`, `index` is merged into the current settings as a JSON Merge Patch. See [collections & points](/docs/collections/), [indexes & metrics](/docs/indexes/#scalar-quantization) and [field indexes](/docs/filtering/#field-indexes).
+
+## Aliases
+
+| Method and route | Role | Body | Answers |
+| --- | --- | --- | --- |
+| `GET /aliases` | read | | `{"aliases": [{"alias", "collection"}]}` |
+| `PUT /aliases/{alias}` | write | `{"collection"}` | `{"alias", "collection"}`; creates or atomically re-points |
+| `DELETE /aliases/{alias}` | write | | `204`, or `404 not_found` |
+
+An alias works in place of a collection name on every `/collections/{name}/…` route except `DELETE` and `rename`. See [aliases](/docs/collections/#aliases).
 
 ## Points
 
 | Method and route | Role | Body or query | Answers |
 | --- | --- | --- | --- |
-| `POST /collections/{name}/points` | write | `{"points": [{"id"?, "vector", "metadata"?}]}` | `{"upserted", "ids"}` |
+| `POST /collections/{name}/points` | write | `{"points": [{"id"?, "vector", "vectors"?, "sparse_vectors"?, "metadata"?}]}` | `{"upserted", "ids"}` |
 | `GET /collections/{name}/points` | read | `?cursor=&limit=100&with_vectors=false` | `{"points", "next_cursor"}` |
 | `GET /collections/{name}/points/{id}` | read | `?with_vectors=true` | a point |
 | `POST /collections/{name}/points/lookup` | read | `{"ids", "with_vectors"?: true}` | `{"points"}`: the ids that exist, in request order |
@@ -51,7 +63,7 @@ A **CollectionInfo** is `{"name", "dimension", "metric", "index", "quantization"
 | `POST /collections/{name}/points/delete` | write | `{"ids"` or `"filter"}` | `{"deleted"}` |
 | `DELETE /collections/{name}/points/{id}` | write | | `204`, or `404 point_not_found` |
 
-A **point** is `{"id", "vector", "metadata"}`; `metadata` is left out when the point has none, and `vector` when `with_vectors` is false. Lookups and deletes take at most 10,000 ids, and `limit` is at most 10,000. See [data operations](/docs/data-operations/) and [listing points](/docs/listing-points/).
+A **point** is `{"id", "vector", "vectors"?, "sparse_vectors"?, "metadata"}`; `vectors` maps names to dense vectors and `sparse_vectors` names to `{"indices", "values"}`. `metadata` is left out when the point has none, and the vectors when `with_vectors` is false. Lookups and deletes take at most 10,000 ids, and `limit` is at most 10,000. See [data operations](/docs/data-operations/) and [listing points](/docs/listing-points/).
 
 ```bash
 curl -X POST localhost:6900/collections -H 'content-type: application/json' \
@@ -71,11 +83,12 @@ curl -X POST localhost:6900/collections/places/points/lookup -H 'content-type: a
 
 | Method and route | Role | Body | Answers |
 | --- | --- | --- | --- |
-| `POST /collections/{name}/search` | read | `{"vector"` or `"id", "k"?: 10, "filter"?, "ef"?, "max_distance"?, "with_vectors"?: false, "with_metadata"?: true}` | `{"results": [hit]}` |
+| `POST /collections/{name}/search` | read | `{"vector"`, `"id"` or `"sparse", "using"?, "k"?: 10, "filter"?, "ef"?, "max_distance"?, "with_vectors"?: false, "with_metadata"?: true}` | `{"results": [hit]}` |
 | `POST /collections/{name}/search/batch` | read | `{"searches": [search body]}`, at most 256 | `{"results": [[hit]]}` |
-| `POST /collections/{name}/recommend` | read | `{"positive", "negative"?, "k"?, "filter"?, "ef"?, "max_distance"?, "with_vectors"?, "with_metadata"?}` | `{"results": [hit]}` |
+| `POST /collections/{name}/recommend` | read | `{"positive", "negative"?, "using"?, "k"?, "filter"?, "ef"?, "max_distance"?, "with_vectors"?, "with_metadata"?}` | `{"results": [hit]}` |
+| `POST /collections/{name}/query` | read | `{"prefetch": [{"vector"` or `"sparse", "using"?, "limit"?, "weight"?, "ef"?, "max_distance"?}], "fusion"?: {"type": "rrf", "k": 60}, "k"?, "filter"?, "with_vectors"?, "with_metadata"?}` | `{"results": [scored hit]}` |
 
-A **hit** is `{"id", "distance", "metadata"?, "vector"?}`, closest first. See [searching](/docs/searching/).
+A **hit** is `{"id", "distance", "metadata"?, "vector"?, "vectors"?, "sparse_vectors"?}`, closest first; for a sparse search, `distance` is the negated score. A **scored hit** has a `score` instead, highest first. `using` names a named vector; `sparse` needs it. See [searching](/docs/searching/).
 
 ```bash
 curl -X POST localhost:6900/collections/places/search -H 'content-type: application/json' \
@@ -99,7 +112,7 @@ curl -X POST localhost:6900/collections/places/search -H 'content-type: applicat
 | `POST /snapshots/{id}/restore` | write | `{"collection"?, "replace"?: false}`, or empty | CollectionInfo |
 | `DELETE /snapshots/{id}` | write | | `204` |
 
-A **SnapshotInfo** is `{"format_version", "id", "collection", "created_at_ms", "quiver_version", "config": {"dimension", "metric", "index", "quantization"?}, "points", "data_bytes", "data_sha256", "archive_bytes", "field_indexes"?}`. See [snapshots & backups](/docs/snapshots/).
+A **SnapshotInfo** is `{"format_version", "id", "collection", "created_at_ms", "quiver_version", "config": {"dimension", "metric", "index", "quantization"?, "on_disk"?, "vectors"?, "sparse_vectors"?}, "points", "data_bytes", "data_sha256", "archive_bytes", "field_indexes"?}`. See [snapshots & backups](/docs/snapshots/).
 
 ## Errors
 
@@ -111,16 +124,16 @@ Every error has the same shape:
 
 | Status | Code | Meaning |
 | --- | --- | --- |
-| 400 | `invalid_argument` | a value is out of range or the request is inconsistent: a bad name or dimension, `k` out of range, both or neither of `vector`/`id` or `ids`/`filter`, an empty delete filter, a point that fails validation, a bad query string |
+| 400 | `invalid_argument` | a value is out of range or the request is inconsistent: a bad name or dimension, `k` out of range, not exactly one of `vector`/`id`/`sparse` or of `ids`/`filter`, an unknown `using`, an empty delete filter, a point that fails validation, a settings change that is not allowed, dropping or renaming by alias, a bad query string |
 | 400 | `invalid_body` | malformed JSON, a wrongly typed or unknown field, a missing required field |
 | 400 | `invalid_filter` | the filter does not parse |
 | 400 | `dimension_mismatch` | a query vector of the wrong length |
 | 400 | `invalid_snapshot` | an uploaded archive that cannot be read or fails its checks |
 | 401 | `unauthorized` | no API key, or an unknown one |
 | 403 | `forbidden` | a read-only key on a write route |
-| 404 | `not_found` | no such collection, snapshot or route |
+| 404 | `not_found` | no such collection, alias, snapshot or route |
 | 404 | `point_not_found` | no such point (a get, a single delete, search by id, a recommend example) |
-| 409 | `already_exists` | the collection exists (create, or restore without `replace`) |
+| 409 | `already_exists` | the name is taken by a collection or an alias (create, rename, alias, or restore without `replace`) |
 | 413 | `invalid_body` | a JSON body over `--max-body-mb` |
 | 413 | `payload_too_large` | a snapshot upload over 16 GiB |
 | 415 | `invalid_body` | a JSON route without `content-type: application/json` |
@@ -138,7 +151,7 @@ curl -X POST localhost:6900/collections/places/search -H 'content-type: applicat
 ```text
 {"error":{"code":"not_found","message":"collection `nope` not found"}}
 {"error":{"code":"dimension_mismatch","message":"dimension mismatch: expected 2, got 1"}}
-{"error":{"code":"invalid_body","message":"Failed to deserialize the JSON body into the target type: top_k: unknown field `top_k`, expected one of `vector`, `id`, `k`, `filter`, `ef`, `max_distance`, `with_vectors`, `with_metadata` at line 1 column 30"}}
+{"error":{"code":"invalid_body","message":"Failed to deserialize the JSON body into the target type: top_k: unknown field `top_k`, expected one of `vector`, `id`, `sparse`, `using`, `k`, `filter`, `ef`, `max_distance`, `with_vectors`, `with_metadata` at line 1 column 30"}}
 ```
 
 ## Limits
@@ -149,6 +162,9 @@ curl -X POST localhost:6900/collections/places/search -H 'content-type: applicat
 | Snapshot upload | 16 GiB |
 | `k` | 1–10,000 |
 | Searches per batch | 256 |
+| Searches fused per query | 16 |
+| Non-zero values per sparse vector | 65,536 |
+| Named dense vectors, sparse vectors per collection | 16 each |
 | Ids per lookup or delete, examples per recommend | 10,000 |
 | `limit` when listing | 10,000 |
 

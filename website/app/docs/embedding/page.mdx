@@ -77,9 +77,9 @@ Opening replays each collection's write-ahead log on top of its last checkpoint;
 
 ## Collections
 
-`db.create_collection(name, config)`, `db.get_or_create_collection(name, config)` (an error if the existing one has a different configuration), `db.collection(name)`, `db.collections()`, `db.list_collections()` and `db.drop_collection(name)`. Collections are `Arc<Collection>`, and `Database` and `Collection` are `Send + Sync`: share an `Arc<Database>` between threads. Searches take a read lock, writes a write lock, per collection.
+`db.create_collection(name, config)`, `db.get_or_create_collection(name, config)` (an error if the existing one has a different configuration), `db.collection(name)` (a name or an alias), `db.collections()`, `db.list_collections()` and `db.drop_collection(name)`. `db.update_collection(name, &update)` or `collection.update(&CollectionUpdate)` [changes settings](/docs/collections/#changing-settings), `db.rename_collection(from, to)` returns the renamed collection (handles to the old one are closed), and `db.set_alias(alias, collection)`, `db.delete_alias(alias)` and `db.aliases()` manage [aliases](/docs/collections/#aliases). Collections are `Arc<Collection>`, and `Database` and `Collection` are `Send + Sync`: share an `Arc<Database>` between threads. Searches take a read lock, writes a write lock, per collection.
 
-`CollectionConfig::new(dimension)` builds a config, with `.metric(Metric::…)` and `.index(IndexConfig::…)` to change the defaults (cosine, HNSW).
+`CollectionConfig::new(dimension)` builds a config, with `.metric(Metric::…)` and `.index(IndexConfig::…)` to change the defaults (cosine, HNSW), `.quantization(…)`, `.on_disk(true)`, `.with_vector(name, VectorConfig::new(dim))` for a named vector and `.with_sparse_vector(name, SparseVectorConfig::default())` for a sparse one. `collection.config()` returns a copy of the current settings.
 
 ## Points and searches
 
@@ -95,9 +95,11 @@ Opening replays each collection's write-ahead log on top of its last checkpoint;
 | `search(&vector, k)` | nearest neighbours, with metadata |
 | `search_with(&vector, k, &SearchOptions)` | with a filter, `ef`, `max_distance`, vectors |
 | `search_by_id(id, k, &opts)`, `recommend(&pos, &neg, k, &opts)` | by a stored point; by examples |
+| `search_sparse(name, &SparseVector, k, &opts)` | [sparse search](/docs/searching/#sparse-search) |
+| `query(&HybridQuery, k)` | [hybrid search](/docs/searching/#hybrid-search); `ScoredHit`s |
 | `info()`, `len()`, `flush()`, `compact()`, `create_snapshot()` | housekeeping |
 
-`SearchOptions::default()` includes metadata and leaves vectors out; chain `.filter(f)`, `.ef(n)`, `.max_distance(d)`, `.include_vectors(true)` and `.include_metadata(false)`. Filters are built with `Filter::parse(&json)`, from the [filter syntax](/docs/filtering/).
+`SearchOptions::default()` includes metadata and leaves vectors out; chain `.using(name)` for a named vector, `.filter(f)`, `.ef(n)`, `.max_distance(d)`, `.include_vectors(true)` and `.include_metadata(false)`. Points carry named vectors with `Point::with_vector(name, v)` and sparse ones with `.with_sparse_vector(name, SparseVector::new(indices, values))`. A `HybridQuery::new(vec![Prefetch::new(QueryVector::Dense { vector, using: None }, 50), …])` fuses several searches; set its `filter`, `fusion` and `include_*` fields as needed. Filters are built with `Filter::parse(&json)`, from the [filter syntax](/docs/filtering/).
 
 ```rust
 use quiver_db::{CollectionConfig, Database, IndexConfig, MetadataMode, Metric, Point, PointSelector, SearchOptions};
@@ -141,4 +143,4 @@ With a snapshot directory (any durable database has one), `collection.create_sna
 
 ## Errors
 
-Everything returns `quiver_db::Result<T>`, whose `Error` has a variant per failure: `DimensionMismatch`, `CollectionNotFound`, `CollectionExists`, `SnapshotNotFound`, `PointNotFound`, `InvalidArgument`, `InvalidFilter`, `Unsupported`, `Corrupt`, `Storage`, `Io` and `Serde`. Bad input is an error, never a panic.
+Everything returns `quiver_db::Result<T>`, whose `Error` has a variant per failure: `DimensionMismatch`, `CollectionNotFound`, `CollectionExists`, `AliasNotFound`, `AliasExists`, `SnapshotNotFound`, `PointNotFound`, `InvalidArgument`, `InvalidFilter`, `Unsupported`, `Corrupt`, `Storage`, `Io` and `Serde`. Bad input is an error, never a panic. Failing I/O on an [on-disk](/docs/storage/#vectors-on-disk) vector file is different: it panics in the calling thread, and a write that panics is already in the write-ahead log, so a restart replays it.

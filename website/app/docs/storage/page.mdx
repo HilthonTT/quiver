@@ -2,7 +2,7 @@ export const metadata = { title: "Storage & durability" };
 
 # Storage & durability
 
-Every collection is held in memory: its vectors, metadata and index. A storage engine makes it durable. The engine is chosen per collection when it is created (`--storage`, default `file`) and recorded with it, so one data directory can mix engines.
+Every collection is held in memory: its vectors (unless they are [on disk](#vectors-on-disk)), metadata and index. A storage engine makes it durable. The engine is chosen per collection when it is created (`--storage`, default `file`) and recorded with it, so one data directory can mix engines.
 
 | Engine | Durable | Restart | Needs |
 | --- | --- | --- | --- |
@@ -20,6 +20,7 @@ quiver-data/
 │       ├── collection.json    configuration and engine
 │       ├── state.bin          last checkpoint (file engine)
 │       ├── wal.log            write-ahead log since then (file engine)
+│       ├── vectors-*.f32      vectors kept on disk (on_disk collections)
 │       └── rocksdb/           the RocksDB database (rocksdb engine)
 └── snapshots/                 snapshot archives (unless --snapshot-dir)
 ```
@@ -45,7 +46,9 @@ A checkpoint writes the whole collection, the index included, to `state.bin`, th
 
 The checkpoint is written to a temporary file, synced, renamed over `state.bin`, and the directory is synced; only then is the log truncated. A crash at any point leaves either the old checkpoint and its log, or the new checkpoint.
 
-`state.bin` ends with a CRC-32 of its contents, and records its format version and the collection's dimension. Because it stores the serialised HNSW graph, a restart does not rebuild the index.
+`state.bin` ends with a CRC-32 of its contents, and records its format version and the dimension of every vector. Because it stores the serialised indexes (sparse indexes excepted, which are rebuilt), a restart does not rebuild them. The current format is version 3, which stores named and sparse vectors and refers to on-disk vector files instead of copying them; version 2 checkpoints from earlier releases still load.
+
+If the index settings stored in a checkpoint no longer match the configuration (a [settings change](/docs/collections/#changing-settings) interrupted by a crash), that index is rebuilt on open instead.
 
 ### When something is wrong
 
@@ -73,9 +76,21 @@ A single write may not exceed 1 GiB once encoded (`write batch too large … spl
 
 Build the server with `--features rocksdb` (it needs clang and libclang; see [installation](/docs/installation/#the-rocksdb-engine)) and start it with `--storage rocksdb`. The Docker image includes it.
 
-Each collection gets its own RocksDB database in `collections/<name>/rocksdb`, with one key per point holding its vector and metadata, compressed with LZ4. Every write is a RocksDB write batch, synced when `--fsync` is on. RocksDB keeps no copy of the index, so opening a collection reads every point and rebuilds the index; a flush flushes RocksDB's memtables.
+Each collection gets its own RocksDB database in `collections/<name>/rocksdb`, with one key per point holding its vector and metadata, compressed with LZ4. Every write is a RocksDB write batch, synced when `--fsync` is on. RocksDB keeps no copy of the index, so opening a collection reads every point and rebuilds the index; a flush flushes RocksDB's memtables. Named and sparse vectors are stored with each point; with `on_disk`, opening writes the vectors out to fresh vector files.
 
 A collection created with the RocksDB engine cannot be opened by a build without the feature: the server stops with an `unsupported` error naming the collection.
+
+## Vectors on disk
+
+With `"on_disk": true` on a collection (or on a named vector), the vectors live in a file in the collection's directory, `vectors-<name>-….f32`, one 32-bit float vector after another, instead of in memory. Searches read them with positional reads, so the operating system's page cache keeps the hot ones in memory and the rest stays on disk: a collection can be larger than RAM. Ids, metadata and the index stay in memory.
+
+Combined with scalar quantization, the 8-bit codes stay in memory for the index to search with, about a quarter of the size of the vectors, and the exact vectors on disk [re-rank the results](/docs/searching/#quantized-vectors-on-disk). Without quantization, every distance a search computes reads from the file, so expect searches to be slower than in memory unless the file fits in the page cache.
+
+- Only durable engines (`file`, `rocksdb`) can keep vectors on disk; the memory engine and `--in-memory` refuse it.
+- Writes append to the file after the write-ahead log has the change. Checkpoints sync the file and record how many vectors it holds; on restart anything beyond that is cut off and replayed from the log.
+- Compaction and settings changes write new files. Files no checkpoint refers to any more are deleted after the next checkpoint, and when the collection is opened.
+- `PATCH /collections/{name}` with `{"on_disk": true}` or `false` moves existing vectors to or from disk.
+- An I/O error on a vector file fails the request it happens in. Nothing acknowledged is lost: the change is in the write-ahead log and is replayed on restart.
 
 ## The memory engine
 
@@ -85,8 +100,10 @@ A collection created with the RocksDB engine cannot be opened by a build without
 
 Whatever the engine, every collection lives in memory:
 
-- each vector takes `4 × dimension` bytes (32-bit floats), or `dimension + 8` with [scalar quantization](/docs/indexes/#scalar-quantization), plus its id and its metadata;
+- each vector takes `4 × dimension` bytes (32-bit floats), or `dimension + 8` with [scalar quantization](/docs/indexes/#scalar-quantization), or nothing [on disk](#vectors-on-disk) (`dimension + 8` on disk with quantization), plus its id and its metadata; named vectors count the same way, and sparse vectors take 8 bytes per non-zero value plus as much again in their index;
 - the HNSW index adds each node's neighbour lists: up to `2 × m` links on the bottom layer and `m` on each layer above, at 4 bytes per link; the flat index adds nothing;
 - deleted points keep their slot until [compaction](/docs/collections/#deleting-and-compaction).
 
-A million 768-dimensional vectors are about 3 GB of floats (0.8 GB quantized) before ids, metadata and the index. [`/metrics`](/docs/monitoring/) reports each collection's vector memory as `quiver_collection_vector_bytes`. Size the machine for the collections you keep open: they are all loaded at startup.
+A million 768-dimensional vectors are about 3 GB of floats (0.8 GB quantized) before ids, metadata and the index. [`/metrics`](/docs/monitoring/) reports each collection's vector memory as `quiver_collection_vector_bytes`. Size the machine for the collections you keep open: they are all loaded at startup, apart from vectors on disk.
+
+[Snapshots](/docs/snapshots/) are written through a temporary file rather than built in memory, but restoring one still loads its points into memory before laying them out on disk.

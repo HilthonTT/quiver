@@ -31,6 +31,8 @@ async fn main() -> Result<(), ClientError> {
     let point = |id: &str, vector: Vec<f32>, year: u32| PointInput {
         id: Some(id.into()),
         vector,
+        vectors: Default::default(),
+        sparse_vectors: Default::default(),
         metadata: Some(json!({ "year": year })),
     };
     let written = client
@@ -89,13 +91,16 @@ no point `nope`
 
 ## The API
 
-`Client::new(url)` checks the URL (`http` or `https`) and sets a 30-second request timeout and a 5-second connect timeout. `with_api_key(key)` sends `Authorization: Bearer <key>` with every request; an empty key sends none. A `Client` is cheap to clone.
+`Client::new(url)` checks the URL (`http` or `https`) and sets a 30-second request timeout and a 5-second connect timeout. For a server whose certificate a private CA signed, or one that wants a client certificate, use `Client::with_tls(url, &TlsOptions { ca_pem, identity_pem })`, with PEM bytes: `identity_pem` is the client certificate chain followed by its key. `with_api_key(key)` sends `Authorization: Bearer <key>` with every request; an empty key sends none. A `Client` is cheap to clone.
 
 | Method | Route |
 | --- | --- |
 | `info()` | `GET /info`, as a `ServerInfo` |
 | `list_collections()`, `get_collection(name)` | `GET /collections`, `GET /collections/{name}` |
 | `create_collection(name, &config)`, `drop_collection(name)` | `POST /collections`, `DELETE /collections/{name}` |
+| `update_collection(name, &CollectionUpdate)` | `PATCH /collections/{name}` |
+| `rename_collection(name, new_name)` | `POST …/rename` |
+| `list_aliases()`, `set_alias(alias, collection)`, `delete_alias(alias)` | `GET /aliases`, `PUT /aliases/{alias}`, `DELETE /aliases/{alias}` |
 | `flush(name)`, `compact(name)` | `POST …/flush`, `POST …/compact` |
 | `create_field_index(collection, field)`, `drop_field_index(collection, field)` | `POST …/indexes`, `DELETE …/indexes/{field}` |
 | `upsert(collection, points)` | `POST …/points`; returns an `UpsertResult` with `upserted` and `ids` |
@@ -108,20 +113,22 @@ no point `nope`
 | `search(collection, &SearchRequest)` | `POST …/search` |
 | `search_batch(collection, &[SearchRequest])` | `POST …/search/batch`; one result list per search |
 | `recommend(collection, &RecommendRequest)` | `POST …/recommend` |
+| `query(collection, &QueryRequest)` | `POST …/query`; `ScoredHit`s, best first |
 | `create_snapshot(collection)`, `list_snapshots(collection)`, `get_snapshot(id)` | `POST …/snapshots`, `GET /snapshots`, `GET /snapshots/{id}` |
 | `download_snapshot(id)`, `upload_snapshot(bytes)` | `GET /snapshots/{id}/download`, `POST /snapshots`; these two allow 30 minutes rather than 30 seconds |
 | `restore_snapshot(id, name, replace)`, `delete_snapshot(id)` | `POST /snapshots/{id}/restore`, `DELETE /snapshots/{id}` |
 
-`SearchRequest::new(vector, k)` and `SearchRequest::by_id(id, k)` return metadata and no vectors; their public fields (`filter`, `ef`, `max_distance`, `with_vectors`, `with_metadata`) change the rest. `RecommendRequest::new(positive, k)` works the same way, with a `negative` field. Filters are `serde_json::Value`s in the [filter syntax](/docs/filtering/).
+`SearchRequest::new(vector, k)` and `SearchRequest::by_id(id, k)` return metadata and no vectors; their public fields (`filter`, `ef`, `max_distance`, `with_vectors`, `with_metadata`) change the rest. `SearchRequest::sparse(using, vector, k)` searches a sparse vector, and `.using(name)` a named dense one. `RecommendRequest::new(positive, k)` works the same way, with `negative` and `using` fields. A hybrid query is `QueryRequest::new(vec![Prefetch::dense(vector), Prefetch::sparse("text", sparse).weight(2.0)], k)`; `Prefetch` also has `.using(name)` and `.limit(n)`. Filters are `serde_json::Value`s in the [filter syntax](/docs/filtering/).
 
 The ids `.`, `..`, `lookup`, `delete`, `count` and `metadata` cannot be addressed with `GET …/points/{id}`, so `get_point` looks those up with `POST …/points/lookup` instead.
 
 ## Errors
 
-`ClientError` has three variants:
+`ClientError` has four variants:
 
 - `Api { status, code, message }` — the server answered with an error; `code` is the server's [error code](/docs/rest-api/#errors), such as `not_found` or `dimension_mismatch`.
 - `Http(reqwest::Error)` — no usable answer: connection refused, a timeout, a body that does not decode.
 - `InvalidUrl(String)` — `Client::new` could not use the URL.
+- `Tls(String)` — `TlsOptions` held no usable certificate.
 
 The Rust client covers the whole REST API except `GET /metrics`.

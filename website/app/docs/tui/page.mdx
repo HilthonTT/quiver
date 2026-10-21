@@ -17,6 +17,8 @@ The Docker image includes it too: `docker compose exec quiver quiver-tui`.
 | --- | --- | --- | --- |
 | `--url` | `QUIVER_URL` | `http://localhost:6900` | the server's REST address |
 | `--api-key` | `QUIVER_API_KEY` | none | sent as `Authorization: Bearer <key>` |
+| `--ca-cert` | `QUIVER_CA_CERT` | none | a PEM CA certificate to trust, for an `https://` server with a private CA |
+| `--client-cert` | `QUIVER_CLIENT_CERT` | none | a PEM client certificate followed by its key, for [mutual TLS](/docs/security/#tls) |
 | `--embedding-url` | `QUIVER_EMBEDDING_URL` | none | an OpenAI-compatible embeddings endpoint; enables text input |
 | `--embedding-model` | `QUIVER_EMBEDDING_MODEL` | none | the model name to send |
 | `--embedding-api-key` | `QUIVER_EMBEDDING_API_KEY` | none | a bearer token for the embeddings endpoint |
@@ -27,7 +29,7 @@ Unlike the server, `quiver-tui` does not read a `.env` file. Export the variable
 
 ## Screens
 
-- **Dashboard** — the server's address, version, storage engine, whether snapshots are on, and its totals; below, every collection with its dimension, metric, index, points and tombstones.
+- **Dashboard** — the server's address, version, storage engine, whether snapshots are on, and its totals; below, every collection with its dimension, metric, index, points, tombstones and other (named and sparse) vectors.
 - **Collection** — the collection's points, 50 to a page, in id order, with a preview of their metadata. After a search, the results with their distances; <Kbd>Esc</Kbd> goes back to the points.
 - **Snapshots** — every snapshot, with its collection, point count, creation time and size.
 
@@ -65,8 +67,8 @@ Unlike the server, `quiver-tui` does not read a `.env` file. Export the variable
 ## Forms
 
 - **New collection** — name, dimension, metric and index (`hnsw`, `flat` or `kd_tree`, with default parameters).
-- **Insert** — an id (blank for a generated UUID), the vector as comma-separated numbers or text to embed, and metadata as a JSON object.
-- **Search** — the query, `k` (default 10) and an optional JSON [filter](/docs/filtering/).
+- **Insert** — an id (blank for a generated UUID), the vector as comma-separated numbers or text to embed, and metadata as a JSON object. It sets only the main vector, so collections with named vectors need another client to insert.
+- **Search** — the query, `k` (default 10) and an optional JSON [filter](/docs/filtering/). It searches the main vector.
 - **Restore** — a new name (blank for the original) and whether to replace an existing collection.
 
 Invalid input, such as a non-number in a vector or metadata that is not a JSON object, is reported in the form before anything is sent; server errors are shown in the status line.

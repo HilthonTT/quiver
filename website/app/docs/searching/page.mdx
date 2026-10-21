@@ -2,7 +2,7 @@ export const metadata = { title: "Searching" };
 
 # Searching
 
-A search returns the `k` points nearest to a query, closest first. The query is a vector, or the id of a point already in the collection. The examples use this collection:
+A search returns the `k` points nearest to a query, closest first. The query is a vector, the id of a point already in the collection, or a sparse vector; [hybrid queries](#hybrid-search) fuse several searches into one ranking. The examples use this collection:
 
 ```bash
 curl -X POST localhost:6900/collections -H 'content-type: application/json' \
@@ -43,8 +43,10 @@ curl -X POST localhost:6900/collections/books/search -H 'content-type: applicati
 
 | Field | Default | Meaning |
 | --- | --- | --- |
-| `vector` | | the query; give exactly one of `vector` and `id` |
+| `vector` | | the query; give exactly one of `vector`, `id` and `sparse` |
 | `id` | | search with this point's stored vector; the point itself is left out |
+| `sparse` | | a [sparse query](#sparse-search), `{"indices": [...], "values": [...]}` |
+| `using` | the main vector | the [named vector](#named-vectors) to search; required with `sparse` |
 | `k` | 10 | how many results, 1 to 10,000 |
 | `filter` | none | a [filter](/docs/filtering/) on metadata |
 | `ef` | the collection's `ef_search` | HNSW beam width for this query; ignored by exact indexes |
@@ -101,9 +103,73 @@ curl -X POST localhost:6900/collections/books/search -H 'content-type: applicati
 {"results":[{"distance":0.006116271018981934,"id":"dune"},{"distance":0.036913156509399414,"id":"foundation"}]}
 ```
 
+## Named vectors
+
+In a collection with [named vectors](/docs/collections/#named-and-sparse-vectors), `using` picks the one to search; the query must have that vector's dimension. It works for searches by vector and by id (which then use the point's named vector), recommendations and batch searches.
+
+```bash
+curl -X POST localhost:6900/collections/papers/search -H 'content-type: application/json' \
+  -d '{"vector": [0.5, 0.5], "using": "title", "k": 5}'
+```
+
+`with_vectors` returns every vector of each result: `vector`, `vectors` (named) and `sparse_vectors`.
+
+## Sparse search
+
+`sparse` with `using` naming a sparse vector scores points by the dot product of their sparse vector with the query, weighted by IDF if the sparse vector's `modifier` is `idf`. Only points sharing at least one index with the query come back, best first. The search is exact.
+
+```bash
+curl -X POST localhost:6900/collections/papers/search -H 'content-type: application/json' \
+  -d '{"sparse": {"indices": [17], "values": [1.0]}, "using": "text", "k": 5}'
+```
+
+```json
+{"results":[{"distance":-0.5,"id":"p1"}]}
+```
+
+To keep "lower is closer" everywhere, a sparse hit's `distance` is its **negated score**; `max_distance` applies to it the same way. `filter` works as for dense searches; `ef` has no effect.
+
+## Hybrid search
+
+`POST /collections/{name}/query` runs several searches, typically one dense and one sparse, and fuses their rankings with reciprocal rank fusion: a point at rank `r` (from 1) of a search scores `weight / (k + r)` there, and its scores add up across searches. Rank fusion needs no calibration between distances and keyword scores.
+
+```bash
+curl -X POST localhost:6900/collections/papers/query -H 'content-type: application/json' -d '{
+  "prefetch": [
+    {"vector": [0.1, 0.2, 0.3, 0.4], "limit": 50},
+    {"sparse": {"indices": [17, 4], "values": [1.0, 1.0]}, "using": "text", "weight": 2.0}
+  ],
+  "fusion": {"type": "rrf", "k": 60},
+  "k": 10,
+  "filter": {"year": {"$gte": 2000}}
+}'
+```
+
+```json
+{"results":[{"id":"p1","score":0.04918033},{"id":"p7","score":0.016129032}]}
+```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `prefetch` | | 1 to 16 searches, each with exactly one of `vector` and `sparse` |
+| `prefetch[].using` | the main vector | the named vector to search; required with `sparse` |
+| `prefetch[].limit` | `max(k, 50)` | how many of its best hits take part |
+| `prefetch[].weight` | 1 | multiplies its contribution; 0 ignores it |
+| `prefetch[].ef`, `prefetch[].max_distance` | | as for a search |
+| `fusion` | `{"type": "rrf", "k": 60}` | the fusion method and its constant |
+| `k` | 10 | how many results |
+| `filter` | none | applies to every search |
+| `with_vectors`, `with_metadata` | `false`, `true` | as for a search |
+
+Results carry a `score` instead of a `distance`: **higher is better**.
+
+## Quantized vectors on disk
+
+A vector with scalar quantization and `on_disk` keeps its 8-bit codes in memory and the exact vectors [on disk](/docs/storage/#vectors-on-disk). Searches walk the index with the codes, fetching 4 × `k` candidates, then re-rank them by their exact distances from disk. Returned distances and vectors are exact.
+
 ## Batch search
 
-`POST /collections/{name}/search/batch` runs up to 256 searches in one request. Each entry takes every search field above, so entries can mix vectors and ids. Results come back as one list per search, in order:
+`POST /collections/{name}/search/batch` runs up to 256 searches in one request. Each entry takes every search field above, so entries can mix vectors, ids, sparse queries and named vectors. Results come back as one list per search, in order:
 
 ```bash
 curl -X POST localhost:6900/collections/books/search/batch -H 'content-type: application/json' -d '{
@@ -134,6 +200,20 @@ print([h.id for h in books.search([1.0, 0.0, 0.0], k=10, max_distance=0.1, ef=12
 print([[h.id for h in hits] for hits in books.search_batch([[0, 1, 0], [0, 0, 1]], k=1)])
 ```
 
+Named, sparse and hybrid searches, on the `papers` collection:
+
+```python
+from quiver import Prefetch
+
+papers = Client("http://localhost:6900").collection("papers")
+papers.search([0.5, 0.5], k=5, using="title")
+papers.search_sparse({17: 1.0}, k=5, using="text")
+papers.query(
+    [Prefetch(vector=[0.1, 0.2, 0.3, 0.4]), Prefetch(sparse={17: 1.0, 4: 1.0}, using="text", weight=2.0)],
+    k=10,
+)
+```
+
 ```text
 ['foundation', 'hobbit']
 ['foundation']
@@ -142,13 +222,13 @@ print([[h.id for h in hits] for hits in books.search_batch([[0, 1, 0], [0, 0, 1]
 [['hobbit'], ['emma']]
 ```
 
-`search_batch` sends the same `k`, filter and `ef` with every vector. The [Rust client](/docs/rust-client/) has `SearchRequest::new(vector, k)` and `SearchRequest::by_id(id, k)`.
+`search_batch` sends the same `k`, filter and `ef` with every vector. The [Rust client](/docs/rust-client/) has `SearchRequest::new(vector, k)`, `SearchRequest::by_id(id, k)`, `SearchRequest::sparse(using, vector, k)` and `.using(name)`, and `QueryRequest` for hybrid queries.
 
 ## Errors
 
 | Status | Code | When |
 | --- | --- | --- |
-| 400 | `invalid_argument` | `k` outside 1–10,000, both or neither of `vector` and `id`, more than 256 searches in a batch, no positive example |
+| 400 | `invalid_argument` | `k` outside 1–10,000, not exactly one of `vector`, `id` and `sparse`, `sparse` without `using`, an unknown or wrong-kind `using`, an invalid sparse vector, more than 256 searches in a batch or 16 prefetches in a query, a negative weight, no positive example |
 | 400 | `dimension_mismatch` | the query vector has the wrong length |
 | 400 | `invalid_filter` | the filter does not parse |
 | 400 | `invalid_body` | malformed JSON or an unknown field |
