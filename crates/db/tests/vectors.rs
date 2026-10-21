@@ -1,6 +1,6 @@
 use quiver_db::{
-    CollectionConfig, Database, DbOptions, Error, Filter, HybridQuery, IndexConfig, Metric, Point, Prefetch,
-    Quantization, QueryVector, RestoreOptions, SearchOptions, SparseModifier, SparseVector,
+    CollectionConfig, CollectionUpdate, Database, DbOptions, Error, Filter, HybridQuery, IndexConfig, Metric,
+    Point, Prefetch, Quantization, QueryVector, RestoreOptions, SearchOptions, SparseModifier, SparseVector,
     SparseVectorConfig, StorageKind, VectorConfig,
 };
 use serde_json::json;
@@ -396,6 +396,12 @@ fn on_disk_vectors_need_a_durable_engine() {
         db.create_collection("docs", on_disk_config()),
         Err(Error::InvalidArgument(_))
     ));
+    let c = db.create_collection("docs", config()).unwrap();
+    let update = CollectionUpdate {
+        on_disk: Some(true),
+        ..Default::default()
+    };
+    assert!(c.update(&update).is_err());
 }
 
 #[test]
@@ -459,4 +465,77 @@ fn on_disk_collections_snapshot_and_restore() {
     );
     assert_eq!(restored.vector_bytes(), 100 * (4 + 8));
     assert_eq!(vector_files(dir.path()), 2);
+}
+
+#[test]
+fn updates_rebuild_indexes_and_move_vectors() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db = Database::open(dir.path()).unwrap();
+        let c = db.create_collection("docs", config()).unwrap();
+        c.upsert((0..300).map(point)).unwrap();
+        let before = c.search(&vec_for(7, 4, 1), 5).unwrap();
+
+        let update: CollectionUpdate = serde_json::from_value(json!({
+            "index": {"type": "flat"},
+            "on_disk": true,
+            "vectors": {"title": {"index": {"type": "hnsw", "m": 8}, "quantization": "scalar"}},
+            "sparse_vectors": {"text": {"modifier": "idf"}},
+        }))
+        .unwrap();
+        let info = c.update(&update).unwrap();
+        assert_eq!(info.config.index, IndexConfig::Flat);
+        assert!(info.config.on_disk);
+        assert_eq!(info.config.sparse_vectors["text"].modifier, SparseModifier::Idf);
+        assert_eq!(c.search(&vec_for(7, 4, 1), 5).unwrap(), before, "flat is exact");
+        assert_eq!(vector_files(dir.path()), 1);
+        let title = c
+            .search_with(&vec_for(7, 3, 2), 1, &SearchOptions::default().using("title"))
+            .unwrap();
+        assert_eq!(title[0].id, "p7");
+        c.upsert((300..310).map(point)).unwrap();
+    }
+    let db = Database::open(dir.path()).unwrap();
+    let c = db.collection("docs").unwrap();
+    assert!(c.config().on_disk);
+    assert_eq!(c.config().vectors["title"].quantization, Quantization::Scalar);
+    assert_eq!(c.len(), 310);
+    assert_eq!(c.get("p305").unwrap().vector, vec_for(305, 4, 1));
+
+    // ...and back into memory.
+    let back = CollectionUpdate {
+        on_disk: Some(false),
+        ..Default::default()
+    };
+    c.update(&back).unwrap();
+    assert_eq!(vector_files(dir.path()), 0);
+    assert_eq!(c.get("p305").unwrap().vector, vec_for(305, 4, 1));
+
+    // Dimensions, metrics and the set of vectors cannot change.
+    for bad in [
+        json!({"dimension": 8}),
+        json!({"metric": "cosine"}),
+        json!({"vectors": {"body": {"on_disk": true}}}),
+        json!({"index": {"type": "kd_tree"}, "quantization": "scalar"}),
+    ] {
+        let parsed = serde_json::from_value::<CollectionUpdate>(bad.clone());
+        assert!(parsed.map_or(true, |u| c.update(&u).is_err()), "{bad}");
+    }
+}
+
+#[test]
+fn ef_search_changes_keep_the_graph() {
+    let db = Database::in_memory();
+    let c = db.create_collection("docs", CollectionConfig::new(4)).unwrap();
+    c.upsert((0..500).map(|i| Point::new(format!("p{i}"), vec_for(i, 4, 1))))
+        .unwrap();
+    let before = c.search(&vec_for(3, 4, 1), 10).unwrap();
+    let update: CollectionUpdate = serde_json::from_value(json!({"index": {"ef_search": 200}})).unwrap();
+    let info = c.update(&update).unwrap();
+    let IndexConfig::Hnsw(p) = info.config.index else {
+        panic!()
+    };
+    assert_eq!(p.ef_search, 200);
+    let after = c.search(&vec_for(3, 4, 1), 10).unwrap();
+    assert_eq!(after[0], before[0]);
 }

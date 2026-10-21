@@ -4,18 +4,18 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-use parking_lot::RwLock;
-use quiver_index::{Neighbor, TopK};
+use parking_lot::{RwLock, RwLockUpgradableReadGuard};
+use quiver_index::{Index, Neighbor, TopK};
 use quiver_snapshot::{SnapshotInfo, SnapshotRegistry};
 use quiver_storage::column::remove_stale_disk_files;
 use quiver_storage::{
-    Mutation, Op, Recovered, StorageEngine, StorageKind, StorageOptions, StoreSpec, VectorStore, open_engine,
-    state,
+    Mutation, Op, Recovered, StorageEngine, StorageKind, StorageOptions, StoreSpec, VectorColumn,
+    VectorStore, open_engine, state,
 };
 use quiver_types::{
-    CollectionConfig, CollectionInfo, Error, Filter, Fusion, HybridQuery, MAX_ID_LEN, MAX_METADATA_DEPTH,
-    MetadataMode, Metric, Point, PointSelector, QueryVector, Result, ScoredHit, SearchHit, SearchOptions,
-    SparseVector, VectorConfig, merge_patch,
+    CollectionConfig, CollectionInfo, CollectionUpdate, Error, Filter, Fusion, HybridQuery, IndexConfig,
+    MAX_ID_LEN, MAX_METADATA_DEPTH, MetadataMode, Metric, Point, PointSelector, QueryVector, Result,
+    ScoredHit, SearchHit, SearchOptions, SparseVector, VectorConfig, merge_patch,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -242,6 +242,73 @@ impl Collection {
         Ok(collection)
     }
 
+    /// Moves this collection to `name`, its files to `dir`, and returns the
+    /// handle to use from now on. This handle is closed, as if dropped.
+    pub(crate) fn relocate(&self, name: &str, dir: Option<&Path>) -> Result<Self> {
+        let mut inner = self.inner.write();
+        self.ensure_open()?;
+        let placeholder = || open_engine(StorageKind::Memory, None, StorageOptions::default());
+        let meta_dir = match (&self.meta_dir, dir.filter(|_| self.storage.is_durable())) {
+            (Some(old), Some(new)) => {
+                self.checkpoint(&mut inner)?;
+                // Close every file first: RocksDB (and Windows) cannot have
+                // the directory moved from under open files.
+                let spec = inner.store.spec();
+                drop(std::mem::replace(&mut inner.engine, placeholder()?));
+                drop(std::mem::replace(&mut inner.store, VectorStore::new(1)));
+                let moved = (|| {
+                    if new.exists() {
+                        fs::remove_dir_all(new)?;
+                    }
+                    fs::rename(old, new)?;
+                    state::sync_parent(new)
+                })();
+                let at = if moved.is_ok() { new } else { old };
+                // Everything was checkpointed, so it comes back as it was,
+                // though RocksDB may hand the points back in another order.
+                let reopened = (|| {
+                    let mut engine = open_engine(
+                        self.storage,
+                        Some(&engine_dir(at, self.storage)),
+                        self.env.storage_options,
+                    )?;
+                    let Recovered { store, index, .. } = engine.recover(&StoreSpec {
+                        dir: Some(at.to_path_buf()),
+                        ..spec
+                    })?;
+                    let indexes = Indexes::from_bytes(index.as_deref(), &inner.config, &store)?;
+                    Ok::<_, Error>((engine, store, indexes))
+                })();
+                let (engine, store, indexes) = match reopened {
+                    Ok(parts) => parts,
+                    Err(e) => {
+                        // The files are intact, but this handle has nothing
+                        // left to serve; reopening the database brings it back.
+                        self.closed.store(true, Ordering::Release);
+                        tracing::error!(collection = %self.name, dir = %at.display(), error = %e, "could not reopen collection after moving it");
+                        return Err(e);
+                    }
+                };
+                inner.fields = FieldIndexes::build(&inner.fields.names(), &store);
+                inner.indexes = indexes;
+                inner.engine = engine;
+                inner.store = store;
+                moved?;
+                Some(new.to_path_buf())
+            }
+            _ => None,
+        };
+        self.closed.store(true, Ordering::Release);
+        let parts = Inner {
+            config: inner.config.clone(),
+            store: std::mem::replace(&mut inner.store, VectorStore::new(1)),
+            indexes: inner.indexes.clone(),
+            fields: std::mem::take(&mut inner.fields),
+            engine: std::mem::replace(&mut inner.engine, placeholder()?),
+        };
+        Ok(Self::from_parts(name, meta_dir, self.env.clone(), parts))
+    }
+
     fn from_parts(name: &str, meta_dir: Option<PathBuf>, env: Env, inner: Inner) -> Self {
         Self {
             name: name.to_owned(),
@@ -300,6 +367,109 @@ impl Collection {
             tombstones: inner.store.tombstones(),
             field_indexes: inner.fields.names(),
         }
+    }
+
+    /// Changes the collection's index, quantization or on-disk settings.
+    ///
+    /// Indexes whose settings changed (other than `ef_search`) are rebuilt,
+    /// and vectors are moved to or from disk. That can take a while; reads
+    /// carry on meanwhile, writes wait.
+    pub fn update(&self, update: &CollectionUpdate) -> Result<CollectionInfo> {
+        let inner = self.inner.upgradable_read();
+        self.ensure_open()?;
+        let old = &inner.config;
+        let new = update.apply(old)?;
+        if new.uses_disk() && !self.storage.is_durable() {
+            return Err(Error::invalid(
+                "vectors can only be kept on disk with a durable storage engine",
+            ));
+        }
+        if &new == old {
+            drop(inner);
+            return Ok(self.info());
+        }
+
+        // Lay out the vectors anew where that changed.
+        let mut columns = Vec::new();
+        let dir = self.meta_dir.as_deref();
+        let target = StoreSpec::for_config(&new, dir);
+        let changed = std::iter::once((None, target.main))
+            .chain(target.named.iter().map(|(n, c)| (Some(n.as_str()), *c)));
+        for (using, spec) in changed {
+            let column = inner
+                .store
+                .column(using)
+                .expect("store has the configured vectors");
+            if column.spec() != spec {
+                let file = using.unwrap_or("main");
+                columns.push((using.map(str::to_owned), column.convert(spec, dir, file)?));
+            }
+        }
+
+        // Rebuild indexes whose settings changed; `ef_search` alone needs none.
+        let mut indexes = inner.indexes.clone();
+        let rebuilt =
+            |o: &VectorConfig, n: &VectorConfig, index: &mut Index, column: &VectorColumn| -> Result<bool> {
+                if o.index == n.index {
+                    return Ok(false);
+                }
+                if same_but_ef_search(&o.index, &n.index) {
+                    *index = Index::from_bytes(&index.to_bytes(), &n.index, n.metric, column)?;
+                    return Ok(false);
+                }
+                *index = Index::build(&n.index, n.metric, column);
+                Ok(true)
+            };
+        let mut rebuilds = Vec::new();
+        if rebuilt(
+            &old.main_vector(),
+            &new.main_vector(),
+            &mut indexes.main,
+            inner.store.main(),
+        )? {
+            rebuilds.push(String::from("main"));
+        }
+        for (name, n) in &new.vectors {
+            let column = inner
+                .store
+                .column(Some(name))
+                .expect("store has the configured vectors");
+            let index = indexes
+                .named
+                .get_mut(name)
+                .expect("indexes cover the configured vectors");
+            if rebuilt(&old.vectors[name], n, index, column)? {
+                rebuilds.push(name.clone());
+            }
+        }
+
+        let mut inner = RwLockUpgradableReadGuard::upgrade(inner);
+        let mut previous_columns = Vec::new();
+        for (using, column) in columns {
+            let old = inner.store.replace_column(using.as_deref(), column);
+            previous_columns.push((using, old));
+        }
+        let previous_indexes = std::mem::replace(&mut inner.indexes, indexes);
+        let previous_config = std::mem::replace(&mut inner.config, new);
+        // Old vector files stay until both are saved, so going back works.
+        let persisted = self
+            .checkpoint_keeping_files(&mut inner)
+            .and_then(|()| self.write_meta_locked(&inner));
+        if let Err(e) = persisted {
+            tracing::error!(collection = %self.name, error = %e, "could not save the new settings");
+            for (using, column) in previous_columns {
+                inner.store.replace_column(using.as_deref(), column);
+            }
+            inner.indexes = previous_indexes;
+            inner.config = previous_config;
+            return Err(e);
+        }
+        drop(previous_columns);
+        self.cleanup_disk_files(&inner)?;
+        self.bump();
+        tracing::info!(collection = %self.name, rebuilt = ?rebuilds, "updated collection settings");
+        drop(inner);
+        Ok(self.info())
     }
 
     /// Indexes a metadata field (a dot-separated path, as in filters) so
@@ -759,6 +929,11 @@ impl Collection {
         self.closed.store(true, Ordering::Release);
     }
 
+    /// Whether this handle was dropped, replaced or moved.
+    pub(crate) fn is_closed(&self) -> bool {
+        self.closed.load(Ordering::Acquire)
+    }
+
     fn ensure_open(&self) -> Result<()> {
         if self.closed.load(Ordering::Acquire) {
             return Err(Error::CollectionNotFound(self.name.clone()));
@@ -820,6 +995,18 @@ impl Collection {
             Some(dir) => remove_stale_disk_files(dir, &inner.store.disk_files()),
             None => Ok(()),
         }
+    }
+}
+
+/// Whether two index settings differ only in the HNSW search width.
+fn same_but_ef_search(a: &IndexConfig, b: &IndexConfig) -> bool {
+    match (a, b) {
+        (IndexConfig::Hnsw(a), IndexConfig::Hnsw(b)) => {
+            let mut a = *a;
+            a.ef_search = b.ef_search;
+            a == *b
+        }
+        _ => false,
     }
 }
 

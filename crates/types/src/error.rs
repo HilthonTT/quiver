@@ -14,6 +14,12 @@ pub enum Error {
     #[error("collection `{0}` already exists")]
     CollectionExists(String),
 
+    #[error("alias `{0}` not found")]
+    AliasNotFound(String),
+
+    #[error("`{0}` is already an alias")]
+    AliasExists(String),
+
     #[error("snapshot `{0}` not found")]
     SnapshotNotFound(String),
 

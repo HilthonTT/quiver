@@ -6,7 +6,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use quiver_snapshot::{SnapshotInfo, SnapshotRegistry};
 use quiver_storage::{StorageKind, StorageOptions, state};
-use quiver_types::{CollectionConfig, CollectionInfo, Error, Result, validate_name};
+use quiver_types::{CollectionConfig, CollectionInfo, CollectionUpdate, Error, Result, validate_name};
 
 use crate::collection::{Collection, Env, META_FILE};
 use crate::fields::FieldIndexes;
@@ -15,6 +15,34 @@ use crate::metrics::Metrics;
 const COLLECTIONS_DIR: &str = "collections";
 const SNAPSHOTS_DIR: &str = "snapshots";
 const LOCK_FILE: &str = "LOCK";
+const ALIASES_FILE: &str = "aliases.json";
+
+/// Collections and the aliases pointing at them, which share one namespace.
+#[derive(Debug, Default)]
+struct Catalog {
+    collections: BTreeMap<String, Arc<Collection>>,
+    /// Alias to collection name.
+    aliases: BTreeMap<String, String>,
+}
+
+impl Catalog {
+    fn get(&self, name: &str) -> Option<&Arc<Collection>> {
+        self.collections
+            .get(name)
+            .or_else(|| self.aliases.get(name).and_then(|c| self.collections.get(c)))
+    }
+
+    /// Fails if `name` is taken by a collection or an alias.
+    fn ensure_free(&self, name: &str) -> Result<()> {
+        if self.collections.contains_key(name) {
+            return Err(Error::CollectionExists(name.to_owned()));
+        }
+        if self.aliases.contains_key(name) {
+            return Err(Error::AliasExists(name.to_owned()));
+        }
+        Ok(())
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DbOptions {
@@ -49,7 +77,7 @@ pub struct Database {
     root: Option<PathBuf>,
     options: DbOptions,
     env: Env,
-    collections: RwLock<BTreeMap<String, Arc<Collection>>>,
+    catalog: RwLock<Catalog>,
     metrics: Metrics,
     /// Held for the lifetime of the database to keep other processes out.
     _lock: Option<File>,
@@ -113,6 +141,7 @@ impl Database {
         };
 
         let mut collections = BTreeMap::new();
+        let mut aliases = BTreeMap::new();
         if let Some(root) = &root {
             let dir = root.join(COLLECTIONS_DIR);
             fs::create_dir_all(&dir)?;
@@ -128,14 +157,22 @@ impl Database {
                 let collection = Collection::open(&name, &entry.path(), env.clone())?;
                 collections.insert(name, Arc::new(collection));
             }
-            tracing::info!(path = %root.display(), storage = %options.storage, collections = collections.len(), "opened database");
+            aliases = read_aliases(root)?;
+            aliases.retain(|alias, target| {
+                let ok = collections.contains_key(target) && !collections.contains_key(alias);
+                if !ok {
+                    tracing::warn!(alias, collection = %target, "dropping alias to a missing collection");
+                }
+                ok
+            });
+            tracing::info!(path = %root.display(), storage = %options.storage, collections = collections.len(), aliases = aliases.len(), "opened database");
         }
 
         Ok(Self {
             root,
             options,
             env,
-            collections: RwLock::new(collections),
+            catalog: RwLock::new(Catalog { collections, aliases }),
             metrics: Metrics::default(),
             _lock: lock,
         })
@@ -161,10 +198,8 @@ impl Database {
     pub fn create_collection(&self, name: &str, config: CollectionConfig) -> Result<Arc<Collection>> {
         validate_name(name)?;
 
-        let mut collections = self.collections.write();
-        if collections.contains_key(name) {
-            return Err(Error::CollectionExists(name.to_owned()));
-        }
+        let mut catalog = self.catalog.write();
+        catalog.ensure_free(name)?;
         let dir = self.collection_dir(name);
         let collection = Arc::new(Collection::create(
             name,
@@ -172,7 +207,9 @@ impl Database {
             dir.as_deref(),
             self.env.clone(),
         )?);
-        collections.insert(name.to_owned(), Arc::clone(&collection));
+        catalog
+            .collections
+            .insert(name.to_owned(), Arc::clone(&collection));
         Ok(collection)
     }
 
@@ -207,8 +244,9 @@ impl Database {
         }
     }
 
+    /// The collection called `name`, or the one the alias `name` points to.
     pub fn collection(&self, name: &str) -> Result<Arc<Collection>> {
-        self.collections
+        self.catalog
             .read()
             .get(name)
             .cloned()
@@ -216,19 +254,146 @@ impl Database {
     }
 
     pub fn collections(&self) -> Vec<Arc<Collection>> {
-        self.collections.read().values().cloned().collect()
+        self.catalog.read().collections.values().cloned().collect()
     }
 
     pub fn list_collections(&self) -> Vec<CollectionInfo> {
-        self.collections.read().values().map(|c| c.info()).collect()
+        self.catalog
+            .read()
+            .collections
+            .values()
+            .map(|c| c.info())
+            .collect()
     }
 
+    /// Drops a collection, by its own name (not an alias), and every alias
+    /// pointing to it.
     pub fn drop_collection(&self, name: &str) -> Result<()> {
-        let mut collections = self.collections.write();
-        let removed = collections
+        let mut catalog = self.catalog.write();
+        if catalog.aliases.contains_key(name) {
+            return Err(Error::invalid(format!(
+                "`{name}` is an alias; drop the collection by its own name"
+            )));
+        }
+        let removed = catalog
+            .collections
             .remove(name)
             .ok_or_else(|| Error::CollectionNotFound(name.to_owned()))?;
+        let before = catalog.aliases.len();
+        catalog.aliases.retain(|_, target| target != name);
+        if catalog.aliases.len() != before {
+            self.write_aliases(&catalog.aliases)?;
+        }
         self.remove_files(name, removed)
+    }
+
+    /// Changes a collection's settings; see [`Collection::update`].
+    pub fn update_collection(&self, name: &str, update: &CollectionUpdate) -> Result<CollectionInfo> {
+        self.collection(name)?.update(update)
+    }
+
+    /// Renames a collection (given by its own name, not an alias). Aliases
+    /// follow it; snapshots keep the name they were taken under.
+    pub fn rename_collection(&self, from: &str, to: &str) -> Result<Arc<Collection>> {
+        validate_name(to)?;
+        let mut catalog = self.catalog.write();
+        if catalog.aliases.contains_key(from) {
+            return Err(Error::invalid(format!(
+                "`{from}` is an alias; rename the collection by its own name"
+            )));
+        }
+        let old = catalog
+            .collections
+            .get(from)
+            .cloned()
+            .ok_or_else(|| Error::CollectionNotFound(from.to_owned()))?;
+        if from == to {
+            return Ok(old);
+        }
+        catalog.ensure_free(to)?;
+        let renamed = match old.relocate(to, self.collection_dir(to).as_deref()) {
+            Ok(renamed) => Arc::new(renamed),
+            Err(e) => {
+                if old.is_closed() {
+                    // Unusable until the database is reopened.
+                    catalog.collections.remove(from);
+                }
+                return Err(e);
+            }
+        };
+        catalog.collections.remove(from);
+        catalog.collections.insert(to.to_owned(), Arc::clone(&renamed));
+        let mut moved = false;
+        for target in catalog.aliases.values_mut() {
+            if target == from {
+                *target = to.to_owned();
+                moved = true;
+            }
+        }
+        if moved {
+            self.write_aliases(&catalog.aliases)?;
+        }
+        tracing::info!(from, to, "renamed collection");
+        Ok(renamed)
+    }
+
+    /// Every alias, with the collection it points to.
+    pub fn aliases(&self) -> BTreeMap<String, String> {
+        self.catalog.read().aliases.clone()
+    }
+
+    /// Points `alias` at `collection` (by its own name), creating the alias
+    /// or atomically moving it from the collection it pointed at before.
+    pub fn set_alias(&self, alias: &str, collection: &str) -> Result<()> {
+        validate_name(alias)?;
+        let mut catalog = self.catalog.write();
+        if catalog.collections.contains_key(alias) {
+            return Err(Error::CollectionExists(alias.to_owned()));
+        }
+        if !catalog.collections.contains_key(collection) {
+            return Err(match catalog.aliases.contains_key(collection) {
+                true => Error::invalid(format!(
+                    "`{collection}` is an alias; point aliases at collections"
+                )),
+                false => Error::CollectionNotFound(collection.to_owned()),
+            });
+        }
+        let previous = catalog.aliases.insert(alias.to_owned(), collection.to_owned());
+        if let Err(e) = self.write_aliases(&catalog.aliases) {
+            match previous {
+                Some(p) => catalog.aliases.insert(alias.to_owned(), p),
+                None => catalog.aliases.remove(alias),
+            };
+            return Err(e);
+        }
+        tracing::info!(alias, collection, "set alias");
+        Ok(())
+    }
+
+    /// Removes an alias; the collection it points to stays.
+    pub fn delete_alias(&self, alias: &str) -> Result<()> {
+        let mut catalog = self.catalog.write();
+        let target = catalog
+            .aliases
+            .remove(alias)
+            .ok_or_else(|| Error::AliasNotFound(alias.to_owned()))?;
+        if let Err(e) = self.write_aliases(&catalog.aliases) {
+            catalog.aliases.insert(alias.to_owned(), target);
+            return Err(e);
+        }
+        Ok(())
+    }
+
+    fn write_aliases(&self, aliases: &BTreeMap<String, String>) -> Result<()> {
+        let Some(root) = &self.root else {
+            return Ok(());
+        };
+        let path = root.join(ALIASES_FILE);
+        let tmp = path.with_extension("tmp");
+        fs::write(&tmp, serde_json::to_vec_pretty(aliases)?)?;
+        File::open(&tmp)?.sync_all()?;
+        fs::rename(&tmp, &path)?;
+        state::sync_parent(&path)
     }
 
     fn remove_files(&self, name: &str, collection: Arc<Collection>) -> Result<()> {
@@ -270,8 +435,18 @@ impl Database {
         self.collection(collection)?.create_snapshot()
     }
 
+    /// Snapshots, of one collection (by its name or an alias) or of all.
     pub fn list_snapshots(&self, collection: Option<&str>) -> Result<Vec<SnapshotInfo>> {
-        self.snapshots()?.list(collection)
+        // Snapshots are filed under collections' own names. Ones of dropped
+        // collections are still listed under the name they were taken with.
+        let resolved = collection.map(|name| {
+            let catalog = self.catalog.read();
+            match (catalog.collections.contains_key(name), catalog.aliases.get(name)) {
+                (false, Some(target)) => target.clone(),
+                _ => name.to_owned(),
+            }
+        });
+        self.snapshots()?.list(resolved.as_deref())
     }
 
     pub fn delete_snapshot(&self, id: &str) -> Result<()> {
@@ -286,10 +461,13 @@ impl Database {
         let indexes =
             Collection::snapshot_indexes(&loaded.manifest.config, &loaded.store, loaded.index.as_deref())?;
 
-        let mut collections = self.collections.write();
-        if let Some(existing) = collections.remove(&name) {
+        let mut catalog = self.catalog.write();
+        if catalog.aliases.contains_key(&name) {
+            return Err(Error::AliasExists(name));
+        }
+        if let Some(existing) = catalog.collections.remove(&name) {
             if !opts.replace {
-                collections.insert(name.clone(), existing);
+                catalog.collections.insert(name.clone(), existing);
                 return Err(Error::CollectionExists(name));
             }
             self.remove_files(&name, existing)?;
@@ -304,9 +482,17 @@ impl Database {
             dir.as_deref(),
             self.env.clone(),
         )?);
-        collections.insert(name.clone(), Arc::clone(&collection));
+        catalog.collections.insert(name.clone(), Arc::clone(&collection));
         tracing::info!(snapshot = id, collection = %name, points = collection.len(), "restored snapshot");
         Ok(collection)
+    }
+}
+
+fn read_aliases(root: &Path) -> Result<BTreeMap<String, String>> {
+    match fs::read(root.join(ALIASES_FILE)) {
+        Ok(bytes) => Ok(serde_json::from_slice(&bytes)?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(BTreeMap::new()),
+        Err(e) => Err(e.into()),
     }
 }
 

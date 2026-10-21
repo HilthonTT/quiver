@@ -309,6 +309,111 @@ impl SparseModifier {
     }
 }
 
+/// Changes to a collection's settings, for `Collection::update`.
+///
+/// Dimensions and metrics are fixed once a collection exists, as are the
+/// sets of named and sparse vectors.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct CollectionUpdate {
+    /// Changes to the main vector's index; see [`VectorUpdate::index`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantization: Option<Quantization>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_disk: Option<bool>,
+    /// Changes to named vectors.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub vectors: BTreeMap<String, VectorUpdate>,
+    /// Changes to sparse vectors.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub sparse_vectors: BTreeMap<String, SparseVectorConfig>,
+}
+
+/// Changes to one dense vector's settings. Absent fields stay as they are.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct VectorUpdate {
+    /// The new index settings, as a JSON Merge Patch (RFC 7386) over the
+    /// current ones: `{"ef_search": 128}` changes just that parameter, and a
+    /// different `type` replaces the index (its other parameters take their
+    /// defaults). Anything but an `ef_search` change rebuilds the index.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub index: Option<serde_json::Value>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub quantization: Option<Quantization>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_disk: Option<bool>,
+}
+
+impl VectorUpdate {
+    pub fn is_empty(&self) -> bool {
+        self.index.is_none() && self.quantization.is_none() && self.on_disk.is_none()
+    }
+
+    /// `config` with these changes made.
+    pub fn apply(&self, config: &VectorConfig) -> Result<VectorConfig> {
+        let mut out = *config;
+        if let Some(patch) = &self.index {
+            let patch_type = patch.get("type").and_then(|t| t.as_str());
+            let mut index = if patch_type.is_none_or(|t| t == config.index.kind()) {
+                serde_json::to_value(config.index)?
+            } else {
+                serde_json::Value::Object(serde_json::Map::new())
+            };
+            crate::merge_patch(&mut index, patch);
+            out.index = serde_json::from_value(index)
+                .map_err(|e| Error::invalid(format!("invalid index settings: {e}")))?;
+        }
+        if let Some(q) = self.quantization {
+            out.quantization = q;
+        }
+        if let Some(on_disk) = self.on_disk {
+            out.on_disk = on_disk;
+        }
+        out.validate()?;
+        Ok(out)
+    }
+}
+
+impl CollectionUpdate {
+    /// `config` with these changes made.
+    pub fn apply(&self, config: &CollectionConfig) -> Result<CollectionConfig> {
+        let mut out = config.clone();
+        let main = VectorUpdate {
+            index: self.index.clone(),
+            quantization: self.quantization,
+            on_disk: self.on_disk,
+        }
+        .apply(&config.main_vector())?;
+        out.index = main.index;
+        out.quantization = main.quantization;
+        out.on_disk = main.on_disk;
+        for (name, update) in &self.vectors {
+            let current = config.vectors.get(name).ok_or_else(|| {
+                Error::invalid(format!(
+                    "this collection has no vector named `{name}` (vectors cannot be added later)"
+                ))
+            })?;
+            let updated = update
+                .apply(current)
+                .map_err(|e| Error::invalid(format!("vector `{name}`: {}", message(&e))))?;
+            out.vectors.insert(name.clone(), updated);
+        }
+        for (name, sparse) in &self.sparse_vectors {
+            if !config.sparse_vectors.contains_key(name) {
+                return Err(Error::invalid(format!(
+                    "this collection has no sparse vector named `{name}`"
+                )));
+            }
+            out.sparse_vectors.insert(name.clone(), *sparse);
+        }
+        out.validate()?;
+        Ok(out)
+    }
+}
+
 /// How vectors are held in memory.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -547,6 +652,42 @@ mod tests {
             serde_json::from_str::<VectorConfig>(r#"{"dimension": 2, "dimensions": 3}"#).is_err(),
             "unknown fields"
         );
+    }
+
+    #[test]
+    fn updates_patch_the_index() {
+        let config = CollectionConfig::new(3)
+            .index(IndexConfig::Hnsw(HnswParams {
+                m: 32,
+                ..Default::default()
+            }))
+            .with_vector("title", VectorConfig::new(2));
+        let update: CollectionUpdate = serde_json::from_value(serde_json::json!({
+            "index": {"ef_search": 200},
+            "quantization": "scalar",
+            "vectors": {"title": {"index": {"type": "flat"}, "on_disk": true}},
+        }))
+        .unwrap();
+        let out = update.apply(&config).unwrap();
+        let IndexConfig::Hnsw(p) = out.index else { panic!() };
+        assert_eq!((p.m, p.ef_search), (32, 200), "other parameters are kept");
+        assert_eq!(out.quantization, Quantization::Scalar);
+        assert_eq!(out.vectors["title"].index, IndexConfig::Flat);
+        assert!(out.vectors["title"].on_disk);
+
+        let switch: CollectionUpdate =
+            serde_json::from_value(serde_json::json!({"index": {"type": "flat"}})).unwrap();
+        assert_eq!(switch.apply(&config).unwrap().index, IndexConfig::Flat);
+        for bad in [
+            serde_json::json!({"index": {"m": 1}}),
+            serde_json::json!({"index": {"type": "kd_tree"}, "quantization": "scalar"}),
+            serde_json::json!({"vectors": {"body": {"on_disk": true}}}),
+            serde_json::json!({"sparse_vectors": {"text": {}}}),
+        ] {
+            let update: CollectionUpdate = serde_json::from_value(bad.clone()).unwrap();
+            assert!(update.apply(&config).is_err(), "{bad}");
+        }
+        assert!(serde_json::from_value::<CollectionUpdate>(serde_json::json!({"dimension": 4})).is_err());
     }
 
     #[test]

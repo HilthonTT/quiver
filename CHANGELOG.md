@@ -23,6 +23,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **On-disk vectors** (`"on_disk": true`, per vector): vectors live in a file next to the collection instead of memory and are
   read with positional reads. Combined with scalar quantization, the codes stay in memory for the search and the exact vectors
   on disk re-rank 4×k candidates, so results carry exact distances. Durable storage engines only.
+- **Collection settings can change**: `PATCH /collections/{name}` (gRPC `UpdateCollection`, `Collection::update`) changes the
+  index (as a JSON Merge Patch over the current settings), quantization, on-disk storage and sparse modifiers. Changed indexes
+  are rebuilt while reads continue; an `ef_search`-only change rebuilds nothing.
+- **Renaming collections**: `POST /collections/{name}/rename` (gRPC `RenameCollection`, `Database::rename_collection`).
+- **Aliases**: `GET /aliases`, `PUT /aliases/{alias}` to create or atomically re-point one, `DELETE /aliases/{alias}` (gRPC
+  `ListAliases`/`SetAlias`/`DeleteAlias`). Aliases work wherever a collection is named except dropping and renaming, share a
+  namespace with collections, follow renames, go away with their collection, and persist in `aliases.json`.
 - **Metadata updates** without resending vectors: merge (RFC 7386 JSON Merge Patch) or replace, by ids or by filter.
   REST `POST /collections/{name}/points/metadata`, gRPC `UpdateMetadata`, `Collection::update_metadata`, Rust and Python `update_metadata`.
 - **Count and delete by filter**: `POST /collections/{name}/points/count`, `points/delete` with `{"filter": ...}`

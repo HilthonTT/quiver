@@ -7,9 +7,10 @@ mod point;
 pub mod snapshot;
 
 pub use config::{
-    CollectionConfig, HnswParams, IndexConfig, KdTreeParams, MAX_DIMENSION, MAX_FIELD_INDEXES,
-    MAX_FIELD_PATH_LEN, MAX_ID_LEN, MAX_METADATA_DEPTH, MAX_NAME_LEN, MAX_NAMED_VECTORS, MAX_SPARSE_VECTORS,
-    Quantization, SparseModifier, SparseVectorConfig, VectorConfig, validate_field_path, validate_name,
+    CollectionConfig, CollectionUpdate, HnswParams, IndexConfig, KdTreeParams, MAX_DIMENSION,
+    MAX_FIELD_INDEXES, MAX_FIELD_PATH_LEN, MAX_ID_LEN, MAX_METADATA_DEPTH, MAX_NAME_LEN, MAX_NAMED_VECTORS,
+    MAX_SPARSE_VECTORS, Quantization, SparseModifier, SparseVectorConfig, VectorConfig, VectorUpdate,
+    validate_field_path, validate_name,
 };
 pub use distance::Metric;
 pub use error::{Error, Result};
