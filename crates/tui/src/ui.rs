@@ -110,6 +110,13 @@ fn draw_header(frame: &mut Frame, area: Rect, app: &App) {
     frame.render_widget(Paragraph::new(line).block(block("Quiver".into())), area);
 }
 
+/// The named vectors besides the main one, sparse ones marked.
+fn extra_vectors(config: &quiver_types::CollectionConfig) -> String {
+    let dense = config.vectors.keys().map(String::from);
+    let sparse = config.sparse_vectors.keys().map(|n| format!("{n} (sparse)"));
+    dense.chain(sparse).collect::<Vec<_>>().join(", ")
+}
+
 fn draw_dashboard(frame: &mut Frame, area: Rect, app: &App) {
     let rows = app.collections.iter().map(|c| {
         Row::new(vec![
@@ -119,6 +126,7 @@ fn draw_dashboard(frame: &mut Frame, area: Rect, app: &App) {
             Cell::from(c.config.index.kind()),
             Cell::from(c.count.to_string()),
             Cell::from(c.tombstones.to_string()),
+            Cell::from(extra_vectors(&c.config)),
         ])
     });
     let table = Table::new(
@@ -130,9 +138,21 @@ fn draw_dashboard(frame: &mut Frame, area: Rect, app: &App) {
             Constraint::Length(9),
             Constraint::Length(10),
             Constraint::Length(10),
+            Constraint::Min(12),
         ],
     )
-    .header(Row::new(["name", "dimension", "metric", "index", "points", "tombstones"]).bold())
+    .header(
+        Row::new([
+            "name",
+            "dimension",
+            "metric",
+            "index",
+            "points",
+            "tombstones",
+            "other vectors",
+        ])
+        .bold(),
+    )
     .block(block(format!("Collections ({})", app.collections.len())))
     .row_highlight_style(highlight())
     .highlight_symbol("▶ ");

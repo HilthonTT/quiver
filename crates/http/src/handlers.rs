@@ -9,9 +9,12 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use tokio::io::AsyncWriteExt;
 
+use std::collections::BTreeMap;
+
 use quiver_db::{
-    Collection, CollectionConfig, CollectionInfo, Database, Filter, IndexConfig, MetadataMode, Metric, Point,
-    PointInput, PointSelector, Quantization, RestoreOptions, SearchHit, SearchOptions, SnapshotInfo,
+    Collection, CollectionConfig, CollectionInfo, CollectionUpdate, Database, Filter, Fusion, HybridQuery,
+    IndexConfig, MetadataMode, Metric, Point, PointInput, PointSelector, Prefetch, Quantization, QueryVector,
+    RestoreOptions, SearchHit, SearchOptions, SnapshotInfo, SparseVector, SparseVectorConfig, VectorConfig,
 };
 
 use crate::error::ApiError;
@@ -24,6 +27,8 @@ pub const MAX_BATCH: usize = 256;
 pub const MAX_SCROLL: usize = 10_000;
 /// Upper bound on ids in one lookup or delete request.
 pub const MAX_IDS: usize = 10_000;
+/// Upper bound on the searches a hybrid query fuses.
+pub const MAX_PREFETCH: usize = 16;
 
 /// Maximum snapshot upload size in bytes, attached to the upload route.
 #[derive(Debug, Clone, Copy)]
@@ -113,6 +118,12 @@ pub struct CreateCollection {
     field_indexes: Vec<String>,
     #[serde(default)]
     quantization: Quantization,
+    #[serde(default)]
+    on_disk: bool,
+    #[serde(default)]
+    vectors: BTreeMap<String, VectorConfig>,
+    #[serde(default)]
+    sparse_vectors: BTreeMap<String, SparseVectorConfig>,
 }
 
 pub async fn list_collections(State(db): State<AppState>) -> ApiResult<Json<Value>> {
@@ -129,9 +140,9 @@ pub async fn create_collection(
         metric: req.metric,
         index: req.index,
         quantization: req.quantization,
-        on_disk: false,
-        vectors: Default::default(),
-        sparse_vectors: Default::default(),
+        on_disk: req.on_disk,
+        vectors: req.vectors,
+        sparse_vectors: req.sparse_vectors,
     };
     let info = blocking(move || {
         Ok(db
@@ -149,6 +160,64 @@ pub async fn get_collection(
 ) -> ApiResult<Json<CollectionInfo>> {
     let c = collection(&db, &name)?;
     Ok(Json(blocking(move || Ok(c.info())).await?))
+}
+
+/// Changes index, quantization or on-disk settings; may rebuild indexes.
+pub async fn update_collection(
+    State(db): State<AppState>,
+    Path(name): Path<String>,
+    Json(update): Json<CollectionUpdate>,
+) -> ApiResult<Json<CollectionInfo>> {
+    let info = blocking(move || db.update_collection(&name, &update)).await?;
+    tracing::info!(collection = %info.name, "updated collection settings");
+    Ok(Json(info))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RenameRequest {
+    /// The new name.
+    name: String,
+}
+
+pub async fn rename_collection(
+    State(db): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<RenameRequest>,
+) -> ApiResult<Json<CollectionInfo>> {
+    let info = blocking(move || Ok(db.rename_collection(&name, &req.name)?.info())).await?;
+    Ok(Json(info))
+}
+
+pub async fn list_aliases(State(db): State<AppState>) -> Json<Value> {
+    let aliases: Vec<Value> = db
+        .aliases()
+        .into_iter()
+        .map(|(alias, collection)| json!({ "alias": alias, "collection": collection }))
+        .collect();
+    Json(json!({ "aliases": aliases }))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AliasRequest {
+    collection: String,
+}
+
+/// Creates the alias, or atomically points it at another collection.
+pub async fn set_alias(
+    State(db): State<AppState>,
+    Path(alias): Path<String>,
+    Json(req): Json<AliasRequest>,
+) -> ApiResult<Json<Value>> {
+    let response = json!({ "alias": alias, "collection": req.collection });
+    blocking(move || db.set_alias(&alias, &req.collection)).await?;
+    Ok(Json(response))
+}
+
+pub async fn delete_alias(State(db): State<AppState>, Path(alias): Path<String>) -> ApiResult<StatusCode> {
+    blocking(move || db.delete_alias(&alias)).await?;
+    Ok(StatusCode::NO_CONTENT)
 }
 
 pub async fn drop_collection(State(db): State<AppState>, Path(name): Path<String>) -> ApiResult<StatusCode> {
@@ -272,6 +341,8 @@ fn default_limit() -> usize {
 fn present(mut p: Point, with_vectors: bool) -> Value {
     if !with_vectors {
         p.vector.clear();
+        p.vectors.clear();
+        p.sparse_vectors.clear();
     }
     let mut v = serde_json::to_value(p).expect("points serialize");
     if !with_vectors {
@@ -430,12 +501,18 @@ pub async fn delete_point(
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SearchRequest {
-    /// Exactly one of `vector` and `id`.
+    /// Exactly one of `vector`, `id` and `sparse`.
     #[serde(default)]
     vector: Option<Vec<f32>>,
     /// Search with this point's vector, leaving the point out of the results.
     #[serde(default)]
     id: Option<String>,
+    /// Search a sparse vector (named by `using`) with this one.
+    #[serde(default)]
+    sparse: Option<SparseVector>,
+    /// The named vector to search; the main one if absent.
+    #[serde(default)]
+    using: Option<String>,
     #[serde(default = "default_k")]
     k: usize,
     #[serde(default)]
@@ -458,6 +535,7 @@ fn default_k() -> usize {
 /// The search settings shared by `search` and `recommend`.
 #[derive(Debug, Clone, Copy)]
 struct Settings<'a> {
+    using: Option<&'a str>,
     k: usize,
     filter: Option<&'a Value>,
     ef: Option<usize>,
@@ -472,7 +550,7 @@ impl Settings<'_> {
             return Err(ApiError::bad_request(format!("k must be between 1 and {MAX_K}")));
         }
         Ok(SearchOptions {
-            using: None,
+            using: self.using.map(str::to_owned),
             filter: parse_filter(self.filter)?,
             ef: self.ef,
             include_vectors: self.with_vectors,
@@ -486,11 +564,14 @@ impl Settings<'_> {
 enum SearchBy {
     Vector(Vec<f32>),
     Id(String),
+    /// A sparse vector, against the sparse vector named.
+    Sparse(SparseVector, String),
 }
 
 impl SearchRequest {
     fn prepare(self) -> ApiResult<(SearchBy, usize, SearchOptions)> {
-        let opts = Settings {
+        let mut opts = Settings {
+            using: self.using.as_deref(),
             k: self.k,
             filter: self.filter.as_ref(),
             ef: self.ef,
@@ -499,10 +580,21 @@ impl SearchRequest {
             with_metadata: self.with_metadata,
         }
         .options()?;
-        let by = match (self.vector, self.id) {
-            (Some(v), None) => SearchBy::Vector(v),
-            (None, Some(id)) => SearchBy::Id(id),
-            _ => return Err(ApiError::bad_request("give exactly one of `vector` and `id`")),
+        let by = match (self.vector, self.id, self.sparse) {
+            (Some(v), None, None) => SearchBy::Vector(v),
+            (None, Some(id), None) => SearchBy::Id(id),
+            (None, None, Some(sparse)) => {
+                let name = opts
+                    .using
+                    .take()
+                    .ok_or_else(|| ApiError::bad_request("name the sparse vector to search in `using`"))?;
+                SearchBy::Sparse(sparse, name)
+            }
+            _ => {
+                return Err(ApiError::bad_request(
+                    "give exactly one of `vector`, `id` and `sparse`",
+                ));
+            }
         };
         Ok((by, self.k, opts))
     }
@@ -517,6 +609,7 @@ fn run_search(
     match by {
         SearchBy::Vector(v) => c.search_with(v, k, opts),
         SearchBy::Id(id) => c.search_by_id(id, k, opts),
+        SearchBy::Sparse(v, name) => c.search_sparse(name, v, k, opts),
     }
 }
 
@@ -567,6 +660,9 @@ pub async fn search_batch(
 #[serde(deny_unknown_fields)]
 pub struct RecommendRequest {
     positive: Vec<String>,
+    /// The named vector to compare; the main one if absent.
+    #[serde(default)]
+    using: Option<String>,
     #[serde(default)]
     negative: Vec<String>,
     #[serde(default = "default_k")]
@@ -595,6 +691,7 @@ pub async fn recommend(
         )));
     }
     let opts = Settings {
+        using: req.using.as_deref(),
         k: req.k,
         filter: req.filter.as_ref(),
         ef: req.ef,
@@ -605,6 +702,117 @@ pub async fn recommend(
     .options()?;
     let c = collection(&db, &name)?;
     let results = blocking(move || c.recommend(&req.positive, &req.negative, req.k, &opts)).await?;
+    Ok(Json(json!({ "results": results })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct QueryRequest {
+    /// The searches whose rankings are fused.
+    prefetch: Vec<PrefetchRequest>,
+    #[serde(default)]
+    fusion: Fusion,
+    #[serde(default = "default_k")]
+    k: usize,
+    /// Applies to every search.
+    #[serde(default)]
+    filter: Option<Value>,
+    #[serde(default)]
+    with_vectors: bool,
+    #[serde(default = "yes")]
+    with_metadata: bool,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PrefetchRequest {
+    /// Exactly one of `vector` and `sparse`.
+    #[serde(default)]
+    vector: Option<Vec<f32>>,
+    #[serde(default)]
+    sparse: Option<SparseVector>,
+    /// The named vector to search: the main one if absent for `vector`;
+    /// required for `sparse`.
+    #[serde(default)]
+    using: Option<String>,
+    /// How many of this search's best hits take part (default: `max(k, 50)`).
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(default = "default_weight")]
+    weight: f32,
+    #[serde(default)]
+    ef: Option<usize>,
+    #[serde(default)]
+    max_distance: Option<f32>,
+}
+
+fn default_weight() -> f32 {
+    1.0
+}
+
+impl PrefetchRequest {
+    fn prepare(self, k: usize) -> ApiResult<Prefetch> {
+        let limit = self.limit.unwrap_or(k.max(50));
+        if limit == 0 || limit > MAX_K {
+            return Err(ApiError::bad_request(format!(
+                "prefetch limit must be between 1 and {MAX_K}"
+            )));
+        }
+        let query = match (self.vector, self.sparse) {
+            (Some(vector), None) => QueryVector::Dense {
+                vector,
+                using: self.using,
+            },
+            (None, Some(vector)) => QueryVector::Sparse {
+                vector,
+                using: self
+                    .using
+                    .ok_or_else(|| ApiError::bad_request("name the sparse vector to search in `using`"))?,
+            },
+            _ => {
+                return Err(ApiError::bad_request(
+                    "give each prefetch exactly one of `vector` and `sparse`",
+                ));
+            }
+        };
+        Ok(Prefetch {
+            query,
+            limit,
+            weight: self.weight,
+            ef: self.ef,
+            max_distance: self.max_distance,
+        })
+    }
+}
+
+/// Hybrid search: several searches, dense and sparse, fused into one ranking.
+pub async fn query(
+    State(db): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<QueryRequest>,
+) -> ApiResult<Json<Value>> {
+    if req.k == 0 || req.k > MAX_K {
+        return Err(ApiError::bad_request(format!("k must be between 1 and {MAX_K}")));
+    }
+    if req.prefetch.is_empty() || req.prefetch.len() > MAX_PREFETCH {
+        return Err(ApiError::bad_request(format!(
+            "give between 1 and {MAX_PREFETCH} prefetch searches"
+        )));
+    }
+    let k = req.k;
+    let query = HybridQuery {
+        prefetch: req
+            .prefetch
+            .into_iter()
+            .map(|p| p.prepare(k))
+            .collect::<ApiResult<_>>()?,
+        fusion: req.fusion,
+        filter: parse_filter(req.filter.as_ref())?,
+        include_vectors: req.with_vectors,
+        include_metadata: req.with_metadata,
+    };
+    let c = collection(&db, &name)?;
+    let results = blocking(move || c.query(&query, k)).await?;
     Ok(Json(json!({ "results": results })))
 }
 

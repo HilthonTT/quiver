@@ -1,6 +1,9 @@
+use std::collections::{BTreeMap, HashMap};
+
 use quiver_db::{
-    CollectionConfig, CollectionInfo, Error, HnswParams, IndexConfig, KdTreeParams, Metric, Point,
-    Quantization, SearchHit, SnapshotInfo, new_id,
+    CollectionConfig, CollectionInfo, Error, HnswParams, IndexConfig, KdTreeParams, Metric, NamedVectors,
+    Point, Quantization, ScoredHit, SearchHit, SnapshotInfo, SparseModifier, SparseVector,
+    SparseVectorConfig, SparseVectors, VectorConfig, new_id,
 };
 use serde_json::Value;
 use tonic::Status;
@@ -10,10 +13,11 @@ use crate::pb;
 pub(crate) fn status(err: Error) -> Status {
     let msg = err.to_string();
     match err {
-        Error::CollectionNotFound(_) | Error::SnapshotNotFound(_) | Error::PointNotFound(_) => {
-            Status::not_found(msg)
-        }
-        Error::CollectionExists(_) => Status::already_exists(msg),
+        Error::CollectionNotFound(_)
+        | Error::SnapshotNotFound(_)
+        | Error::PointNotFound(_)
+        | Error::AliasNotFound(_) => Status::not_found(msg),
+        Error::CollectionExists(_) | Error::AliasExists(_) => Status::already_exists(msg),
         Error::DimensionMismatch { .. } | Error::InvalidArgument(_) | Error::InvalidFilter(_) => {
             Status::invalid_argument(msg)
         }
@@ -90,10 +94,99 @@ pub(crate) fn config_from_pb(req: &pb::CreateCollectionRequest) -> Result<Collec
         metric: metric_from_pb(req.metric)?,
         index: index_from_pb(req.index),
         quantization: quantization_from_pb(req.quantization)?,
-        on_disk: false,
-        vectors: Default::default(),
-        sparse_vectors: Default::default(),
+        on_disk: req.on_disk,
+        vectors: req
+            .vectors
+            .iter()
+            .map(|(name, v)| Ok((name.clone(), vector_params_from_pb(v)?)))
+            .collect::<Result<_, Status>>()?,
+        sparse_vectors: req
+            .sparse_vectors
+            .iter()
+            .map(|(name, v)| Ok((name.clone(), sparse_params_from_pb(v)?)))
+            .collect::<Result<_, Status>>()?,
     })
+}
+
+fn vector_params_from_pb(v: &pb::VectorParams) -> Result<VectorConfig, Status> {
+    Ok(VectorConfig {
+        dimension: v.dimension as usize,
+        metric: metric_from_pb(v.metric)?,
+        index: index_from_pb(v.index),
+        quantization: quantization_from_pb(v.quantization)?,
+        on_disk: v.on_disk,
+    })
+}
+
+fn vector_params_to_pb(v: &VectorConfig) -> pb::VectorParams {
+    pb::VectorParams {
+        dimension: v.dimension as u32,
+        metric: metric_to_pb(v.metric),
+        index: Some(index_to_pb(&v.index)),
+        quantization: quantization_to_pb(v.quantization),
+        on_disk: v.on_disk,
+    }
+}
+
+fn sparse_params_from_pb(v: &pb::SparseVectorParams) -> Result<SparseVectorConfig, Status> {
+    let modifier = match pb::SparseModifier::try_from(v.modifier)
+        .map_err(|_| Status::invalid_argument("unknown sparse modifier"))?
+    {
+        pb::SparseModifier::None => SparseModifier::None,
+        pb::SparseModifier::Idf => SparseModifier::Idf,
+    };
+    Ok(SparseVectorConfig { modifier })
+}
+
+fn sparse_params_to_pb(v: &SparseVectorConfig) -> pb::SparseVectorParams {
+    let modifier = match v.modifier {
+        SparseModifier::None => pb::SparseModifier::None,
+        SparseModifier::Idf => pb::SparseModifier::Idf,
+    };
+    pb::SparseVectorParams {
+        modifier: modifier.into(),
+    }
+}
+
+type PbVectors = (
+    HashMap<String, pb::VectorParams>,
+    HashMap<String, pb::SparseVectorParams>,
+);
+
+fn vector_maps_to_pb(config: &CollectionConfig) -> PbVectors {
+    (
+        config
+            .vectors
+            .iter()
+            .map(|(n, v)| (n.clone(), vector_params_to_pb(v)))
+            .collect(),
+        config
+            .sparse_vectors
+            .iter()
+            .map(|(n, v)| (n.clone(), sparse_params_to_pb(v)))
+            .collect(),
+    )
+}
+
+pub(crate) fn sparse_from_pb(v: pb::SparseVector) -> SparseVector {
+    SparseVector::new(v.indices, v.values)
+}
+
+fn sparse_to_pb(v: SparseVector) -> pb::SparseVector {
+    pb::SparseVector {
+        indices: v.indices,
+        values: v.values,
+    }
+}
+
+fn named_to_pb(v: NamedVectors) -> HashMap<String, pb::DenseVector> {
+    v.into_iter()
+        .map(|(n, values)| (n, pb::DenseVector { values }))
+        .collect()
+}
+
+fn sparse_map_to_pb(v: SparseVectors) -> HashMap<String, pb::SparseVector> {
+    v.into_iter().map(|(n, s)| (n, sparse_to_pb(s))).collect()
 }
 
 pub(crate) fn quantization_from_pb(q: i32) -> Result<Quantization, Status> {
@@ -112,7 +205,11 @@ pub(crate) fn quantization_to_pb(q: Quantization) -> i32 {
 }
 
 pub(crate) fn info_to_pb(info: CollectionInfo) -> pb::CollectionInfo {
+    let (vectors, sparse_vectors) = vector_maps_to_pb(&info.config);
     pb::CollectionInfo {
+        on_disk: info.config.on_disk,
+        vectors,
+        sparse_vectors,
         name: info.name,
         dimension: info.config.dimension as u32,
         metric: metric_to_pb(info.config.metric),
@@ -141,16 +238,35 @@ pub(crate) fn point_from_pb(p: pb::Point) -> Result<Point, Status> {
     Ok(Point {
         id: if p.id.is_empty() { new_id() } else { p.id },
         vector: p.vector,
-        vectors: Default::default(),
-        sparse_vectors: Default::default(),
+        vectors: p
+            .vectors
+            .into_iter()
+            .map(|(n, v)| (n, v.values))
+            .collect::<BTreeMap<_, _>>(),
+        sparse_vectors: p
+            .sparse_vectors
+            .into_iter()
+            .map(|(n, v)| (n, sparse_from_pb(v)))
+            .collect(),
         metadata: json_from_pb(&p.metadata_json, "metadata_json")?,
     })
 }
 
 pub(crate) fn point_to_pb(p: Point, with_vectors: bool) -> pb::Point {
+    let (vector, vectors, sparse_vectors) = if with_vectors {
+        (
+            p.vector,
+            named_to_pb(p.vectors),
+            sparse_map_to_pb(p.sparse_vectors),
+        )
+    } else {
+        Default::default()
+    };
     pb::Point {
         metadata_json: json_to_pb(p.metadata.as_ref()),
-        vector: if with_vectors { p.vector } else { Vec::new() },
+        vector,
+        vectors,
+        sparse_vectors,
         id: p.id,
     }
 }
@@ -159,14 +275,31 @@ pub(crate) fn hit_to_pb(h: SearchHit) -> pb::SearchHit {
     pb::SearchHit {
         metadata_json: json_to_pb(h.metadata.as_ref()),
         vector: h.vector.unwrap_or_default(),
+        vectors: named_to_pb(h.vectors),
+        sparse_vectors: sparse_map_to_pb(h.sparse_vectors),
         id: h.id,
         distance: h.distance,
     }
 }
 
+pub(crate) fn scored_to_pb(h: ScoredHit) -> pb::ScoredHit {
+    pb::ScoredHit {
+        metadata_json: json_to_pb(h.metadata.as_ref()),
+        vector: h.vector.unwrap_or_default(),
+        vectors: named_to_pb(h.vectors),
+        sparse_vectors: sparse_map_to_pb(h.sparse_vectors),
+        id: h.id,
+        score: h.score,
+    }
+}
+
 pub(crate) fn snapshot_to_pb(s: SnapshotInfo) -> pb::SnapshotInfo {
     let m = s.manifest;
+    let (vectors, sparse_vectors) = vector_maps_to_pb(&m.config);
     pb::SnapshotInfo {
+        on_disk: m.config.on_disk,
+        vectors,
+        sparse_vectors,
         dimension: m.config.dimension as u32,
         metric: metric_to_pb(m.config.metric),
         index: Some(index_to_pb(&m.config.index)),
@@ -200,6 +333,42 @@ mod tests {
     }
 
     #[test]
+    fn config_roundtrip() {
+        let config = CollectionConfig::new(3)
+            .on_disk(true)
+            .with_vector(
+                "t",
+                VectorConfig::new(2)
+                    .metric(Metric::DotProduct)
+                    .index(IndexConfig::Flat),
+            )
+            .with_sparse_vector(
+                "s",
+                SparseVectorConfig {
+                    modifier: SparseModifier::Idf,
+                },
+            );
+        let info = info_to_pb(CollectionInfo {
+            name: "c".into(),
+            config: config.clone(),
+            count: 0,
+            tombstones: 0,
+            field_indexes: Vec::new(),
+        });
+        let req = pb::CreateCollectionRequest {
+            dimension: info.dimension,
+            metric: info.metric,
+            index: info.index,
+            quantization: info.quantization,
+            on_disk: info.on_disk,
+            vectors: info.vectors,
+            sparse_vectors: info.sparse_vectors,
+            ..Default::default()
+        };
+        assert_eq!(config_from_pb(&req).unwrap(), config);
+    }
+
+    #[test]
     fn metric_roundtrip() {
         for m in Metric::ALL {
             assert_eq!(metric_from_pb(metric_to_pb(m)).unwrap(), m);
@@ -214,6 +383,7 @@ mod tests {
             id: String::new(),
             vector: vec![1.0],
             metadata_json: r#"{"a":1}"#.into(),
+            ..Default::default()
         })
         .unwrap();
         assert_eq!(p.id.len(), 36);
@@ -221,8 +391,8 @@ mod tests {
         assert!(
             point_from_pb(pb::Point {
                 id: "x".into(),
-                vector: vec![],
                 metadata_json: "{nope".into(),
+                ..Default::default()
             })
             .is_err()
         );

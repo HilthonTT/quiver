@@ -49,6 +49,8 @@ pub fn router(db: Arc<Database>, options: HttpOptions) -> Router {
         .route("/collections/{name}/search", post(search))
         .route("/collections/{name}/search/batch", post(search_batch))
         .route("/collections/{name}/recommend", post(recommend))
+        .route("/collections/{name}/query", post(query))
+        .route("/aliases", get(list_aliases))
         .route("/collections/{name}/snapshots", get(list_collection_snapshots))
         .route("/snapshots", get(list_snapshots))
         .route("/snapshots/{id}", get(get_snapshot))
@@ -59,7 +61,15 @@ pub fn router(db: Arc<Database>, options: HttpOptions) -> Router {
     let upload_limit = options.max_upload_bytes.unwrap_or(16 << 30);
     let write = Router::new()
         .route("/collections", post(create_collection))
-        .route("/collections/{name}", axum::routing::delete(drop_collection))
+        .route(
+            "/collections/{name}",
+            axum::routing::delete(drop_collection).patch(update_collection),
+        )
+        .route("/collections/{name}/rename", post(rename_collection))
+        .route(
+            "/aliases/{alias}",
+            axum::routing::put(set_alias).delete(delete_alias),
+        )
         .route("/collections/{name}/flush", post(flush_collection))
         .route("/collections/{name}/compact", post(compact_collection))
         .route("/collections/{name}/indexes", post(create_field_index))

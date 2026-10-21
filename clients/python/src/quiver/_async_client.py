@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from collections.abc import AsyncIterator, Iterable, Sequence
+from collections.abc import AsyncIterator, Iterable, Mapping, Sequence
 from pathlib import Path
 from types import TracebackType
 from typing import Any, TypeVar
@@ -22,11 +22,16 @@ from ._models import (
     Metric,
     Point,
     PointLike,
+    Prefetch,
     Quantization,
+    ScoredResult,
     ScrollPage,
     SearchResult,
     SnapshotInfo,
+    SparseLike,
+    SparseVectorParams,
     Vector,
+    VectorParams,
 )
 
 T = TypeVar("T")
@@ -127,16 +132,34 @@ class AsyncClient:
         index: Index | None = None,
         field_indexes: Sequence[str] = (),
         quantization: Quantization = "none",
+        on_disk: bool = False,
+        vectors: Mapping[str, VectorParams] | None = None,
+        sparse_vectors: Mapping[str, SparseVectorParams] | Sequence[str] | None = None,
     ) -> AsyncCollection:
         """Creates a collection. Raises :class:`ConflictError` if it exists.
 
         ``field_indexes`` names metadata fields (dot-separated paths) to index,
         so that filters on them only look at matching points. ``quantization="scalar"``
         stores vectors in about a quarter of the memory; vectors read back are
-        then close to, but not exactly, what was written.
+        then close to, but not exactly, what was written. ``on_disk=True``
+        keeps the vectors in a file instead of memory.
+
+        ``vectors`` adds named dense vectors every point must carry, each with
+        its own dimension and metric; ``sparse_vectors`` adds named sparse
+        vectors (for keyword search) points may carry.
         """
         await self._run(
-            proto.create_collection(name, dimension, metric, index, field_indexes, quantization)
+            proto.create_collection(
+                name,
+                dimension,
+                metric,
+                index,
+                field_indexes,
+                quantization,
+                on_disk,
+                vectors,
+                sparse_vectors,
+            )
         )
         return AsyncCollection(self, name)
 
@@ -154,6 +177,9 @@ class AsyncClient:
         index: Index | None = None,
         field_indexes: Sequence[str] = (),
         quantization: Quantization = "none",
+        on_disk: bool = False,
+        vectors: Mapping[str, VectorParams] | None = None,
+        sparse_vectors: Mapping[str, SparseVectorParams] | Sequence[str] | None = None,
     ) -> AsyncCollection:
         """Returns the collection, creating it first if it does not exist."""
         try:
@@ -168,6 +194,9 @@ class AsyncClient:
                 index=index,
                 field_indexes=field_indexes,
                 quantization=quantization,
+                on_disk=on_disk,
+                vectors=vectors,
+                sparse_vectors=sparse_vectors,
             )
         except ConflictError:
             return AsyncCollection(self, name)
@@ -179,6 +208,27 @@ class AsyncClient:
     async def delete_collection(self, name: str) -> None:
         """Deletes a collection and all of its points."""
         await self._run(proto.delete_collection(name))
+
+    async def rename_collection(self, name: str, new_name: str) -> AsyncCollection:
+        """Renames a collection (by its own name, not an alias); aliases follow it."""
+        info = await self._run(proto.rename_collection(name, new_name))
+        return AsyncCollection(self, info.name)
+
+    async def list_aliases(self) -> dict[str, str]:
+        """Every alias, mapped to the collection it points to."""
+        return await self._run(proto.list_aliases())
+
+    async def set_alias(self, alias: str, collection: str) -> None:
+        """Creates ``alias``, or atomically points it at ``collection``.
+
+        An alias works wherever a collection name does, except for deleting
+        and renaming collections.
+        """
+        await self._run(proto.set_alias(alias, collection))
+
+    async def delete_alias(self, alias: str) -> None:
+        """Deletes an alias; the collection stays."""
+        await self._run(proto.delete_alias(alias))
 
     async def list_snapshots(self, collection: str | None = None) -> list[SnapshotInfo]:
         """Lists snapshots, oldest first, optionally only one collection's."""
@@ -334,6 +384,7 @@ class AsyncCollection:
         max_distance: float | None = None,
         with_vectors: bool = False,
         with_metadata: bool = True,
+        using: str | None = None,
     ) -> list[SearchResult]:
         """Finds the ``k`` nearest neighbours of ``vector``.
 
@@ -346,9 +397,17 @@ class AsyncCollection:
                 the approximate top ``k``.
             with_vectors: Include stored vectors in results.
             with_metadata: Include metadata in results.
+            using: Search this named vector instead of the main one.
         """
         body = proto.search_body(
-            vector, k, filter, ef, with_vectors, with_metadata, max_distance=max_distance
+            vector,
+            k,
+            filter,
+            ef,
+            with_vectors,
+            with_metadata,
+            max_distance=max_distance,
+            using=using,
         )
         return await self._client._run(proto.search(self.name, body))
 
@@ -362,12 +421,16 @@ class AsyncCollection:
         max_distance: float | None = None,
         with_vectors: bool = False,
         with_metadata: bool = True,
+        using: str | None = None,
     ) -> list[SearchResult]:
         """Finds the ``k`` nearest neighbours of point ``id``, leaving it out.
 
+        With ``using``, compares that named vector of the points.
         Raises :class:`NotFoundError` (code ``point_not_found``) if it does not exist.
         """
-        options = proto.search_options(k, filter, ef, max_distance, with_vectors, with_metadata)
+        options = proto.search_options(
+            k, filter, ef, max_distance, with_vectors, with_metadata, using
+        )
         body = proto.search_by_id_body(id, options)
         return await self._client._run(proto.search(self.name, body))
 
@@ -382,13 +445,17 @@ class AsyncCollection:
         max_distance: float | None = None,
         with_vectors: bool = False,
         with_metadata: bool = True,
+        using: str | None = None,
     ) -> list[SearchResult]:
         """Finds points like the ``positive`` example ids and unlike the ``negative`` ones.
 
-        The query is the mean of the positives, pushed away from the mean of
-        the negatives. The examples themselves are never returned.
+        The query is the mean of the positives (in the named vector ``using``
+        if given), pushed away from the mean of the negatives. The examples
+        themselves are never returned.
         """
-        options = proto.search_options(k, filter, ef, max_distance, with_vectors, with_metadata)
+        options = proto.search_options(
+            k, filter, ef, max_distance, with_vectors, with_metadata, using
+        )
         return await self._client._run(proto.recommend(self.name, positive, negative, options))
 
     async def search_batch(
@@ -400,10 +467,86 @@ class AsyncCollection:
         ef: int | None = None,
         with_vectors: bool = False,
         with_metadata: bool = True,
+        using: str | None = None,
     ) -> list[list[SearchResult]]:
         """Runs several searches in one round trip (max 256)."""
-        bodies = [proto.search_body(v, k, filter, ef, with_vectors, with_metadata) for v in vectors]
+        bodies = [
+            proto.search_body(v, k, filter, ef, with_vectors, with_metadata, using=using)
+            for v in vectors
+        ]
         return await self._client._run(proto.search_batch(self.name, bodies))
+
+    async def search_sparse(
+        self,
+        vector: SparseLike,
+        k: int = 10,
+        *,
+        using: str,
+        filter: Filter | None = None,
+        max_distance: float | None = None,
+        with_vectors: bool = False,
+        with_metadata: bool = True,
+    ) -> list[SearchResult]:
+        """Finds the ``k`` points scoring highest against a sparse vector.
+
+        Args:
+            vector: A :class:`SparseVector` or an ``{index: value}`` mapping.
+            using: The sparse vector of the points to score against.
+
+        Scores are dot products (IDF-weighted if the sparse vector's modifier
+        is ``"idf"``); each hit's ``distance`` is its negated score.
+        """
+        options = proto.search_options(
+            k, filter, None, max_distance, with_vectors, with_metadata, using
+        )
+        body = proto.sparse_search_body(vector, options)
+        return await self._client._run(proto.search(self.name, body))
+
+    async def query(
+        self,
+        prefetch: Sequence[Prefetch],
+        k: int = 10,
+        *,
+        filter: Filter | None = None,
+        rrf_k: int = 60,
+        with_vectors: bool = False,
+        with_metadata: bool = True,
+    ) -> list[ScoredResult]:
+        """Hybrid search: runs each :class:`Prefetch` search and fuses their rankings.
+
+        Reciprocal rank fusion scores a point at rank ``r`` (from 1) of a search
+        ``weight / (rrf_k + r)`` there, summed over the searches.
+
+        >>> docs.query([Prefetch(vector=embedding), Prefetch(sparse={17: 1.0}, using="text")])
+        """
+        call = proto.query(self.name, prefetch, k, filter, rrf_k, with_vectors, with_metadata)
+        return await self._client._run(call)
+
+    async def update(
+        self,
+        *,
+        index: Index | Mapping[str, Any] | None = None,
+        quantization: Quantization | None = None,
+        on_disk: bool | None = None,
+        vectors: Mapping[str, Mapping[str, Any]] | None = None,
+        sparse_vectors: Mapping[str, SparseVectorParams] | None = None,
+    ) -> CollectionInfo:
+        """Changes index, quantization or on-disk settings; may take a while.
+
+        ``index`` is an index object (replacing the current settings) or a
+        dict merged into them, e.g. ``{"ef_search": 128}``. ``vectors`` maps
+        named vectors to dicts of the same keys. Anything but an ``ef_search``
+        change rebuilds the index.
+        """
+        call = proto.update_collection(
+            self.name, index, quantization, on_disk, vectors, sparse_vectors
+        )
+        return await self._client._run(call)
+
+    async def rename(self, new_name: str) -> None:
+        """Renames this collection; this handle follows it."""
+        info = await self._client._run(proto.rename_collection(self.name, new_name))
+        self.name = info.name
 
     async def flush(self) -> None:
         """Forces a snapshot to disk and truncates the write-ahead log."""

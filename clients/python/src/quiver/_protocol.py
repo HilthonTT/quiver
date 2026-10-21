@@ -7,7 +7,7 @@ how they execute a call.
 
 from __future__ import annotations
 
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any, Generic, TypeVar
 from urllib.parse import quote
@@ -22,12 +22,18 @@ from ._models import (
     Metric,
     Point,
     PointLike,
+    Prefetch,
     Quantization,
+    ScoredResult,
     ScrollPage,
     SearchResult,
     SnapshotInfo,
+    SparseLike,
+    SparseVectorParams,
     Vector,
+    VectorParams,
     as_list,
+    as_sparse,
     to_point_dict,
 )
 
@@ -101,6 +107,9 @@ def list_collections() -> Call[list[CollectionInfo]]:
     )
 
 
+SparseParamsLike = Mapping[str, SparseVectorParams] | Sequence[str]
+
+
 def create_collection(
     name: str,
     dimension: int,
@@ -108,6 +117,9 @@ def create_collection(
     index: Index | None,
     field_indexes: Sequence[str] = (),
     quantization: Quantization = "none",
+    on_disk: bool = False,
+    vectors: Mapping[str, VectorParams] | None = None,
+    sparse_vectors: SparseParamsLike | None = None,
 ) -> Call[CollectionInfo]:
     body: dict[str, Any] = {
         "name": name,
@@ -119,7 +131,66 @@ def create_collection(
         body["field_indexes"] = list(field_indexes)
     if quantization != "none":
         body["quantization"] = quantization
+    if on_disk:
+        body["on_disk"] = True
+    if vectors:
+        body["vectors"] = {n: v.to_dict() for n, v in vectors.items()}
+    if sparse_vectors:
+        if isinstance(sparse_vectors, Mapping):
+            body["sparse_vectors"] = {n: v.to_dict() for n, v in sparse_vectors.items()}
+        else:
+            body["sparse_vectors"] = {n: {} for n in sparse_vectors}
     return Call("POST", "/collections", CollectionInfo.from_dict, json=body)
+
+
+def _index_patch(index: Index | Mapping[str, Any]) -> dict[str, Any]:
+    return index.to_dict() if hasattr(index, "to_dict") else dict(index)
+
+
+def update_collection(
+    name: str,
+    index: Index | Mapping[str, Any] | None,
+    quantization: Quantization | None,
+    on_disk: bool | None,
+    vectors: Mapping[str, Mapping[str, Any]] | None,
+    sparse_vectors: Mapping[str, SparseVectorParams] | None,
+) -> Call[CollectionInfo]:
+    body: dict[str, Any] = {}
+    if index is not None:
+        body["index"] = _index_patch(index)
+    if quantization is not None:
+        body["quantization"] = quantization
+    if on_disk is not None:
+        body["on_disk"] = on_disk
+    if vectors:
+        body["vectors"] = {
+            n: {k: _index_patch(v) if k == "index" else v for k, v in update.items()}
+            for n, update in vectors.items()
+        }
+    if sparse_vectors:
+        body["sparse_vectors"] = {n: v.to_dict() for n, v in sparse_vectors.items()}
+    return Call("PATCH", f"/collections/{_seg(name)}", CollectionInfo.from_dict, json=body)
+
+
+def rename_collection(name: str, new_name: str) -> Call[CollectionInfo]:
+    return Call(
+        "POST",
+        f"/collections/{_seg(name)}/rename",
+        CollectionInfo.from_dict,
+        json={"name": new_name},
+    )
+
+
+def list_aliases() -> Call[dict[str, str]]:
+    return Call("GET", "/aliases", lambda b: {a["alias"]: a["collection"] for a in b["aliases"]})
+
+
+def set_alias(alias: str, collection: str) -> Call[None]:
+    return Call("PUT", f"/aliases/{_seg(alias)}", _none, json={"collection": collection})
+
+
+def delete_alias(alias: str) -> Call[None]:
+    return Call("DELETE", f"/aliases/{_seg(alias)}", _none)
 
 
 def create_field_index(name: str, field: str) -> Call[CollectionInfo]:
@@ -236,9 +307,12 @@ def search_options(
     max_distance: float | None,
     with_vectors: bool,
     with_metadata: bool,
+    using: str | None = None,
 ) -> dict[str, Any]:
     """The settings shared by searches and recommendations."""
     body: dict[str, Any] = {"k": k, "with_vectors": with_vectors, "with_metadata": with_metadata}
+    if using is not None:
+        body["using"] = using
     if filter is not None:
         body["filter"] = dict(filter)
     if ef is not None:
@@ -256,9 +330,42 @@ def search_body(
     with_vectors: bool,
     with_metadata: bool,
     max_distance: float | None = None,
+    using: str | None = None,
 ) -> dict[str, Any]:
-    options = search_options(k, filter, ef, max_distance, with_vectors, with_metadata)
+    options = search_options(k, filter, ef, max_distance, with_vectors, with_metadata, using)
     return {"vector": as_list(vector), **options}
+
+
+def sparse_search_body(vector: SparseLike, options: dict[str, Any]) -> dict[str, Any]:
+    if "using" not in options:
+        raise ValueError("name the sparse vector to search with using=")
+    return {"sparse": as_sparse(vector), **options}
+
+
+def query(
+    name: str,
+    prefetch: Sequence[Prefetch],
+    k: int,
+    filter: Filter | None,
+    rrf_k: int,
+    with_vectors: bool,
+    with_metadata: bool,
+) -> Call[list[ScoredResult]]:
+    body: dict[str, Any] = {
+        "prefetch": [p.to_dict() for p in prefetch],
+        "fusion": {"type": "rrf", "k": rrf_k},
+        "k": k,
+        "with_vectors": with_vectors,
+        "with_metadata": with_metadata,
+    }
+    if filter is not None:
+        body["filter"] = dict(filter)
+    return Call(
+        "POST",
+        f"/collections/{_seg(name)}/query",
+        lambda b: [ScoredResult.from_dict(h) for h in b["results"]],
+        json=body,
+    )
 
 
 def search_by_id_body(point_id: str, options: dict[str, Any]) -> dict[str, Any]:

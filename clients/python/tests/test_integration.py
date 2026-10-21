@@ -24,6 +24,11 @@ from quiver import (
     InvalidRequestError,
     KDTree,
     NotFoundError,
+    Point,
+    Prefetch,
+    SparseVector,
+    SparseVectorParams,
+    VectorParams,
 )
 
 URL = os.environ.get("QUIVER_URL")
@@ -187,3 +192,83 @@ def test_snapshots(client: Client, name: str, tmp_path: Path) -> None:
     finally:
         client.delete_collection(copy.name)
         client.delete_snapshot(snap.id)
+
+
+def test_named_sparse_and_hybrid(client: Client, name: str) -> None:
+    col = client.create_collection(
+        name,
+        2,
+        metric="euclidean",
+        vectors={"title": VectorParams(2, metric="euclidean", index=Flat())},
+        sparse_vectors={"text": SparseVectorParams("idf")},
+    )
+    info = col.info()
+    assert info.vectors["title"]["dimension"] == 2
+    assert info.sparse_vectors["text"]["modifier"] == "idf"
+    col.upsert(
+        [
+            Point("a", [0, 0], vectors={"title": [1, 1]}, sparse_vectors={"text": {1: 1.0}}),
+            Point("b", [1, 1], vectors={"title": [0, 0]}, sparse_vectors={"text": {2: 1.0}}),
+            {"id": "c", "vector": [5, 5], "vectors": {"title": [5, 5]}},
+        ]
+    )
+    assert col.search([0, 0], k=1, using="title")[0].id == "b"
+    hits = col.search_sparse({2: 1.0}, using="text", with_vectors=True)
+    assert [h.id for h in hits] == ["b"]
+    assert hits[0].distance < 0
+    assert hits[0].sparse_vectors["text"] == SparseVector([2], [1.0])
+    assert hits[0].vectors["title"] == [0.0, 0.0]
+    point = col.get("a")
+    assert point is not None and point.vectors["title"] == [1.0, 1.0]
+
+    fused = col.query(
+        [Prefetch(vector=[1, 1]), Prefetch(sparse={2: 1.0}, using="text", weight=2.0)], k=2
+    )
+    assert fused[0].id == "b"
+    assert fused[0].score > fused[1].score
+    with pytest.raises(InvalidRequestError):
+        col.upsert([("d", [0, 0])])
+
+
+def test_update_rename_and_aliases(client: Client, name: str) -> None:
+    col = client.create_collection(name, 2, index=HNSW(m=32))
+    col.upsert([("a", [1, 0]), ("b", [0, 1])])
+    info = col.update(index={"ef_search": 200}, quantization="scalar")
+    assert info.index["m"] == 32 and info.index["ef_search"] == 200
+    assert info.quantization == "scalar"
+    with pytest.raises(InvalidRequestError):
+        col.update(index={"m": 1})
+
+    alias = f"{name}_alias"
+    client.set_alias(alias, name)
+    assert client.get_collection(alias).info().name == name
+    new_name = f"{name}_renamed"
+    col.rename(new_name)
+    try:
+        assert col.name == new_name
+        assert len(col) == 2
+        assert client.list_aliases()[alias] == new_name
+        client.delete_alias(alias)
+        with pytest.raises(NotFoundError):
+            client.delete_alias(alias)
+    finally:
+        client.delete_collection(new_name)
+
+
+def test_async_named_vectors(name: str) -> None:
+    assert URL
+
+    async def run() -> None:
+        async with AsyncClient(URL, api_key=os.environ.get("QUIVER_API_KEY")) as client:
+            col = await client.create_collection(
+                name, 2, metric="euclidean", sparse_vectors=["text"]
+            )
+            await col.upsert([Point("a", [0, 0], sparse_vectors={"text": {3: 2.0}})])
+            hits = await col.search_sparse({3: 1.0}, using="text")
+            assert hits[0].id == "a" and hits[0].distance == -2.0
+            fused = await col.query([Prefetch(sparse={3: 1.0}, using="text")], k=1, rrf_k=1)
+            assert fused[0].score == 0.5
+            await col.rename(f"{name}_x")
+            await client.rename_collection(f"{name}_x", name)
+
+    asyncio.run(run())

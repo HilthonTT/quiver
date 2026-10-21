@@ -698,3 +698,239 @@ async fn quantization_and_field_indexes_over_grpc() {
         quiver_db::Quantization::Scalar
     );
 }
+
+#[tokio::test]
+async fn named_sparse_and_hybrid_search() {
+    let db = Arc::new(Database::in_memory());
+    let mut client = start(Arc::clone(&db), KeyStore::default()).await;
+    let mut vectors = std::collections::HashMap::new();
+    vectors.insert(
+        "title".to_owned(),
+        pb::VectorParams {
+            dimension: 2,
+            metric: pb::Metric::Euclidean as i32,
+            index: Some(pb::IndexConfig {
+                kind: Some(pb::index_config::Kind::Flat(pb::FlatIndex {})),
+            }),
+            ..Default::default()
+        },
+    );
+    let mut sparse_vectors = std::collections::HashMap::new();
+    sparse_vectors.insert(
+        "text".to_owned(),
+        pb::SparseVectorParams {
+            modifier: pb::SparseModifier::Idf as i32,
+        },
+    );
+    let info = client
+        .create_collection(pb::CreateCollectionRequest {
+            name: "docs".into(),
+            dimension: 2,
+            metric: pb::Metric::Euclidean as i32,
+            vectors,
+            sparse_vectors,
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(info.vectors["title"].dimension, 2);
+    assert_eq!(
+        info.sparse_vectors["text"].modifier,
+        pb::SparseModifier::Idf as i32
+    );
+
+    let point = |id: &str, v: [f32; 2], title: [f32; 2], term: u32| pb::Point {
+        id: id.into(),
+        vector: v.to_vec(),
+        vectors: [(
+            "title".to_owned(),
+            pb::DenseVector {
+                values: title.to_vec(),
+            },
+        )]
+        .into(),
+        sparse_vectors: [(
+            "text".to_owned(),
+            pb::SparseVector {
+                indices: vec![term],
+                values: vec![1.0],
+            },
+        )]
+        .into(),
+        ..Default::default()
+    };
+    client
+        .upsert(pb::UpsertRequest {
+            collection: "docs".into(),
+            points: vec![
+                point("a", [0.0, 0.0], [1.0, 1.0], 1),
+                point("b", [1.0, 1.0], [0.0, 0.0], 2),
+            ],
+        })
+        .await
+        .unwrap();
+
+    let hits = client
+        .search(pb::SearchRequest {
+            collection: "docs".into(),
+            vector: vec![0.0, 0.0],
+            using: "title".into(),
+            with_vectors: true,
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .hits;
+    assert_eq!(hits[0].id, "b");
+    assert_eq!(hits[0].vectors["title"].values, [0.0, 0.0]);
+    assert_eq!(hits[0].sparse_vectors["text"].indices, [2]);
+
+    let hits = client
+        .search(pb::SearchRequest {
+            collection: "docs".into(),
+            sparse: Some(pb::SparseVector {
+                indices: vec![1],
+                values: vec![1.0],
+            }),
+            using: "text".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .hits;
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].id, "a");
+
+    let fused = client
+        .query(pb::QueryRequest {
+            collection: "docs".into(),
+            prefetch: vec![
+                pb::Prefetch {
+                    vector: vec![1.0, 1.0],
+                    ..Default::default()
+                },
+                pb::Prefetch {
+                    sparse: Some(pb::SparseVector {
+                        indices: vec![2],
+                        values: vec![1.0],
+                    }),
+                    using: "text".into(),
+                    ..Default::default()
+                },
+            ],
+            k: 1,
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .hits;
+    assert_eq!(fused[0].id, "b");
+    assert!((fused[0].score - 2.0 / 61.0).abs() < 1e-6);
+
+    for bad in [
+        pb::SearchRequest {
+            collection: "docs".into(),
+            sparse: Some(pb::SparseVector::default()),
+            ..Default::default()
+        },
+        pb::SearchRequest {
+            collection: "docs".into(),
+            vector: vec![0.0, 0.0],
+            id: "a".into(),
+            ..Default::default()
+        },
+    ] {
+        let err = client.search(bad).await.unwrap_err();
+        assert_eq!(err.code(), Code::InvalidArgument);
+    }
+}
+
+#[tokio::test]
+async fn update_rename_and_aliases() {
+    let db = Arc::new(Database::in_memory());
+    db.create_collection("v1", CollectionConfig::new(2)).unwrap();
+    let mut client = start(Arc::clone(&db), keys()).await;
+    fn rw<T>(msg: T) -> Request<T> {
+        with_auth(msg, "x-api-key", "rw-secret")
+    }
+    fn ro<T>(msg: T) -> Request<T> {
+        with_auth(msg, "x-api-key", "ro-secret")
+    }
+
+    let info = client
+        .update_collection(rw(pb::UpdateCollectionRequest {
+            name: "v1".into(),
+            update_json: r#"{"index": {"type": "flat"}}"#.into(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert!(matches!(
+        info.index.unwrap().kind,
+        Some(pb::index_config::Kind::Flat(_))
+    ));
+    let err = client
+        .update_collection(rw(pb::UpdateCollectionRequest {
+            name: "v1".into(),
+            update_json: r#"{"dimension": 3}"#.into(),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
+
+    client
+        .set_alias(rw(pb::SetAliasRequest {
+            alias: "live".into(),
+            collection: "v1".into(),
+        }))
+        .await
+        .unwrap();
+    let info = client
+        .rename_collection(rw(pb::RenameCollectionRequest {
+            name: "v1".into(),
+            new_name: "v2".into(),
+        }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(info.name, "v2");
+    let aliases = client
+        .list_aliases(ro(pb::ListAliasesRequest {}))
+        .await
+        .unwrap()
+        .into_inner()
+        .aliases;
+    assert_eq!(
+        aliases,
+        [pb::Alias {
+            alias: "live".into(),
+            collection: "v2".into()
+        }]
+    );
+    let got = client
+        .get_collection(rw(pb::GetCollectionRequest { name: "live".into() }))
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(got.name, "v2");
+
+    // Read-only keys cannot change settings or aliases.
+    let denied = client
+        .delete_alias(ro(pb::DeleteAliasRequest { alias: "live".into() }))
+        .await
+        .unwrap_err();
+    assert_eq!(denied.code(), Code::PermissionDenied);
+    client
+        .delete_alias(rw(pb::DeleteAliasRequest { alias: "live".into() }))
+        .await
+        .unwrap();
+    let err = client
+        .delete_alias(rw(pb::DeleteAliasRequest { alias: "live".into() }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::NotFound);
+}

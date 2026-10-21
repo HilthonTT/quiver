@@ -1135,3 +1135,236 @@ async fn quantized_collections_over_rest() {
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
     }
 }
+
+async fn hybrid_app() -> TestApp {
+    let app = TestApp::new();
+    let (status, body) = app
+        .post(
+            "/collections",
+            json!({
+                "name": "docs",
+                "dimension": 2,
+                "metric": "euclidean",
+                "vectors": {"title": {"dimension": 3, "metric": "euclidean", "index": {"type": "flat"}}},
+                "sparse_vectors": {"text": {"modifier": "idf"}},
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["vectors"]["title"]["dimension"], 3);
+    assert_eq!(body["sparse_vectors"]["text"]["modifier"], "idf");
+    let (status, body) = app
+        .post(
+            "/collections/docs/points",
+            json!({"points": [
+                {"id": "a", "vector": [0.0, 0.0], "vectors": {"title": [1.0, 0.0, 0.0]},
+                 "sparse_vectors": {"text": {"indices": [7, 1], "values": [1.0, 2.0]}}},
+                {"id": "b", "vector": [1.0, 0.0], "vectors": {"title": [0.0, 1.0, 0.0]},
+                 "sparse_vectors": {"text": {"indices": [2], "values": [1.0]}}},
+                {"id": "c", "vector": [5.0, 5.0], "vectors": {"title": [0.0, 0.0, 1.0]}}
+            ]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    app
+}
+
+#[tokio::test]
+async fn named_and_sparse_vectors() {
+    let app = hybrid_app().await;
+
+    let (status, body) = app
+        .post(
+            "/collections/docs/search",
+            json!({"vector": [0.0, 1.0, 0.0], "using": "title", "k": 1}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["results"][0]["id"], "b");
+
+    let (status, body) = app
+        .post(
+            "/collections/docs/search",
+            json!({"sparse": {"indices": [1], "values": [1.0]}, "using": "text", "with_vectors": true}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let hits = body["results"].as_array().unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0]["id"], "a");
+    assert!(hits[0]["distance"].as_f64().unwrap() < 0.0, "negated score");
+    assert_eq!(
+        hits[0]["sparse_vectors"]["text"]["indices"],
+        json!([1, 7]),
+        "sorted"
+    );
+    assert_eq!(hits[0]["vectors"]["title"], json!([1.0, 0.0, 0.0]));
+
+    let (status, body) = app.get("/collections/docs/points/a").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["vectors"]["title"], json!([1.0, 0.0, 0.0]));
+    let (_, body) = app.get("/collections/docs/points/a?with_vectors=false").await;
+    assert!(body.get("vectors").is_none() && body.get("sparse_vectors").is_none());
+
+    let (status, body) = app
+        .post(
+            "/collections/docs/recommend",
+            json!({"positive": ["a"], "using": "title", "k": 1}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+
+    for bad in [
+        json!({"sparse": {"indices": [1], "values": [1.0]}}),
+        json!({"sparse": {"indices": [1], "values": [1.0]}, "vector": [0.0, 0.0], "using": "text"}),
+        json!({"vector": [0.0, 0.0], "using": "nope"}),
+        json!({"vector": [0.0, 0.0], "using": "title"}),
+    ] {
+        let (status, body) = app.post("/collections/docs/search", bad.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {body}");
+    }
+    let (status, body) = app
+        .post(
+            "/collections/docs/points",
+            json!({"points": [{"id": "d", "vector": [0.0, 0.0]}]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "missing named vector: {body}");
+}
+
+#[tokio::test]
+async fn hybrid_query() {
+    let app = hybrid_app().await;
+    let (status, body) = app
+        .post(
+            "/collections/docs/query",
+            json!({
+                "prefetch": [
+                    {"vector": [5.0, 5.0], "limit": 3},
+                    {"sparse": {"indices": [2], "values": [1.0]}, "using": "text", "weight": 2.0},
+                ],
+                "fusion": {"type": "rrf", "k": 1},
+                "k": 2,
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let hits = body["results"].as_array().unwrap();
+    assert_eq!(hits.len(), 2);
+    // b: 2/(1+1) from the keyword search plus 1/(1+2) from the dense one.
+    assert_eq!(hits[0]["id"], "b");
+    assert!((hits[0]["score"].as_f64().unwrap() - (1.0 + 1.0 / 3.0)).abs() < 1e-6);
+    assert_eq!(hits[1]["id"], "c");
+
+    for bad in [
+        json!({"prefetch": []}),
+        json!({"prefetch": [{"sparse": {"indices": [1], "values": [1.0]}}]}),
+        json!({"prefetch": [{"vector": [0.0, 0.0], "sparse": {"indices": [1], "values": [1.0]}}]}),
+        json!({"prefetch": [{"vector": [0.0, 0.0]}], "fusion": {"type": "magic"}}),
+        json!({"prefetch": [{"vector": [0.0, 0.0], "weight": -1.0}]}),
+        json!({"prefetch": [{"vector": [0.0, 0.0], "limit": 0}]}),
+    ] {
+        let (status, body) = app.post("/collections/docs/query", bad.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn update_rename_and_aliases() {
+    let app = TestApp::seeded().await;
+    let (status, body) = app
+        .call(
+            Method::PATCH,
+            "/collections/books",
+            Some(json!({"index": {"type": "flat"}, "quantization": "scalar"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["index"]["type"], "flat");
+    assert_eq!(body["quantization"], "scalar");
+    let (status, body) = app
+        .call(Method::PATCH, "/collections/books", Some(json!({"dimension": 3})))
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], "invalid_body");
+    let (status, _) = app
+        .call(
+            Method::PATCH,
+            "/collections/books",
+            Some(json!({"on_disk": true})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "in-memory database");
+
+    let (status, body) = app
+        .call(
+            Method::PUT,
+            "/aliases/library",
+            Some(json!({"collection": "books"})),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = app
+        .post("/collections/books/rename", json!({"name": "novels"}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["name"], "novels");
+    assert_eq!(body["count"], 3);
+
+    let (_, body) = app.get("/aliases").await;
+    assert_eq!(
+        body["aliases"],
+        json!([{"alias": "library", "collection": "novels"}])
+    );
+    let (status, body) = app.get("/collections/library").await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["name"], "novels");
+    let (status, body) = app
+        .post(
+            "/collections/library/search",
+            json!({"vector": [0.0, 0.0], "k": 1}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["results"][0]["id"], "a");
+
+    let (status, body) = app
+        .post("/collections", json!({"name": "library", "dimension": 2}))
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    let (status, _) = app
+        .call(Method::PUT, "/aliases/x", Some(json!({"collection": "missing"})))
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (status, _) = app.call(Method::DELETE, "/aliases/library", None).await;
+    assert_eq!(status, StatusCode::NO_CONTENT);
+    let (status, body) = app.call(Method::DELETE, "/aliases/library", None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    assert_eq!(body["error"]["code"], "not_found");
+}
+
+#[tokio::test]
+async fn readonly_keys_cannot_change_settings_or_aliases() {
+    let keys = KeyStore::new(vec![ApiKey {
+        name: "ro".into(),
+        role: Role::ReadOnly,
+        key: "ro".into(),
+    }])
+    .unwrap();
+    let mut app = TestApp::with_options(HttpOptions {
+        keys: Arc::new(keys),
+        ..Default::default()
+    });
+    app.key = Some("ro");
+    for (method, uri) in [
+        (Method::PATCH, "/collections/x"),
+        (Method::POST, "/collections/x/rename"),
+        (Method::PUT, "/aliases/a"),
+        (Method::DELETE, "/aliases/a"),
+    ] {
+        let (status, _) = app.call(method.clone(), uri, Some(json!({}))).await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{method} {uri}");
+    }
+    let (status, _) = app.get("/aliases").await;
+    assert_eq!(status, StatusCode::OK);
+}

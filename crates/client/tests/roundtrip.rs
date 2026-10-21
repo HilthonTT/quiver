@@ -335,3 +335,71 @@ async fn batch_lookup_maintenance_and_snapshot_transfer() {
         "{bad:?}"
     );
 }
+
+#[tokio::test]
+async fn named_sparse_hybrid_and_catalog() {
+    use quiver_client::{CollectionUpdate, Prefetch, QueryRequest, SparseVector};
+    use quiver_types::{SparseVectorConfig, VectorConfig};
+
+    let server = start(KeyStore::default()).await;
+    let c = Client::new(&server.url).unwrap();
+    let config = CollectionConfig::new(2)
+        .with_vector("title", VectorConfig::new(2))
+        .with_sparse_vector("text", SparseVectorConfig::default());
+    let info = c.create_collection("docs", &config).await.unwrap();
+    assert_eq!(info.config, config);
+
+    let points = vec![
+        serde_json::from_value(
+            json!({"id": "a", "vector": [1.0, 0.0], "vectors": {"title": [0.0, 1.0]},
+            "sparse_vectors": {"text": {"indices": [1], "values": [1.0]}}}),
+        )
+        .unwrap(),
+        serde_json::from_value(
+            json!({"id": "b", "vector": [0.0, 1.0], "vectors": {"title": [1.0, 0.0]},
+            "sparse_vectors": {"text": {"indices": [2], "values": [1.0]}}}),
+        )
+        .unwrap(),
+    ];
+    c.upsert("docs", points).await.unwrap();
+
+    let hits = c
+        .search("docs", &SearchRequest::new(vec![1.0, 0.0], 1).using("title"))
+        .await
+        .unwrap();
+    assert_eq!(hits[0].id, "b");
+    let hits = c
+        .search(
+            "docs",
+            &SearchRequest::sparse("text", SparseVector::new(vec![2], vec![1.0]), 5),
+        )
+        .await
+        .unwrap();
+    assert_eq!(hits.len(), 1);
+    assert_eq!(hits[0].id, "b");
+
+    let query = QueryRequest::new(
+        vec![
+            Prefetch::dense(vec![1.0, 0.0]),
+            Prefetch::sparse("text", SparseVector::new(vec![1], vec![1.0])).weight(2.0),
+        ],
+        1,
+    );
+    let fused = c.query("docs", &query).await.unwrap();
+    assert_eq!(fused[0].id, "a");
+
+    let update: CollectionUpdate = serde_json::from_value(json!({"index": {"type": "flat"}})).unwrap();
+    let info = c.update_collection("docs", &update).await.unwrap();
+    assert_eq!(info.config.index, quiver_types::IndexConfig::Flat);
+
+    c.set_alias("live", "docs").await.unwrap();
+    let renamed = c.rename_collection("docs", "docs2").await.unwrap();
+    assert_eq!(renamed.name, "docs2");
+    let aliases = c.list_aliases().await.unwrap();
+    assert_eq!(aliases.len(), 1);
+    assert_eq!(aliases[0].collection, "docs2");
+    assert_eq!(c.get_collection("live").await.unwrap().name, "docs2");
+    c.delete_alias("live").await.unwrap();
+    let err = c.delete_alias("live").await.unwrap_err();
+    assert!(matches!(err, ClientError::Api { status, .. } if status == 404));
+}

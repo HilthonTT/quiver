@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use quiver_db::auth::Role;
 use quiver_db::{
-    Collection, Database, Filter, MetadataMode, Point, PointSelector, RestoreOptions, SearchHit,
-    SearchOptions,
+    Collection, CollectionUpdate, Database, Filter, Fusion, HybridQuery, MetadataMode, Point, PointSelector,
+    Prefetch, QueryVector, RestoreOptions, SearchHit, SearchOptions,
 };
 use tokio::io::AsyncWriteExt;
 use tokio_stream::{Stream, StreamExt};
@@ -24,6 +24,8 @@ const MAX_BATCH: usize = 256;
 const MAX_SCROLL: usize = 10_000;
 /// Upper bound on ids in one GetPoints or DeletePoints request.
 const MAX_IDS: usize = 10_000;
+/// Upper bound on the searches a query fuses.
+const MAX_PREFETCH: usize = 16;
 /// Largest snapshot upload accepted, as in the REST API.
 const MAX_UPLOAD_BYTES: u64 = 16 << 30;
 /// Size of the chunks a download is sent in.
@@ -91,6 +93,7 @@ fn selector(ids: Vec<String>, filter_json: &str) -> Result<PointSelector, Status
 
 /// The search settings shared by `Search` and `Recommend`.
 struct Settings<'a> {
+    using: &'a str,
     k: u32,
     filter_json: &'a str,
     ef: Option<u32>,
@@ -110,7 +113,7 @@ impl Settings<'_> {
         Ok((
             k,
             SearchOptions {
-                using: None,
+                using: (!self.using.is_empty()).then(|| self.using.to_owned()),
                 filter: filter_from_pb(self.filter_json)?,
                 ef: self.ef.map(|e| e as usize),
                 include_vectors: self.with_vectors,
@@ -122,10 +125,19 @@ impl Settings<'_> {
 }
 
 fn search_options(req: &pb::SearchRequest) -> Result<(usize, SearchOptions), Status> {
-    if req.vector.is_empty() == req.id.is_empty() {
-        return Err(Status::invalid_argument("give either vector or id, not both"));
+    let given = [!req.vector.is_empty(), !req.id.is_empty(), req.sparse.is_some()];
+    if given.iter().filter(|&&g| g).count() != 1 {
+        return Err(Status::invalid_argument(
+            "give exactly one of vector, id and sparse",
+        ));
+    }
+    if req.sparse.is_some() && req.using.is_empty() {
+        return Err(Status::invalid_argument(
+            "name the sparse vector to search in `using`",
+        ));
     }
     Settings {
+        using: &req.using,
         k: req.k,
         filter_json: &req.filter_json,
         ef: req.ef,
@@ -142,11 +154,55 @@ fn run_search(
     k: usize,
     opts: &SearchOptions,
 ) -> quiver_db::Result<Vec<SearchHit>> {
-    if req.id.is_empty() {
+    if let Some(sparse) = &req.sparse {
+        let opts = SearchOptions {
+            using: None,
+            ..opts.clone()
+        };
+        c.search_sparse(&req.using, &sparse_from_pb(sparse.clone()), k, &opts)
+    } else if req.id.is_empty() {
         c.search_with(&req.vector, k, opts)
     } else {
         c.search_by_id(&req.id, k, opts)
     }
+}
+
+fn prefetch_from_pb(p: pb::Prefetch, k: usize) -> Result<Prefetch, Status> {
+    let limit = if p.limit == 0 { k.max(50) } else { p.limit as usize };
+    if limit > MAX_K {
+        return Err(Status::invalid_argument(format!(
+            "prefetch limit must be between 1 and {MAX_K}"
+        )));
+    }
+    let query = match (p.vector.is_empty(), p.sparse) {
+        (false, None) => QueryVector::Dense {
+            vector: p.vector,
+            using: (!p.using.is_empty()).then_some(p.using),
+        },
+        (true, Some(sparse)) => {
+            if p.using.is_empty() {
+                return Err(Status::invalid_argument(
+                    "name the sparse vector to search in `using`",
+                ));
+            }
+            QueryVector::Sparse {
+                vector: sparse_from_pb(sparse),
+                using: p.using,
+            }
+        }
+        _ => {
+            return Err(Status::invalid_argument(
+                "give each prefetch exactly one of vector and sparse",
+            ));
+        }
+    };
+    Ok(Prefetch {
+        query,
+        limit,
+        weight: p.weight.unwrap_or(1.0),
+        ef: p.ef.map(|e| e as usize),
+        max_distance: p.max_distance,
+    })
 }
 
 /// A staging file that is deleted when dropped, unless taken.
@@ -283,6 +339,52 @@ impl pb::quiver_server::Quiver for QuiverService {
         Ok(Response::new(info_to_pb(info)))
     }
 
+    async fn update_collection(&self, req: Request<pb::UpdateCollectionRequest>) -> Rpc<pb::CollectionInfo> {
+        require(&req, Role::ReadWrite)?;
+        let req = req.into_inner();
+        let update: CollectionUpdate = serde_json::from_str(&req.update_json)
+            .map_err(|e| Status::invalid_argument(format!("update_json is invalid: {e}")))?;
+        let info = self
+            .blocking(move |db| db.update_collection(&req.name, &update))
+            .await?;
+        Ok(Response::new(info_to_pb(info)))
+    }
+
+    async fn rename_collection(&self, req: Request<pb::RenameCollectionRequest>) -> Rpc<pb::CollectionInfo> {
+        require(&req, Role::ReadWrite)?;
+        let req = req.into_inner();
+        let info = self
+            .blocking(move |db| Ok(db.rename_collection(&req.name, &req.new_name)?.info()))
+            .await?;
+        Ok(Response::new(info_to_pb(info)))
+    }
+
+    async fn list_aliases(&self, req: Request<pb::ListAliasesRequest>) -> Rpc<pb::ListAliasesResponse> {
+        require(&req, Role::ReadOnly)?;
+        let aliases = self
+            .db
+            .aliases()
+            .into_iter()
+            .map(|(alias, collection)| pb::Alias { alias, collection })
+            .collect();
+        Ok(Response::new(pb::ListAliasesResponse { aliases }))
+    }
+
+    async fn set_alias(&self, req: Request<pb::SetAliasRequest>) -> Rpc<pb::SetAliasResponse> {
+        require(&req, Role::ReadWrite)?;
+        let req = req.into_inner();
+        self.blocking(move |db| db.set_alias(&req.alias, &req.collection))
+            .await?;
+        Ok(Response::new(pb::SetAliasResponse {}))
+    }
+
+    async fn delete_alias(&self, req: Request<pb::DeleteAliasRequest>) -> Rpc<pb::DeleteAliasResponse> {
+        require(&req, Role::ReadWrite)?;
+        let alias = req.into_inner().alias;
+        self.blocking(move |db| db.delete_alias(&alias)).await?;
+        Ok(Response::new(pb::DeleteAliasResponse {}))
+    }
+
     async fn upsert(&self, req: Request<pb::UpsertRequest>) -> Rpc<pb::UpsertResponse> {
         require(&req, Role::ReadWrite)?;
         let req = req.into_inner();
@@ -413,6 +515,7 @@ impl pb::quiver_server::Quiver for QuiverService {
             )));
         }
         let (k, opts) = Settings {
+            using: &req.using,
             k: req.k,
             filter_json: &req.filter_json,
             ef: req.ef,
@@ -429,6 +532,40 @@ impl pb::quiver_server::Quiver for QuiverService {
             .await?;
         Ok(Response::new(pb::SearchResponse {
             hits: hits.into_iter().map(hit_to_pb).collect(),
+        }))
+    }
+
+    async fn query(&self, req: Request<pb::QueryRequest>) -> Rpc<pb::QueryResponse> {
+        require(&req, Role::ReadOnly)?;
+        let req = req.into_inner();
+        let k = if req.k == 0 { 10 } else { req.k as usize };
+        if k > MAX_K {
+            return Err(Status::invalid_argument(format!(
+                "k must be between 1 and {MAX_K}"
+            )));
+        }
+        if req.prefetch.is_empty() || req.prefetch.len() > MAX_PREFETCH {
+            return Err(Status::invalid_argument(format!(
+                "give between 1 and {MAX_PREFETCH} prefetch searches"
+            )));
+        }
+        let query = HybridQuery {
+            prefetch: req
+                .prefetch
+                .into_iter()
+                .map(|p| prefetch_from_pb(p, k))
+                .collect::<Result<_, _>>()?,
+            fusion: req.rrf_k.map_or_else(Fusion::default, |k| Fusion::Rrf { k }),
+            filter: filter_from_pb(&req.filter_json)?,
+            include_vectors: req.with_vectors,
+            include_metadata: req.with_metadata.unwrap_or(true),
+        };
+        let collection = req.collection;
+        let hits = self
+            .blocking(move |db| db.collection(&collection)?.query(&query, k))
+            .await?;
+        Ok(Response::new(pb::QueryResponse {
+            hits: hits.into_iter().map(scored_to_pb).collect(),
         }))
     }
 

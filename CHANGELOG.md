@@ -30,6 +30,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **Aliases**: `GET /aliases`, `PUT /aliases/{alias}` to create or atomically re-point one, `DELETE /aliases/{alias}` (gRPC
   `ListAliases`/`SetAlias`/`DeleteAlias`). Aliases work wherever a collection is named except dropping and renaming, share a
   namespace with collections, follow renames, go away with their collection, and persist in `aliases.json`.
+- The Rust and Python clients cover all of the above; the TUI lists each collection's other vectors.
+
 - **Metadata updates** without resending vectors: merge (RFC 7386 JSON Merge Patch) or replace, by ids or by filter.
   REST `POST /collections/{name}/points/metadata`, gRPC `UpdateMetadata`, `Collection::update_metadata`, Rust and Python `update_metadata`.
 - **Count and delete by filter**: `POST /collections/{name}/points/count`, `points/delete` with `{"filter": ...}`
@@ -55,7 +57,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   snapshots still load. Older versions cannot read data written by this one.
 - Snapshot data is staged in a temporary file instead of memory while the archive is written.
 - `quiver_collection_vector_bytes` reports the memory vectors actually take, across all vectors, excluding those on disk.
-- `Collection::config()` returns an owned `CollectionConfig`.
+- `Collection::config()` returns an owned `CollectionConfig`, since settings can now change.
 - `quiver_grpc::serve` takes an optional `ServerTlsConfig`.
 - **Breaking:** listing points pages by id cursor instead of offset, so changes between pages never skip or repeat points.
   Points come back in ascending id order; REST `offset`/`next_offset` are now `cursor`/`next_cursor` (an `offset` parameter is rejected),

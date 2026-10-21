@@ -12,9 +12,9 @@
 //! # }
 //! ```
 
-pub use quiver_types::MetadataMode;
 use quiver_types::snapshot::SnapshotInfo;
 use quiver_types::{CollectionConfig, CollectionInfo, Point, PointInput, SearchHit};
+pub use quiver_types::{CollectionUpdate, Fusion, MetadataMode, ScoredHit, SparseVector, VectorUpdate};
 use reqwest::{Method, RequestBuilder, StatusCode, Url};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -103,12 +103,18 @@ pub struct UpsertResult {
 /// A nearest-neighbour query, by vector or by an existing point's id.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct SearchRequest {
-    /// The query vector; leave empty when searching by `id`.
+    /// The query vector; leave empty when searching by `id` or `sparse`.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub vector: Vec<f32>,
     /// Search with this point's stored vector, leaving the point itself out.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    /// Search the sparse vector named by `using` with this one.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sparse: Option<SparseVector>,
+    /// The named vector to search; the main one if `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub using: Option<String>,
     pub k: usize,
     /// Metadata filter, in the server's JSON filter syntax.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -129,6 +135,8 @@ impl SearchRequest {
         Self {
             vector,
             id: None,
+            sparse: None,
+            using: None,
             k,
             filter: None,
             ef: None,
@@ -145,12 +153,130 @@ impl SearchRequest {
             ..Self::new(Vec::new(), k)
         }
     }
+
+    /// The `k` points scoring highest against `vector` in the sparse vector
+    /// `using`. Hits' distances are their negated scores.
+    pub fn sparse(using: impl Into<String>, vector: SparseVector, k: usize) -> Self {
+        Self {
+            sparse: Some(vector),
+            using: Some(using.into()),
+            ..Self::new(Vec::new(), k)
+        }
+    }
+
+    /// Searches the named dense vector `name` instead of the main one.
+    #[must_use]
+    pub fn using(mut self, name: impl Into<String>) -> Self {
+        self.using = Some(name.into());
+        self
+    }
+}
+
+/// Several searches whose rankings are fused into one (hybrid search).
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct QueryRequest {
+    pub prefetch: Vec<Prefetch>,
+    pub fusion: Fusion,
+    pub k: usize,
+    /// Metadata filter applied to every search.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter: Option<Value>,
+    pub with_vectors: bool,
+    pub with_metadata: bool,
+}
+
+impl QueryRequest {
+    /// The `k` best points by reciprocal rank fusion of `prefetch`.
+    pub fn new(prefetch: Vec<Prefetch>, k: usize) -> Self {
+        Self {
+            prefetch,
+            fusion: Fusion::default(),
+            k,
+            filter: None,
+            with_vectors: false,
+            with_metadata: true,
+        }
+    }
+}
+
+/// One search of a [`QueryRequest`].
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct Prefetch {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vector: Option<Vec<f32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sparse: Option<SparseVector>,
+    /// The named vector to search; required for `sparse`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub using: Option<String>,
+    /// How many of its best hits take part (the server's default: `max(k, 50)`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub limit: Option<usize>,
+    pub weight: f32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ef: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_distance: Option<f32>,
+}
+
+impl Prefetch {
+    /// A search of the main dense vector (see [`using`](Self::using)).
+    pub fn dense(vector: Vec<f32>) -> Self {
+        Self {
+            vector: Some(vector),
+            sparse: None,
+            using: None,
+            limit: None,
+            weight: 1.0,
+            ef: None,
+            max_distance: None,
+        }
+    }
+
+    /// A search of the sparse vector `using`.
+    pub fn sparse(using: impl Into<String>, vector: SparseVector) -> Self {
+        Self {
+            vector: None,
+            sparse: Some(vector),
+            using: Some(using.into()),
+            ..Self::dense(Vec::new())
+        }
+    }
+
+    /// Searches the named vector `name`.
+    #[must_use]
+    pub fn using(mut self, name: impl Into<String>) -> Self {
+        self.using = Some(name.into());
+        self
+    }
+
+    #[must_use]
+    pub fn limit(mut self, limit: usize) -> Self {
+        self.limit = Some(limit);
+        self
+    }
+
+    #[must_use]
+    pub fn weight(mut self, weight: f32) -> Self {
+        self.weight = weight;
+        self
+    }
+}
+
+/// An alternative name for a collection.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Alias {
+    pub alias: String,
+    pub collection: String,
 }
 
 /// Points like the `positive` examples and unlike the `negative` ones.
 #[derive(Debug, Clone, PartialEq, Serialize)]
 pub struct RecommendRequest {
     pub positive: Vec<String>,
+    /// The named vector to compare; the main one if `None`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub using: Option<String>,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub negative: Vec<String>,
     pub k: usize,
@@ -169,6 +295,7 @@ impl RecommendRequest {
     pub fn new(positive: Vec<String>, k: usize) -> Self {
         Self {
             positive,
+            using: None,
             negative: Vec::new(),
             k,
             filter: None,
@@ -322,6 +449,43 @@ impl Client {
         let mut body = serde_json::to_value(config).expect("configs serialize");
         body["name"] = json!(name);
         Self::json(self.request(Method::POST, "collections").json(&body)).await
+    }
+
+    /// Changes index, quantization or on-disk settings; may rebuild indexes.
+    pub async fn update_collection(&self, name: &str, update: &CollectionUpdate) -> Result<CollectionInfo> {
+        let path = format!("collections/{}", seg(name));
+        Self::json(self.request(Method::PATCH, &path).json(update)).await
+    }
+
+    /// Renames a collection; its aliases follow it.
+    pub async fn rename_collection(&self, name: &str, new_name: &str) -> Result<CollectionInfo> {
+        let path = format!("collections/{}/rename", seg(name));
+        Self::json(
+            self.request(Method::POST, &path)
+                .json(&json!({ "name": new_name })),
+        )
+        .await
+    }
+
+    pub async fn list_aliases(&self) -> Result<Vec<Alias>> {
+        Self::field(self.request(Method::GET, "aliases"), "aliases").await
+    }
+
+    /// Creates `alias`, or atomically points it at `collection`.
+    pub async fn set_alias(&self, alias: &str, collection: &str) -> Result<()> {
+        let path = format!("aliases/{}", seg(alias));
+        Self::send(
+            self.request(Method::PUT, &path)
+                .json(&json!({ "collection": collection })),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn delete_alias(&self, alias: &str) -> Result<()> {
+        let path = format!("aliases/{}", seg(alias));
+        Self::send(self.request(Method::DELETE, &path)).await?;
+        Ok(())
     }
 
     pub async fn drop_collection(&self, name: &str) -> Result<()> {
@@ -489,6 +653,12 @@ impl Client {
     /// which are left out of the results.
     pub async fn recommend(&self, collection: &str, req: &RecommendRequest) -> Result<Vec<SearchHit>> {
         let path = format!("collections/{}/recommend", seg(collection));
+        Self::field(self.request(Method::POST, &path).json(req), "results").await
+    }
+
+    /// Hybrid search: fuses the rankings of several dense and sparse searches.
+    pub async fn query(&self, collection: &str, req: &QueryRequest) -> Result<Vec<ScoredHit>> {
+        let path = format!("collections/{}/query", seg(collection));
         Self::field(self.request(Method::POST, &path).json(req), "results").await
     }
 
