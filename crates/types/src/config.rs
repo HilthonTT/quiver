@@ -264,15 +264,17 @@ impl VectorConfig {
             }
         }
 
-        if self.quantization == Quantization::Scalar {
+        if let Some(kind) = self.quantization.name() {
             if self.metric == Metric::Hamming {
-                return Err(Error::invalid(
-                    "scalar quantization does not support hamming: \
-                     it compares exact values, which quantization rounds",
-                ));
+                return Err(Error::invalid(format!(
+                    "{kind} quantization does not support hamming: \
+                     it compares exact values, which quantization rounds"
+                )));
             }
             if matches!(self.index, IndexConfig::KdTree(_)) {
-                return Err(Error::invalid("scalar quantization needs an hnsw or flat index"));
+                return Err(Error::invalid(format!(
+                    "{kind} quantization needs an hnsw or flat index"
+                )));
             }
         }
 
@@ -427,11 +429,27 @@ pub enum Quantization {
     /// `(max - min) / 510` per component, where `min`/`max` are taken over
     /// that vector's components.
     Scalar,
+    /// One bit per component (its sign) plus 4 bytes per vector (its mean
+    /// magnitude), searched instead of the vectors, which are kept exactly
+    /// and re-rank the results. The codes take about a thirty-second of the
+    /// memory of the vectors; keep those on disk (`on_disk`) to save it.
+    /// Best for high-dimensional embeddings (several hundred dimensions or
+    /// more) whose components are centred around zero.
+    Binary,
 }
 
 impl Quantization {
     pub fn is_none(&self) -> bool {
         *self == Quantization::None
+    }
+
+    /// The name used in messages, for quantizations other than `None`.
+    pub fn name(&self) -> Option<&'static str> {
+        match self {
+            Quantization::None => None,
+            Quantization::Scalar => Some("scalar"),
+            Quantization::Binary => Some("binary"),
+        }
     }
 }
 
@@ -619,6 +637,17 @@ mod tests {
                 .is_err()
         );
         assert!(c.index(IndexConfig::Flat).validate().is_ok());
+
+        let c: CollectionConfig = serde_json::from_str(r#"{"dimension":3,"quantization":"binary"}"#).unwrap();
+        assert_eq!(c.quantization, Quantization::Binary);
+        assert!(c.validate().is_ok());
+        assert!(c.clone().metric(Metric::Hamming).validate().is_err());
+        assert!(
+            c.metric(Metric::Euclidean)
+                .index(IndexConfig::KdTree(KdTreeParams::default()))
+                .validate()
+                .is_err()
+        );
     }
 
     #[test]

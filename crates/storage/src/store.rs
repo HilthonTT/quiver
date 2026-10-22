@@ -35,7 +35,7 @@ impl StoreSpec {
     pub fn for_config(config: &CollectionConfig, dir: Option<&Path>) -> Self {
         let column = |v: &VectorConfig| ColumnSpec {
             dim: v.dimension,
-            quantized: v.quantization == Quantization::Scalar,
+            quantization: v.quantization,
             on_disk: v.on_disk,
         };
         Self {
@@ -192,9 +192,9 @@ impl VectorStore {
         self.dir.as_deref()
     }
 
-    /// Switches the main column to scalar-quantized codes.
-    pub fn quantize(&mut self) {
-        self.main.quantize();
+    /// Switches the main column to codes quantized as `quantization` says.
+    pub fn quantize(&mut self, quantization: Quantization) {
+        self.main.quantize(quantization);
     }
 
     pub fn is_quantized(&self) -> bool {

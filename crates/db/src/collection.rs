@@ -14,8 +14,8 @@ use quiver_storage::{
 };
 use quiver_types::{
     CollectionConfig, CollectionInfo, CollectionUpdate, Error, Filter, Fusion, HybridQuery, IndexConfig,
-    MAX_ID_LEN, MAX_METADATA_DEPTH, MetadataMode, Metric, Point, PointSelector, QueryVector, Result,
-    ScoredHit, SearchHit, SearchOptions, SparseVector, VectorConfig, merge_patch,
+    MAX_ID_LEN, MAX_METADATA_DEPTH, MetadataMode, Metric, Point, PointSelector, Quantization, QueryVector,
+    Result, ScoredHit, SearchHit, SearchOptions, SparseVector, VectorConfig, merge_patch,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -33,9 +33,11 @@ const ROCKSDB_DIR: &str = "rocksdb";
 /// Filtered searches whose field-index candidates number at most this many
 /// score every candidate exactly instead of searching the vector index.
 const EXACT_SCAN_MAX_CANDIDATES: usize = 20_000;
-/// Searches over quantized codes with exact vectors on disk fetch this many
+/// Searches over scalar codes with exact vectors on disk fetch this many
 /// times `k` candidates, then re-rank them by their exact distances.
 const RESCORE_OVERSAMPLING: usize = 4;
+/// The same for binary codes, which are far coarser.
+const BINARY_RESCORE_OVERSAMPLING: usize = 20;
 
 static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(0);
 
@@ -1043,7 +1045,11 @@ fn search_dense(
         }
         _ if column.rescores() => {
             // Search the codes in memory, then re-rank by the exact vectors.
-            let wide = k.saturating_mul(RESCORE_OVERSAMPLING);
+            let oversampling = match column.quantization() {
+                Quantization::Binary => BINARY_RESCORE_OVERSAMPLING,
+                _ => RESCORE_OVERSAMPLING,
+            };
+            let wide = k.saturating_mul(oversampling);
             let mut found = index.search(query, wide, opts.ef.map(|ef| ef.max(wide)), column, &accept);
             for n in &mut found {
                 n.dist = column.exact_distance(metric, query, n.slot);

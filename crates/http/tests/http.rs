@@ -1129,7 +1129,8 @@ async fn quantized_collections_over_rest() {
     for bad in [
         json!({"name": "h", "dimension": 2, "metric": "hamming", "quantization": "scalar"}),
         json!({"name": "k", "dimension": 2, "metric": "euclidean", "index": {"type": "kd_tree"}, "quantization": "scalar"}),
-        json!({"name": "x", "dimension": 2, "quantization": "binary"}),
+        json!({"name": "hb", "dimension": 2, "metric": "hamming", "quantization": "binary"}),
+        json!({"name": "x", "dimension": 2, "quantization": "ternary"}),
     ] {
         let (status, body) = app.post("/collections", bad).await;
         assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");

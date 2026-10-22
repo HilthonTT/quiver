@@ -52,9 +52,15 @@ impl HnswIndex {
         ((-u.ln() * self.level_mult).floor() as usize).min(MAX_LEVEL)
     }
 
+    /// The distance searches see, or while `building` the graph, the one
+    /// the column builds indexes with.
     #[inline]
-    fn dist(&self, query: &[f32], slot: u32, store: &VectorColumn) -> f32 {
-        store.distance(self.metric, query, slot)
+    fn dist(&self, query: &[f32], slot: u32, store: &VectorColumn, building: bool) -> f32 {
+        if building {
+            store.index_distance(self.metric, query, slot)
+        } else {
+            store.distance(self.metric, query, slot)
+        }
     }
 
     /// Inserts `slot` (which must equal the number of nodes so far).
@@ -78,11 +84,11 @@ impl HnswIndex {
         let query = &*query;
         let mut ep = Neighbor {
             slot: entry,
-            dist: self.dist(query, entry, store),
+            dist: self.dist(query, entry, store, true),
         };
 
         for layer in (level + 1..=self.max_level).rev() {
-            ep = self.greedy_closest(query, ep, layer, store);
+            ep = self.greedy_closest(query, ep, layer, store, true);
         }
 
         let mut entry_points = vec![ep];
@@ -95,6 +101,7 @@ impl HnswIndex {
                 layer,
                 store,
                 &|_| true,
+                true,
             );
             let selected = self.select_neighbors(&candidates, self.params.m, store);
             self.links[slot as usize][layer] = selected.iter().map(|n| n.slot).collect();
@@ -113,6 +120,7 @@ impl HnswIndex {
 
     fn connect(&mut self, from: u32, to: u32, dist: f32, layer: usize, store: &VectorColumn) {
         let max = self.max_links(layer);
+        let metric = self.metric;
         let list = &mut self.links[from as usize][layer];
         if list.len() < max {
             list.push(to);
@@ -123,7 +131,7 @@ impl HnswIndex {
             .iter()
             .map(|&s| Neighbor {
                 slot: s,
-                dist: store.distance(self.metric, &base, s),
+                dist: store.index_distance(metric, &base, s),
             })
             .chain(std::iter::once(Neighbor { slot: to, dist }))
             .collect();
@@ -145,12 +153,12 @@ impl HnswIndex {
             let cv = store.vector(c.slot);
             let diverse = selected
                 .iter()
-                .all(|s| store.distance(self.metric, &cv, s.slot) > c.dist);
+                .all(|s| self.dist(&cv, s.slot, store, true) > c.dist);
             if diverse {
                 selected.push(c);
             } else if !selected
                 .iter()
-                .any(|s| store.distance(self.metric, &cv, s.slot) == 0.0)
+                .any(|s| self.dist(&cv, s.slot, store, true) == 0.0)
             {
                 // Exact duplicates of an already selected neighbour are dropped
                 // rather than kept for backfill: a list full of duplicates would
@@ -169,11 +177,12 @@ impl HnswIndex {
         mut best: Neighbor,
         layer: usize,
         store: &VectorColumn,
+        building: bool,
     ) -> Neighbor {
         loop {
             let mut improved = false;
             for &nb in &self.links[best.slot as usize][layer] {
-                let d = self.dist(query, nb, store);
+                let d = self.dist(query, nb, store, building);
                 if d < best.dist {
                     best = Neighbor { slot: nb, dist: d };
                     improved = true;
@@ -185,6 +194,7 @@ impl HnswIndex {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
     fn search_layer(
         &self,
         query: &[f32],
@@ -193,6 +203,7 @@ impl HnswIndex {
         layer: usize,
         store: &VectorColumn,
         accept: Accept<'_>,
+        building: bool,
     ) -> Vec<Neighbor> {
         let mut visited = Visited::new(self.links.len());
         let mut candidates: BinaryHeap<Reverse<Neighbor>> = BinaryHeap::new();
@@ -219,7 +230,7 @@ impl HnswIndex {
                 if !visited.insert(nb) {
                     continue;
                 }
-                let dist = self.dist(query, nb, store);
+                let dist = self.dist(query, nb, store, building);
                 let worst = results.peek().map_or(f32::INFINITY, |w| w.dist);
                 if results.len() < ef || dist < worst {
                     let n = Neighbor { slot: nb, dist };
@@ -249,14 +260,14 @@ impl HnswIndex {
         };
         let mut ep = Neighbor {
             slot: entry,
-            dist: self.dist(query, entry, store),
+            dist: self.dist(query, entry, store, false),
         };
         for layer in (1..=self.max_level).rev() {
-            ep = self.greedy_closest(query, ep, layer, store);
+            ep = self.greedy_closest(query, ep, layer, store, false);
         }
         // A beam wider than the graph cannot find more, and `ef` sizes buffers.
         let ef = ef.unwrap_or(self.params.ef_search).max(k).min(self.links.len());
-        let mut found = self.search_layer(query, &[ep], ef, 0, store, accept);
+        let mut found = self.search_layer(query, &[ep], ef, 0, store, accept, false);
         found.truncate(k);
         found
     }

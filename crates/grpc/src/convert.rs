@@ -193,6 +193,7 @@ pub(crate) fn quantization_from_pb(q: i32) -> Result<Quantization, Status> {
     match pb::Quantization::try_from(q).map_err(|_| Status::invalid_argument("unknown quantization"))? {
         pb::Quantization::None => Ok(Quantization::None),
         pb::Quantization::Scalar => Ok(Quantization::Scalar),
+        pb::Quantization::Binary => Ok(Quantization::Binary),
     }
 }
 
@@ -200,6 +201,7 @@ pub(crate) fn quantization_to_pb(q: Quantization) -> i32 {
     match q {
         Quantization::None => pb::Quantization::None,
         Quantization::Scalar => pb::Quantization::Scalar,
+        Quantization::Binary => pb::Quantization::Binary,
     }
     .into()
 }
@@ -336,6 +338,7 @@ mod tests {
     fn config_roundtrip() {
         let config = CollectionConfig::new(3)
             .on_disk(true)
+            .quantization(Quantization::Binary)
             .with_vector(
                 "t",
                 VectorConfig::new(2)

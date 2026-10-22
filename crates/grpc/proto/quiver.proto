@@ -67,6 +67,9 @@ enum Quantization {
   QUANTIZATION_NONE = 0;
   // 8-bit scalar quantization: about a quarter of the memory, lossy.
   QUANTIZATION_SCALAR = 1;
+  // 1 bit per component, searched instead of the vectors, which are kept
+  // exactly and re-rank the results. Pair with on_disk to save memory.
+  QUANTIZATION_BINARY = 2;
 }
 
 enum Metric {
