@@ -8,6 +8,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Binary quantization** (`"quantization": "binary"`, per vector, at creation or through `PATCH`): searches score one bit per
+  component plus a 4-byte scale per vector, fetch 20×k candidates and re-rank them by the exact vectors, which are kept, so
+  results carry exact distances and vectors. With `on_disk`, only the bits stay in memory, about 1/32 of the vectors. HNSW
+  graphs are built from the exact vectors. HNSW and flat indexes only, not with `hamming`. gRPC `QUANTIZATION_BINARY`.
+- **Expiring points**: `"expiry": {"field": "expires_at", "default_ttl": 3600}` at creation or through `PATCH` (`null` turns
+  it off). A point expires once the number in its metadata field `field` (Unix seconds) has passed: it is hidden from every
+  read at once, and a background sweep deletes it (`--expiry-interval`, `QUIVER_EXPIRY_INTERVAL`, default 60 s; `0` disables
+  it). `default_ttl` gives points written without the field an expiry time. The field is indexed while expiry is on, and
+  non-numeric values are refused. `Collection::purge_expired` and `ExpirySweeper` in the embedded crate; `Expiry` in the
+  Python client; gRPC `ExpiryConfig`.
 - **TLS** for both APIs: `--tls-cert`/`--tls-key` (PEM; `QUIVER_TLS_CERT`/`QUIVER_TLS_KEY`), and `--tls-client-ca` to require
   client certificates (mutual TLS). REST negotiates HTTP/2 or HTTP/1.1 over ALPN; handshakes run concurrently and time out
   after 10 s. `quiver --healthcheck` probes over TLS. The server warns when API keys are configured on a non-loopback

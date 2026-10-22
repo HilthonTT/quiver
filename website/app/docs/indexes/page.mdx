@@ -97,7 +97,7 @@ The k-d tree does not support `dot_product`: inner products give no distance bou
 
 ## Scalar quantization
 
-By default each vector component is a 32-bit float. With `"quantization": "scalar"`, set when the collection is created, each component is stored in one byte instead, plus 8 bytes per vector. That is about a quarter of the memory: 768 dimensions take 776 bytes instead of 3,072.
+By default each vector component is a 32-bit float. With `"quantization": "scalar"`, set when the collection is created or [later](/docs/collections/#changing-settings), each component is stored in one byte instead, plus 8 bytes per vector. That is about a quarter of the memory: 768 dimensions take 776 bytes instead of 3,072.
 
 ```bash
 curl -X POST localhost:6900/collections -H 'content-type: application/json' \
@@ -110,9 +110,28 @@ client.create_collection("docs", 768, quantization="scalar")
 
 Each vector is mapped onto 256 evenly spaced values between its own smallest and largest component. This needs no training, so points can be added at any time. It is lossy: searches use the decoded values, and points read back carry them too, each component within `(max - min) / 510` of what was written. Expect recall to drop slightly (in our tests on random 64-dimensional data, recall@10 stayed above 0.9 against unquantized exact search).
 
-Quantization works with the HNSW and flat indexes and every metric except `hamming`, which compares exact values. It cannot be changed after creation: to switch, restore a snapshot into a new collection created with the setting you want, or re-insert the points.
+Quantization works with the HNSW and flat indexes and every metric except `hamming`, which compares exact values. Turning it off later keeps the decoded values: the originals are gone.
 
 Only memory shrinks. The write-ahead log, checkpoints and snapshots hold 32-bit floats (the decoded values once a point is stored), so disk use and the file formats stay the same, and opening a collection briefly needs the full-size vectors before quantizing them.
+
+## Binary quantization
+
+With `"quantization": "binary"`, searches score one bit per component (whether it is positive) plus 4 bytes per vector (its mean magnitude) instead of the vectors: 768 dimensions take 100 bytes instead of 3,072. Unlike scalar quantization, it loses nothing: the exact vectors are kept, and every search re-ranks its candidates by their exact distances, so returned distances and vectors are exact.
+
+```bash
+curl -X POST localhost:6900/collections -H 'content-type: application/json' \
+  -d '{"name": "docs", "dimension": 1536, "quantization": "binary", "on_disk": true}'
+```
+
+```python
+client.create_collection("docs", 1536, quantization="binary", on_disk=True)
+```
+
+The exact vectors stay in memory unless the collection keeps them [on disk](/docs/storage/#vectors-on-disk), so the memory saving comes with `on_disk`: then only the bits are in memory, about a thirty-second of the vectors. In memory, the bits make searches read far less memory, but take a little more of it.
+
+Signs alone are a coarse summary of a vector, so searches fetch 20 × `k` candidates from the bits before re-ranking them. In our tests on random 256-dimensional data, the hardest case for it, recall@10 stayed above 0.95 against exact search with every metric, through both HNSW and flat indexes. It suits high-dimensional embeddings (several hundred dimensions or more) whose components are centred around zero, such as those of most embedding models; for low-dimensional data, prefer scalar quantization. HNSW graphs are built from the exact vectors, so inserting into an on-disk collection reads vectors from disk.
+
+The same rules as for scalar quantization apply: HNSW and flat indexes only, no `hamming`, and it can be switched on, off or to `scalar` [later](/docs/collections/#changing-settings).
 
 ## Persistence
 

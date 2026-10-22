@@ -61,6 +61,7 @@ See [security](/docs/security/#tls).
 | `--snapshot-dir` | `QUIVER_SNAPSHOT_DIR` | `DATA_DIR/snapshots` | where archives are kept |
 | `--snapshot-interval` | `QUIVER_SNAPSHOT_INTERVAL` | `0` (never) | snapshot every changed collection this often, in seconds |
 | `--snapshot-keep` | `QUIVER_SNAPSHOT_KEEP` | `5` | snapshots kept per collection; `0` keeps all |
+| `--expiry-interval` | `QUIVER_EXPIRY_INTERVAL` | `60` | delete [expired points](/docs/collections/#expiring-points) this often, in seconds; `0` never does (reads hide them either way) |
 
 See [snapshots & backups](/docs/snapshots/).
 

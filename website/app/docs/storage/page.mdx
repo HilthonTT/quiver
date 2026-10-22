@@ -84,7 +84,7 @@ A collection created with the RocksDB engine cannot be opened by a build without
 
 With `"on_disk": true` on a collection (or on a named vector), the vectors live in a file in the collection's directory, `vectors-<name>-….f32`, one 32-bit float vector after another, instead of in memory. Searches read them with positional reads, so the operating system's page cache keeps the hot ones in memory and the rest stays on disk: a collection can be larger than RAM. Ids, metadata and the index stay in memory.
 
-Combined with scalar quantization, the 8-bit codes stay in memory for the index to search with, about a quarter of the size of the vectors, and the exact vectors on disk [re-rank the results](/docs/searching/#quantized-vectors-on-disk). Without quantization, every distance a search computes reads from the file, so expect searches to be slower than in memory unless the file fits in the page cache.
+Combined with scalar quantization, the 8-bit codes stay in memory for the index to search with, about a quarter of the size of the vectors, and the exact vectors on disk [re-rank the results](/docs/searching/#quantized-vectors-on-disk). With [binary quantization](/docs/indexes/#binary-quantization), only a bit per component stays in memory. Without quantization, every distance a search computes reads from the file, so expect searches to be slower than in memory unless the file fits in the page cache.
 
 - Only durable engines (`file`, `rocksdb`) can keep vectors on disk; the memory engine and `--in-memory` refuse it.
 - Writes append to the file after the write-ahead log has the change. Checkpoints sync the file and record how many vectors it holds; on restart anything beyond that is cut off and replayed from the log.
@@ -100,7 +100,7 @@ Combined with scalar quantization, the 8-bit codes stay in memory for the index 
 
 Whatever the engine, every collection lives in memory:
 
-- each vector takes `4 × dimension` bytes (32-bit floats), or `dimension + 8` with [scalar quantization](/docs/indexes/#scalar-quantization), or nothing [on disk](#vectors-on-disk) (`dimension + 8` on disk with quantization), plus its id and its metadata; named vectors count the same way, and sparse vectors take 8 bytes per non-zero value plus as much again in their index;
+- each vector takes `4 × dimension` bytes (32-bit floats), or `dimension + 8` with [scalar quantization](/docs/indexes/#scalar-quantization), or `4 × dimension + ⌈dimension / 8⌉ + 4` with [binary quantization](/docs/indexes/#binary-quantization), or nothing [on disk](#vectors-on-disk) (`dimension + 8` on disk with scalar quantization, `⌈dimension / 8⌉ + 4` with binary), plus its id and its metadata; named vectors count the same way, and sparse vectors take 8 bytes per non-zero value plus as much again in their index;
 - the HNSW index adds each node's neighbour lists: up to `2 × m` links on the bottom layer and `m` on each layer above, at 4 bytes per link; the flat index adds nothing;
 - deleted points keep their slot until [compaction](/docs/collections/#deleting-and-compaction).
 

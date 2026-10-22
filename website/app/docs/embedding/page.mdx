@@ -79,7 +79,9 @@ Opening replays each collection's write-ahead log on top of its last checkpoint;
 
 `db.create_collection(name, config)`, `db.get_or_create_collection(name, config)` (an error if the existing one has a different configuration), `db.collection(name)` (a name or an alias), `db.collections()`, `db.list_collections()` and `db.drop_collection(name)`. `db.update_collection(name, &update)` or `collection.update(&CollectionUpdate)` [changes settings](/docs/collections/#changing-settings), `db.rename_collection(from, to)` returns the renamed collection (handles to the old one are closed), and `db.set_alias(alias, collection)`, `db.delete_alias(alias)` and `db.aliases()` manage [aliases](/docs/collections/#aliases). Collections are `Arc<Collection>`, and `Database` and `Collection` are `Send + Sync`: share an `Arc<Database>` between threads. Searches take a read lock, writes a write lock, per collection.
 
-`CollectionConfig::new(dimension)` builds a config, with `.metric(Metric::…)` and `.index(IndexConfig::…)` to change the defaults (cosine, HNSW), `.quantization(…)`, `.on_disk(true)`, `.with_vector(name, VectorConfig::new(dim))` for a named vector and `.with_sparse_vector(name, SparseVectorConfig::default())` for a sparse one. `collection.config()` returns a copy of the current settings.
+`CollectionConfig::new(dimension)` builds a config, with `.metric(Metric::…)` and `.index(IndexConfig::…)` to change the defaults (cosine, HNSW), `.quantization(…)`, `.on_disk(true)`, `.with_vector(name, VectorConfig::new(dim))` for a named vector and `.with_sparse_vector(name, SparseVectorConfig::default())` for a sparse one, and `.expiry(ExpiryConfig::new(field))` (with `.default_ttl(seconds)`) to let points [expire](/docs/collections/#expiring-points). `collection.config()` returns a copy of the current settings.
+
+The server sweeps expired points away; embedded, call `collection.purge_expired()` yourself, or start an `ExpirySweeper::start(db, interval)` (stopped when dropped). Reads never see expired points either way.
 
 ## Points and searches
 

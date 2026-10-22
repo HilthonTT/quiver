@@ -58,7 +58,7 @@ Collection('movies') CollectionInfo(name='movies', dimension=4, metric='cosine',
 
 | Client method | Does |
 | --- | --- |
-| `create_collection(name, dimension, metric=, index=, field_indexes=(), quantization="none", on_disk=False, vectors=None, sparse_vectors=None)` | creates it; `ConflictError` if it exists. See [field indexes](/docs/filtering/#field-indexes), [quantization](/docs/indexes/#scalar-quantization), [on disk](/docs/storage/#vectors-on-disk) and [named vectors](#named-and-sparse-vectors) |
+| `create_collection(name, dimension, metric=, index=, field_indexes=(), quantization="none", on_disk=False, vectors=None, sparse_vectors=None, expiry=None)` | creates it; `ConflictError` if it exists. See [field indexes](/docs/filtering/#field-indexes), [quantization](/docs/indexes/#scalar-quantization) (`"scalar"` or `"binary"`), [on disk](/docs/storage/#vectors-on-disk), [named vectors](#named-and-sparse-vectors) and [expiry](/docs/collections/#expiring-points) (`Expiry(field, default_ttl=None)`) |
 | `get_collection(name)` | a handle to an existing collection; `NotFoundError` otherwise |
 | `get_or_create_collection(name, dimension, ...)` | either of the above |
 | `collection(name)` | a handle, without asking the server |
@@ -132,7 +132,7 @@ print([hit.id for hit in movies.search(query, k=2)])
 | `info()` / `len(collection)` | configuration and count |
 | `flush()` / `compact()` | force a checkpoint / reclaim deleted slots |
 | `create_field_index(field)` / `drop_field_index(field)` | index a metadata field / drop its index |
-| `update(index=, quantization=, on_disk=, vectors=, sparse_vectors=)` | [change settings](/docs/collections/#changing-settings); returns the `CollectionInfo` |
+| `update(index=, quantization=, on_disk=, vectors=, sparse_vectors=, expiry=)` | [change settings](/docs/collections/#changing-settings); `expiry=Expiry(...)` turns expiry on, `expiry=False` off; returns the `CollectionInfo` |
 | `rename(new_name)` | rename the collection; the handle follows it |
 | `create_snapshot()` / `snapshots()` | back this collection up / list its snapshots |
 

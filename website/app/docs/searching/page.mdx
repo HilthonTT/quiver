@@ -167,6 +167,8 @@ Results carry a `score` instead of a `distance`: **higher is better**.
 
 A vector with scalar quantization and `on_disk` keeps its 8-bit codes in memory and the exact vectors [on disk](/docs/storage/#vectors-on-disk). Searches walk the index with the codes, fetching 4 × `k` candidates, then re-rank them by their exact distances from disk. Returned distances and vectors are exact.
 
+[Binary quantization](/docs/indexes/#binary-quantization) always works this way, with the exact vectors on disk or in memory, and fetches 20 × `k` candidates.
+
 ## Batch search
 
 `POST /collections/{name}/search/batch` runs up to 256 searches in one request. Each entry takes every search field above, so entries can mix vectors, ids, sparse queries and named vectors. Results come back as one list per search, in order:

@@ -23,10 +23,11 @@ curl -X POST localhost:6900/collections -H 'content-type: application/json' \
 | `dimension` | 1 to 65,536 |
 | `metric` | `cosine` (default), `euclidean`, `dot_product` (or `dot`), `manhattan` (or `l1`), `hamming` |
 | `index` | `{"type": "hnsw"}` (default), `{"type": "flat"}` or `{"type": "kd_tree"}`, with optional parameters |
-| `quantization` | `none` (default) or `scalar`; see [indexes & metrics](/docs/indexes/) |
+| `quantization` | `none` (default), `scalar` or `binary`; see [indexes & metrics](/docs/indexes/#scalar-quantization) |
 | `on_disk` | `false` (default); `true` keeps the vectors in a file, see [storage](/docs/storage/#vectors-on-disk) |
 | `vectors` | named dense vectors, see [below](#named-and-sparse-vectors) |
 | `sparse_vectors` | named sparse vectors, see [below](#named-and-sparse-vectors) |
+| `expiry` | lets points expire, see [below](#expiring-points) |
 
 The dimension, the metric and the set of named and sparse vectors are fixed once the collection exists; index, quantization and on-disk settings can [change later](#changing-settings). Creating a name that is taken answers `409 already_exists`; the Python and Rust `get_or_create_collection` return the existing collection instead. In the embedded crate, `get_or_create_collection` with a different configuration is an error.
 
@@ -59,7 +60,7 @@ Names follow the rules for collection names, and one name cannot be both dense a
 
 ## Changing settings
 
-`PATCH /collections/{name}` changes the index, quantization and on-disk settings of the main vector and of named vectors, and the `modifier` of sparse vectors. Absent fields stay as they are. `index` is a JSON Merge Patch over the current index settings: `{"ef_search": 128}` changes just that parameter, while a different `type` replaces the index (its other parameters take their defaults).
+`PATCH /collections/{name}` changes the index, quantization and on-disk settings of the main vector and of named vectors, the `modifier` of sparse vectors, and [`expiry`](#expiring-points). Absent fields stay as they are. `index` is a JSON Merge Patch over the current index settings: `{"ef_search": 128}` changes just that parameter, while a different `type` replaces the index (its other parameters take their defaults).
 
 ```bash
 curl -X PATCH localhost:6900/collections/papers -H 'content-type: application/json' -d '{
@@ -71,6 +72,21 @@ curl -X PATCH localhost:6900/collections/papers -H 'content-type: application/js
 ```
 
 It answers the collection's info. Any index change other than `ef_search` rebuilds that index, and `on_disk` moves the vectors to or from disk; both can take a while on a large collection. Searches carry on meanwhile, writes wait. Dimensions, metrics and the set of vectors cannot change: unknown fields such as `dimension` are rejected with `400 invalid_body`.
+
+## Expiring points
+
+With `expiry`, points expire at a time held in their metadata: `field` names the metadata field (a dot-separated path, as in [filters](/docs/filtering/)) holding a Unix time in seconds. Once that time has come, the point is gone from every read: searches, `get`, listing, counts and filters, as well as metadata updates and deletes. A background sweep then deletes it for good, every 60 seconds by default (`--expiry-interval`, see [configuration](/docs/configuration/)). Points without the field never expire.
+
+```bash
+curl -X POST localhost:6900/collections -H 'content-type: application/json' \
+  -d '{"name": "sessions", "dimension": 3, "expiry": {"field": "expires_at", "default_ttl": 86400}}'
+curl -X POST localhost:6900/collections/sessions/points -H 'content-type: application/json' \
+  -d '{"points": [{"id": "s1", "vector": [0.1, 0.2, 0.3], "metadata": {"expires_at": 1893456000}}]}'
+```
+
+With `default_ttl` (in seconds), points written without the field get it, set to the time of the write plus `default_ttl` and rounded up to a whole second, so every point expires. Writing a point again restarts its clock, as does replacing its metadata; merging metadata keeps its expiry time unless the patch sets a new one. To keep a point longer, set a later time.
+
+The field is indexed while expiry is on (it shows up in `field_indexes` and cannot be dropped) and must hold a number: anything else is refused with `400 invalid_argument`. `PATCH` with `{"expiry": {...}}` turns expiry on for an existing collection, after checking the points already there, and `{"expiry": null}` turns it off; expired points not yet swept away then come back. A `default_ttl` set later applies to points written from then on.
 
 ## Renaming
 

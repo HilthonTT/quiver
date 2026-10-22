@@ -79,7 +79,7 @@ With keys configured, a call with no key may only use `Health`; any other RPC an
 | `Health` | public | `{status, version}` |
 | `Info` | read | `{version, storage, snapshots_enabled, collections, points}` |
 | `ListCollections`, `GetCollection` | read | |
-| `CreateCollection` | write | `metric` unset means cosine; `index` unset means HNSW with defaults; optional `quantization`, `on_disk`, `field_indexes`, and the maps `vectors` (name → `VectorParams`) and `sparse_vectors` (name → `SparseVectorParams`) |
+| `CreateCollection` | write | `metric` unset means cosine; `index` unset means HNSW with defaults; optional `quantization` (`QUANTIZATION_SCALAR` or `QUANTIZATION_BINARY`), `on_disk`, `expiry` (`{field, default_ttl}`), `field_indexes`, and the maps `vectors` (name → `VectorParams`) and `sparse_vectors` (name → `SparseVectorParams`) |
 | `UpdateCollection` | write | `name`, `update_json`: the body of `PATCH /collections/{name}` as JSON; returns the collection's info |
 | `RenameCollection` | write | `name` (not an alias), `new_name`; returns the collection's info |
 | `ListAliases` | read | `aliases`: `{alias, collection}` pairs |
@@ -104,7 +104,7 @@ With keys configured, a call with no key may only use `Health`; any other RPC an
 | `DownloadSnapshot` | read | `id`; streams the archive as `SnapshotChunk`s of up to 1 MiB |
 | `UploadSnapshot` | write | a client stream of `SnapshotChunk`s, in order, up to 16 GiB in all; `INVALID_ARGUMENT` if the archive is not a valid snapshot |
 
-`VectorParams` is `{dimension, metric, index, quantization, on_disk}`, `SparseVectorParams` is `{modifier}` (`SPARSE_MODIFIER_NONE` or `SPARSE_MODIFIER_IDF`), `DenseVector` is `{values}` and `SparseVector` is `{indices, values}`. `CollectionInfo` and `SnapshotInfo` carry `on_disk`, `vectors` and `sparse_vectors`; `SearchHit`s and `Point`s carry `vectors` and `sparse_vectors` when vectors are asked for.
+`VectorParams` is `{dimension, metric, index, quantization, on_disk}`, `SparseVectorParams` is `{modifier}` (`SPARSE_MODIFIER_NONE` or `SPARSE_MODIFIER_IDF`), `DenseVector` is `{values}` and `SparseVector` is `{indices, values}`. `CollectionInfo` and `SnapshotInfo` carry `on_disk`, `vectors`, `sparse_vectors` and `expiry`; `SearchHit`s and `Point`s carry `vectors` and `sparse_vectors` when vectors are asked for.
 
 Every RPC is counted in the REST API's [`/metrics`](/docs/monitoring/).
 
