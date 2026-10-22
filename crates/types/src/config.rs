@@ -23,6 +23,8 @@ pub const MAX_METADATA_DEPTH: usize = 64;
 pub const MAX_NAMED_VECTORS: usize = 16;
 /// Maximum number of sparse vectors a collection can have.
 pub const MAX_SPARSE_VECTORS: usize = 16;
+/// Longest default time to live: 100 years, in seconds.
+pub const MAX_TTL_SECS: u64 = 100 * 365 * 24 * 60 * 60;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CollectionConfig {
@@ -44,6 +46,9 @@ pub struct CollectionConfig {
     /// Sparse vectors points may carry, by name, for keyword-style search.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub sparse_vectors: BTreeMap<String, SparseVectorConfig>,
+    /// Lets points expire: see [`ExpiryConfig`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expiry: Option<ExpiryConfig>,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -60,7 +65,14 @@ impl CollectionConfig {
             on_disk: false,
             vectors: BTreeMap::new(),
             sparse_vectors: BTreeMap::new(),
+            expiry: None,
         }
+    }
+
+    #[must_use]
+    pub fn expiry(mut self, expiry: ExpiryConfig) -> Self {
+        self.expiry = Some(expiry);
+        self
     }
 
     #[must_use]
@@ -167,6 +179,51 @@ impl CollectionConfig {
                     "`{name}` cannot be both a dense and a sparse vector"
                 )));
             }
+        }
+        if let Some(expiry) = &self.expiry {
+            expiry.validate()?;
+        }
+        Ok(())
+    }
+}
+
+/// Lets points expire. A point expires once the number in its metadata
+/// field `field`, a Unix time in seconds, is not after the current time.
+/// Expired points disappear from every read at once and are deleted by a
+/// periodic sweep. The field is indexed while expiry is on, and holding
+/// anything but a number in it is refused.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ExpiryConfig {
+    /// The metadata field (a dot-separated path, as in filters) holding
+    /// each point's expiry time.
+    pub field: String,
+    /// Points written without `field` get it set to the time they were
+    /// written plus this many seconds. Without it, such points never expire.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub default_ttl: Option<u64>,
+}
+
+impl ExpiryConfig {
+    pub fn new(field: impl Into<String>) -> Self {
+        Self {
+            field: field.into(),
+            default_ttl: None,
+        }
+    }
+
+    #[must_use]
+    pub fn default_ttl(mut self, seconds: u64) -> Self {
+        self.default_ttl = Some(seconds);
+        self
+    }
+
+    pub fn validate(&self) -> Result<()> {
+        validate_field_path(&self.field).map_err(|e| Error::invalid(format!("expiry: {}", message(&e))))?;
+        if self.default_ttl.is_some_and(|ttl| ttl == 0 || ttl > MAX_TTL_SECS) {
+            return Err(Error::invalid(format!(
+                "expiry.default_ttl must be between 1 and {MAX_TTL_SECS} seconds"
+            )));
         }
         Ok(())
     }
@@ -331,6 +388,25 @@ pub struct CollectionUpdate {
     /// Changes to sparse vectors.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub sparse_vectors: BTreeMap<String, SparseVectorConfig>,
+    /// New expiry settings, replacing the current ones; `Some(None)`
+    /// (`null` in JSON) turns expiry off. Points already stored keep their
+    /// expiry times; a `default_ttl` applies to points written from then on.
+    #[serde(
+        default,
+        deserialize_with = "present",
+        skip_serializing_if = "Option::is_none"
+    )]
+    pub expiry: Option<Option<ExpiryConfig>>,
+}
+
+/// Deserializes a field that is present, even as `null`, to `Some`, so
+/// `Option<Option<T>>` tells an absent field from a `null` one.
+fn present<'de, D, T>(d: D) -> std::result::Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
 }
 
 /// Changes to one dense vector's settings. Absent fields stay as they are.
@@ -410,6 +486,9 @@ impl CollectionUpdate {
                 )));
             }
             out.sparse_vectors.insert(name.clone(), *sparse);
+        }
+        if let Some(expiry) = &self.expiry {
+            out.expiry = expiry.clone();
         }
         out.validate()?;
         Ok(out)
@@ -648,6 +727,53 @@ mod tests {
                 .validate()
                 .is_err()
         );
+    }
+
+    #[test]
+    fn expiry_serde_validation_and_updates() {
+        let c: CollectionConfig = serde_json::from_value(serde_json::json!({
+            "dimension": 3,
+            "expiry": {"field": "meta.expires_at", "default_ttl": 60},
+        }))
+        .unwrap();
+        assert_eq!(
+            c.expiry,
+            Some(ExpiryConfig::new("meta.expires_at").default_ttl(60))
+        );
+        assert!(c.validate().is_ok());
+        assert!(
+            !serde_json::to_string(&CollectionConfig::new(3))
+                .unwrap()
+                .contains("expiry")
+        );
+        for bad in [
+            ExpiryConfig::new(""),
+            ExpiryConfig::new("$and"),
+            ExpiryConfig::new("t").default_ttl(0),
+            ExpiryConfig::new("t").default_ttl(MAX_TTL_SECS + 1),
+        ] {
+            assert!(
+                CollectionConfig::new(3).expiry(bad.clone()).validate().is_err(),
+                "{bad:?}"
+            );
+        }
+
+        let unchanged: CollectionUpdate = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!(unchanged.expiry, None);
+        assert_eq!(unchanged.apply(&c).unwrap().expiry, c.expiry);
+        let off: CollectionUpdate = serde_json::from_value(serde_json::json!({"expiry": null})).unwrap();
+        assert_eq!(off.expiry, Some(None));
+        assert_eq!(off.apply(&c).unwrap().expiry, None);
+        assert_eq!(
+            serde_json::to_value(&off).unwrap(),
+            serde_json::json!({"expiry": null})
+        );
+        let on: CollectionUpdate =
+            serde_json::from_value(serde_json::json!({"expiry": {"field": "ttl"}})).unwrap();
+        assert_eq!(on.apply(&c).unwrap().expiry, Some(ExpiryConfig::new("ttl")));
+        let bad: CollectionUpdate =
+            serde_json::from_value(serde_json::json!({"expiry": {"field": "a..b"}})).unwrap();
+        assert!(bad.apply(&c).is_err());
     }
 
     #[test]

@@ -105,6 +105,7 @@ pub(crate) fn config_from_pb(req: &pb::CreateCollectionRequest) -> Result<Collec
             .iter()
             .map(|(name, v)| Ok((name.clone(), sparse_params_from_pb(v)?)))
             .collect::<Result<_, Status>>()?,
+        expiry: None,
     })
 }
 

@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use clap::Parser;
-use quiver_db::{Database, SnapshotScheduler};
+use quiver_db::{Database, ExpirySweeper, SnapshotScheduler};
 use quiver_http::HttpOptions;
 use tokio::sync::watch;
 use tracing_subscriber::EnvFilter;
@@ -83,6 +83,9 @@ async fn run(config: Config) -> Result<(), BoxError> {
         );
         SnapshotScheduler::start(Arc::clone(&db), every)
     });
+    let sweeper = config
+        .expiry_every()
+        .map(|every| ExpirySweeper::start(Arc::clone(&db), every));
 
     let (stop_tx, stop_rx) = watch::channel(false);
     let stopped = move || {
@@ -153,6 +156,7 @@ async fn run(config: Config) -> Result<(), BoxError> {
         tasks.shutdown().await;
     }
     drop(scheduler);
+    drop(sweeper);
 
     tracing::info!("flushing collections");
     tokio::task::spawn_blocking(move || db.flush()).await??;

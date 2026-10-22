@@ -143,6 +143,7 @@ pub async fn create_collection(
         on_disk: req.on_disk,
         vectors: req.vectors,
         sparse_vectors: req.sparse_vectors,
+        expiry: None,
     };
     let info = blocking(move || {
         Ok(db

@@ -20,6 +20,7 @@ use quiver_types::{
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::expiry;
 use crate::fields::FieldIndexes;
 use crate::indexes::Indexes;
 
@@ -76,6 +77,52 @@ struct Inner {
     engine: Box<dyn StorageEngine>,
 }
 
+impl Inner {
+    /// Whether the point in `slot` is alive and has not expired by `now`.
+    fn visible(&self, slot: u32, now: f64) -> bool {
+        self.store.is_alive(slot) && !self.expired(slot, now)
+    }
+
+    /// Whether the point in `slot` has expired by `now`.
+    fn expired(&self, slot: u32, now: f64) -> bool {
+        self.config
+            .expiry
+            .as_ref()
+            .is_some_and(|e| expiry::is_expired(e, self.store.metadata(slot), now))
+    }
+
+    /// The slot of the point `id`, unless it has expired by `now`.
+    fn visible_slot(&self, id: &str, now: f64) -> Option<u32> {
+        self.store.slot_of(id).filter(|&slot| !self.expired(slot, now))
+    }
+
+    /// Live points that have expired by `now`, in slot order.
+    fn expired_slots(&self, now: f64) -> Vec<u32> {
+        let Some(config) = &self.config.expiry else {
+            return Vec::new();
+        };
+        let filter = expiry::expired_filter(config, now);
+        live_matching(self, &filter)
+            .filter(|&slot| self.expired(slot, now))
+            .collect()
+    }
+
+    /// Number of points alive and not expired by `now`.
+    fn visible_count(&self, now: f64) -> usize {
+        self.store.live() - self.expired_slots(now).len()
+    }
+}
+
+/// `names` with the field holding expiry times, which must be indexed.
+fn with_expiry_field(config: &CollectionConfig, mut names: Vec<String>) -> Vec<String> {
+    if let Some(e) = &config.expiry
+        && !names.contains(&e.field)
+    {
+        names.push(e.field.clone());
+    }
+    names
+}
+
 #[derive(Debug)]
 pub struct Collection {
     name: String,
@@ -112,6 +159,8 @@ impl Collection {
         }
 
         let meta_dir = dir.filter(|_| storage.is_durable()).map(Path::to_path_buf);
+        let field_indexes = with_expiry_field(&config, Vec::new());
+        FieldIndexes::validate(&field_indexes)?;
         let engine = match (storage.is_durable(), dir) {
             (true, Some(dir)) => {
                 // A leftover directory (e.g. from an interrupted drop) must not
@@ -125,7 +174,7 @@ impl Collection {
                     &CollectionMeta {
                         config: config.clone(),
                         storage,
-                        field_indexes: Vec::new(),
+                        field_indexes: field_indexes.clone(),
                     },
                 )?;
                 open_engine(storage, Some(&engine_dir(dir, storage)), env.storage_options)?
@@ -140,9 +189,9 @@ impl Collection {
             env,
             Inner {
                 indexes: Indexes::new(&config),
+                fields: FieldIndexes::build(&field_indexes, &store),
                 config,
                 store,
-                fields: FieldIndexes::default(),
                 engine,
             },
         ))
@@ -186,7 +235,9 @@ impl Collection {
                 }
             }
         }
-        inner.fields = FieldIndexes::build(&meta.field_indexes, &inner.store);
+        let field_indexes = with_expiry_field(&inner.config, meta.field_indexes);
+        FieldIndexes::validate(&field_indexes)?;
+        inner.fields = FieldIndexes::build(&field_indexes, &inner.store);
         tracing::debug!(collection = name, storage = %meta.storage, points = inner.store.live(), replayed, "opened collection");
 
         let collection = Self::from_parts(
@@ -227,14 +278,15 @@ impl Collection {
         dir: Option<&Path>,
         env: Env,
     ) -> Result<Self> {
-        FieldIndexes::validate(field_indexes)?;
+        let field_indexes = with_expiry_field(&config, field_indexes.to_vec());
+        FieldIndexes::validate(&field_indexes)?;
         let collection = Self::create(name, config, dir, env)?;
         {
             let mut inner = collection.inner.write();
             // Snapshots load into memory; lay the vectors out as configured.
             let store = relayout(store, &inner.store.spec())?;
             inner.engine.import(&store, &indexes.to_bytes())?;
-            inner.fields = FieldIndexes::build(field_indexes, &store);
+            inner.fields = FieldIndexes::build(&field_indexes, &store);
             inner.store = store;
             inner.indexes = indexes;
             collection.write_meta_locked(&inner)?;
@@ -347,8 +399,9 @@ impl Collection {
         (self.instance, self.generation())
     }
 
+    /// Number of points, not counting expired ones.
     pub fn len(&self) -> usize {
-        self.inner.read().store.live()
+        self.inner.read().visible_count(expiry::now())
     }
 
     pub fn is_empty(&self) -> bool {
@@ -365,7 +418,7 @@ impl Collection {
         CollectionInfo {
             name: self.name.clone(),
             config: inner.config.clone(),
-            count: inner.store.live(),
+            count: inner.visible_count(expiry::now()),
             tombstones: inner.store.tombstones(),
             field_indexes: inner.fields.names(),
         }
@@ -389,6 +442,19 @@ impl Collection {
         if &new == old {
             drop(inner);
             return Ok(self.info());
+        }
+
+        // Expiry times already stored must be numbers, and get indexed.
+        let mut fields = None;
+        if let Some(e) = new.expiry.as_ref().filter(|_| new.expiry != old.expiry) {
+            for slot in inner.store.live_slots() {
+                expiry::check(e, inner.store.id(slot), inner.store.metadata(slot))?;
+            }
+            let names = with_expiry_field(&new, inner.fields.names());
+            if names != inner.fields.names() {
+                FieldIndexes::validate(&names)?;
+                fields = Some(FieldIndexes::build(&names, &inner.store));
+            }
         }
 
         // Lay out the vectors anew where that changed.
@@ -453,6 +519,7 @@ impl Collection {
         }
         let previous_indexes = std::mem::replace(&mut inner.indexes, indexes);
         let previous_config = std::mem::replace(&mut inner.config, new);
+        let previous_fields = fields.map(|f| std::mem::replace(&mut inner.fields, f));
         // Old vector files stay until both are saved, so going back works.
         let persisted = self
             .checkpoint_keeping_files(&mut inner)
@@ -464,6 +531,9 @@ impl Collection {
             }
             inner.indexes = previous_indexes;
             inner.config = previous_config;
+            if let Some(f) = previous_fields {
+                inner.fields = f;
+            }
             return Err(e);
         }
         drop(previous_columns);
@@ -500,6 +570,11 @@ impl Collection {
     pub fn drop_field_index(&self, field: &str) -> Result<bool> {
         let mut inner = self.inner.write();
         self.ensure_open()?;
+        if inner.config.expiry.as_ref().is_some_and(|e| e.field == field) {
+            return Err(Error::invalid(format!(
+                "`{field}` holds expiry times and stays indexed while expiry is on"
+            )));
+        }
         let names: Vec<String> = inner.fields.names().into_iter().filter(|n| n != field).collect();
         if names.len() == inner.fields.names().len() {
             return Ok(false);
@@ -552,6 +627,14 @@ impl Collection {
 
         let mut inner = self.inner.write();
         self.ensure_open()?;
+        // Under the lock: expiry settings can change.
+        if let Some(e) = &inner.config.expiry {
+            let now = expiry::now();
+            for p in &mut points {
+                let metadata = expiry::stamp(e, &p.id, p.metadata.take(), now)?;
+                p.metadata = checked_metadata(&p.id, metadata)?;
+            }
+        }
         inner.engine.log(Op::Upsert { points: &points })?;
         apply_upsert(&mut inner, points);
         self.bump();
@@ -566,18 +649,23 @@ impl Collection {
         if !ids.iter().any(|id| inner.store.slot_of(id).is_some()) {
             return Ok(0);
         }
+        // Expired points go too, but were already gone as far as callers know.
+        let now = expiry::now();
+        let mut visible: Vec<u32> = ids.iter().filter_map(|id| inner.visible_slot(id, now)).collect();
+        visible.sort_unstable();
+        visible.dedup();
         inner.engine.log(Op::Delete { ids: &ids })?;
-        let removed = apply_delete(&mut inner, &ids);
+        apply_delete(&mut inner, &ids);
         self.bump();
         self.maintain(&mut inner)?;
-        Ok(removed)
+        Ok(visible.len())
     }
 
     /// Deletes every point whose metadata matches `filter`; returns how many.
     pub fn delete_where(&self, filter: &Filter) -> Result<usize> {
         let mut inner = self.inner.write();
         self.ensure_open()?;
-        let ids: Vec<String> = matching(&inner, filter)
+        let ids: Vec<String> = matching(&inner, filter, expiry::now())
             .map(|slot| inner.store.id(slot).to_owned())
             .collect();
         if ids.is_empty() {
@@ -593,10 +681,10 @@ impl Collection {
     /// Number of points, or of points whose metadata matches `filter`.
     pub fn count(&self, filter: Option<&Filter>) -> usize {
         let inner = self.inner.read();
-        let store = &inner.store;
+        let now = expiry::now();
         match filter {
-            None => store.live(),
-            Some(f) => matching(&inner, f).count(),
+            None => inner.visible_count(now),
+            Some(f) => matching(&inner, f, now).count(),
         }
     }
 
@@ -614,9 +702,10 @@ impl Collection {
         let mut inner = self.inner.write();
         self.ensure_open()?;
         let store = &inner.store;
+        let now = expiry::now();
         let mut slots: Vec<u32> = match selector {
-            PointSelector::Ids(ids) => ids.iter().filter_map(|id| store.slot_of(id)).collect(),
-            PointSelector::Filter(f) => matching(&inner, f).collect(),
+            PointSelector::Ids(ids) => ids.iter().filter_map(|id| inner.visible_slot(id, now)).collect(),
+            PointSelector::Filter(f) => matching(&inner, f, now).collect(),
         };
         slots.sort_unstable();
         slots.dedup();
@@ -642,6 +731,10 @@ impl Collection {
                 };
                 let mut point = store.point(slot);
                 point.metadata = checked_metadata(&point.id, Some(new))?;
+                if let Some(e) = &inner.config.expiry {
+                    let stamped = expiry::stamp(e, &point.id, point.metadata.take(), now)?;
+                    point.metadata = checked_metadata(&point.id, stamped)?;
+                }
                 Ok(point)
             })
             .collect::<Result<Vec<Point>>>()?;
@@ -661,13 +754,16 @@ impl Collection {
 
     pub fn get(&self, id: &str) -> Option<Point> {
         let inner = self.inner.read();
-        inner.store.slot_of(id).map(|slot| inner.store.point(slot))
+        inner
+            .visible_slot(id, expiry::now())
+            .map(|slot| inner.store.point(slot))
     }
 
     pub fn get_many<S: AsRef<str>>(&self, ids: &[S]) -> Vec<Point> {
         let inner = self.inner.read();
+        let now = expiry::now();
         ids.iter()
-            .filter_map(|id| inner.store.slot_of(id.as_ref()))
+            .filter_map(|id| inner.visible_slot(id.as_ref(), now))
             .map(|slot| inner.store.point(slot))
             .collect()
     }
@@ -678,7 +774,11 @@ impl Collection {
     /// to be skipped or repeated.
     pub fn scroll(&self, cursor: Option<&str>, limit: usize) -> ScrollPage {
         let inner = self.inner.read();
-        let mut live = inner.store.live_after(cursor);
+        let now = expiry::now();
+        let mut live = inner
+            .store
+            .live_after(cursor)
+            .filter(|&(_, slot)| !inner.expired(slot, now));
         let points: Vec<Point> = live
             .by_ref()
             .take(limit)
@@ -714,8 +814,7 @@ impl Collection {
         let using = opts.using.as_deref();
         let config = inner.config.dense(using)?;
         let slot = inner
-            .store
-            .slot_of(id)
+            .visible_slot(id, expiry::now())
             .ok_or_else(|| Error::PointNotFound(id.to_owned()))?;
         let column = inner
             .store
@@ -839,12 +938,13 @@ impl Collection {
         let config = inner.config.dense(using)?;
         let store = &inner.store;
         let column = store.column(using).expect("store has the configured vectors");
+        let now = expiry::now();
         let slots = |ids: &[S]| {
             ids.iter()
                 .map(|id| {
                     let id = id.as_ref();
-                    store
-                        .slot_of(id)
+                    inner
+                        .visible_slot(id, now)
                         .ok_or_else(|| Error::PointNotFound(id.to_owned()))
                 })
                 .collect::<Result<Vec<u32>>>()
@@ -891,6 +991,31 @@ impl Collection {
         self.compact_locked(&mut inner)?;
         self.bump();
         self.checkpoint(&mut inner)
+    }
+
+    /// Deletes the points that have expired; returns how many. Reads never
+    /// see expired points anyway; this frees the space they take.
+    pub fn purge_expired(&self) -> Result<usize> {
+        // Look first, so sweeps that find nothing never block writers.
+        if self.inner.read().expired_slots(expiry::now()).is_empty() {
+            return Ok(0);
+        }
+        let mut inner = self.inner.write();
+        self.ensure_open()?;
+        let ids: Vec<String> = inner
+            .expired_slots(expiry::now())
+            .into_iter()
+            .map(|slot| inner.store.id(slot).to_owned())
+            .collect();
+        if ids.is_empty() {
+            return Ok(0);
+        }
+        inner.engine.log(Op::Delete { ids: &ids })?;
+        let removed = apply_delete(&mut inner, &ids);
+        self.bump();
+        self.maintain(&mut inner)?;
+        tracing::debug!(collection = %self.name, removed, "purged expired points");
+        Ok(removed)
     }
 
     pub fn create_snapshot(&self) -> Result<SnapshotInfo> {
@@ -1080,8 +1205,8 @@ fn search_sparse(
     found
 }
 
-/// Whether a slot may appear in results: alive, not excluded, among the
-/// field-index candidates if any, and matching the filter.
+/// Whether a slot may appear in results: alive, not expired, not excluded,
+/// among the field-index candidates if any, and matching the filter.
 fn acceptor<'a>(
     inner: &'a Inner,
     filter: Option<&'a Filter>,
@@ -1089,8 +1214,9 @@ fn acceptor<'a>(
     exclude: &'a [u32],
 ) -> impl Fn(u32) -> bool + Sync + 'a {
     let store = &inner.store;
+    let now = expiry::now();
     move |slot: u32| {
-        store.is_alive(slot)
+        inner.visible(slot, now)
             && exclude.binary_search(&slot).is_err()
             && candidates.is_none_or(|c| c.binary_search(&slot).is_ok())
             && filter.is_none_or(|f| f.matches(store.metadata(slot)))
@@ -1169,9 +1295,14 @@ fn apply_delete(inner: &mut Inner, ids: &[String]) -> usize {
     removed
 }
 
-/// Live slots matching `filter`, in slot order, through a field index when
-/// one applies.
-fn matching<'a>(inner: &'a Inner, filter: &'a Filter) -> Box<dyn Iterator<Item = u32> + 'a> {
+/// Slots of points alive and not expired by `now` matching `filter`, in
+/// slot order, through a field index when one applies.
+fn matching<'a>(inner: &'a Inner, filter: &'a Filter, now: f64) -> impl Iterator<Item = u32> + 'a {
+    live_matching(inner, filter).filter(move |&slot| !inner.expired(slot, now))
+}
+
+/// Live slots matching `filter`, in slot order, expired or not.
+fn live_matching<'a>(inner: &'a Inner, filter: &'a Filter) -> Box<dyn Iterator<Item = u32> + 'a> {
     let store = &inner.store;
     let matches = move |&slot: &u32| store.is_alive(slot) && filter.matches(store.metadata(slot));
     match inner.fields.candidates(filter) {

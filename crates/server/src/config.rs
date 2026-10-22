@@ -89,6 +89,11 @@ pub struct Config {
     #[arg(long, env = "QUIVER_SNAPSHOT_KEEP", default_value_t = 5)]
     pub snapshot_keep: usize,
 
+    /// Delete expired points this often, in seconds (0 = never). Expired
+    /// points are hidden from reads either way; this frees their space.
+    #[arg(long, env = "QUIVER_EXPIRY_INTERVAL", default_value_t = 60)]
+    pub expiry_interval: u64,
+
     /// Maximum REST request body size in MiB.
     #[arg(long, env = "QUIVER_MAX_BODY_MB", default_value_t = 64)]
     pub max_body_mb: usize,
@@ -180,6 +185,11 @@ impl Config {
         (self.snapshot_interval > 0).then(|| Duration::from_secs(self.snapshot_interval))
     }
 
+    /// How often expired points are deleted, if at all.
+    pub fn expiry_every(&self) -> Option<Duration> {
+        (self.expiry_interval > 0).then(|| Duration::from_secs(self.expiry_interval))
+    }
+
     /// The PEM files named by the --tls-* options, if TLS is enabled.
     pub fn tls_pem(&self) -> Result<Option<TlsPem>, String> {
         let (Some(cert), Some(key)) = (&self.tls_cert, &self.tls_key) else {
@@ -267,6 +277,8 @@ pub(crate) mod tests {
         assert_eq!(c.grpc_addr().to_string(), "127.0.0.1:6901");
         assert_eq!(c.db_options().storage, StorageKind::File);
         assert!(c.snapshot_every().is_none());
+        assert_eq!(c.expiry_every(), Some(Duration::from_secs(60)));
+        assert!(parse(&["--expiry-interval", "0"]).expiry_every().is_none());
         assert!(c.key_store().unwrap().is_empty());
         assert!(c.validate().is_ok());
     }
