@@ -25,6 +25,7 @@ from ._errors import (
 from ._models import (
     HNSW,
     CollectionInfo,
+    Expiry,
     Flat,
     KDTree,
     MetadataMode,
@@ -54,6 +55,7 @@ __all__ = [
     "Collection",
     "CollectionInfo",
     "ConflictError",
+    "Expiry",
     "Flat",
     "InvalidRequestError",
     "KDTree",

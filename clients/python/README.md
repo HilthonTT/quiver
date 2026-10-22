@@ -59,7 +59,7 @@ Vectors can be lists, tuples or numpy arrays. Large iterables (including generat
 | `search_batch(vectors, k=10, ...)` | Many searches in one request |
 | `search_sparse(vector, k=10, using=...)` | Sparse (keyword) search; `distance` is the negated score |
 | `query(prefetch, k=10, filter=None, rrf_k=60)` | Hybrid search: fuse several dense and sparse searches |
-| `update(index=, quantization=, on_disk=, vectors=, sparse_vectors=)` | Change settings (may rebuild indexes) |
+| `update(index=, quantization=, on_disk=, vectors=, sparse_vectors=, expiry=)` | Change settings (may rebuild indexes) |
 | `rename(new_name)` | Rename the collection; the handle follows it |
 | `get(id)` / `get_many(ids)` | Fetch points (`get` returns `None` if missing) |
 | `scroll(cursor=None, limit=100)` | One page of points in id order, with `next_cursor` |
@@ -144,6 +144,25 @@ papers.query(
 
 Every point must carry every named vector; sparse vectors (a `SparseVector(indices, values)`
 or an `{index: value}` dict) are optional. `query` returns `ScoredResult`s, highest `score` first.
+
+### Binary quantization and expiring points
+
+```python
+from quiver import Expiry
+
+sessions = client.create_collection(
+    "sessions",
+    dimension=1536,
+    quantization="binary",  # 1 bit per component to search; exact vectors re-rank
+    on_disk=True,  # ...and live on disk, so memory holds only the bits
+    expiry=Expiry("expires_at", default_ttl=3600),
+)
+sessions.upsert([("s1", embedding)])  # expires in an hour
+sessions.upsert([("s2", embedding, {"expires_at": 1_900_000_000})])  # at this Unix time
+sessions.update(expiry=False)  # stop expiring points
+```
+
+Expired points vanish from every read immediately and are deleted by a periodic sweep.
 
 ### Settings, renames and aliases
 

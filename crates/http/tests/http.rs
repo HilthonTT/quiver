@@ -1137,6 +1137,77 @@ async fn quantized_collections_over_rest() {
     }
 }
 
+#[tokio::test]
+async fn binary_quantization_and_expiry_over_rest() {
+    let app = TestApp::new();
+    let (status, body) = app
+        .post(
+            "/collections",
+            json!({
+                "name": "e",
+                "dimension": 2,
+                "metric": "euclidean",
+                "quantization": "binary",
+                "expiry": {"field": "exp", "default_ttl": 60},
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let (_, body) = app.get("/collections/e").await;
+    assert_eq!(body["quantization"], "binary");
+    assert_eq!(body["expiry"], json!({"field": "exp", "default_ttl": 60}));
+    assert_eq!(body["field_indexes"], json!(["exp"]));
+
+    let (status, body) = app
+        .post(
+            "/collections/e/points",
+            json!({"points": [
+                {"id": "gone", "vector": [0.25, -1.0], "metadata": {"exp": 1000}},
+                {"id": "kept", "vector": [0.5, 1.0], "metadata": {"exp": 100_000_000_000u64}},
+                {"id": "ttl", "vector": [1.0, 1.0]},
+            ]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (_, body) = app.post("/collections/e/points/count", json!({})).await;
+    assert_eq!(body["count"], 2, "{body}");
+    let (status, _) = app.get("/collections/e/points/gone").await;
+    assert_eq!(status, StatusCode::NOT_FOUND);
+    let (_, point) = app.get("/collections/e/points/kept").await;
+    assert_eq!(
+        point["vector"],
+        json!([0.5, 1.0]),
+        "binary codes keep the vectors exact"
+    );
+    let (_, point) = app.get("/collections/e/points/ttl").await;
+    assert!(point["metadata"]["exp"].as_u64().is_some(), "{point}");
+    let (_, body) = app
+        .post("/collections/e/search", json!({"vector": [0.25, -1.0], "k": 10}))
+        .await;
+    let ids: Vec<&str> = body["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|h| h["id"].as_str().unwrap())
+        .collect();
+    assert!(!ids.contains(&"gone") && ids.len() == 2, "{body}");
+
+    let (status, body) = app
+        .post(
+            "/collections/e/points",
+            json!({"points": [{"id": "bad", "vector": [1.0, 0.0], "metadata": {"exp": "tomorrow"}}]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    let (status, body) = app
+        .call(Method::PATCH, "/collections/e", Some(json!({"expiry": null})))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(body.get("expiry").is_none(), "{body}");
+    assert_eq!(body["count"], 3, "unpurged points come back");
+}
+
 async fn hybrid_app() -> TestApp {
     let app = TestApp::new();
     let (status, body) = app

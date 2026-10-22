@@ -7,7 +7,7 @@ import ssl
 from collections.abc import Iterable, Iterator, Mapping, Sequence
 from pathlib import Path
 from types import TracebackType
-from typing import Any, TypeVar
+from typing import Any, Literal, TypeVar
 
 import httpx
 
@@ -15,6 +15,7 @@ from . import _protocol as proto
 from ._errors import ConflictError, NotFoundError, QuiverConnectionError
 from ._models import (
     CollectionInfo,
+    Expiry,
     Filter,
     Index,
     Metadata,
@@ -181,14 +182,19 @@ class Client:
         on_disk: bool = False,
         vectors: Mapping[str, VectorParams] | None = None,
         sparse_vectors: Mapping[str, SparseVectorParams] | Sequence[str] | None = None,
+        expiry: Expiry | None = None,
     ) -> Collection:
         """Creates a collection. Raises :class:`ConflictError` if it exists.
 
         ``field_indexes`` names metadata fields (dot-separated paths) to index,
         so that filters on them only look at matching points. ``quantization="scalar"``
         stores vectors in about a quarter of the memory; vectors read back are
-        then close to, but not exactly, what was written. ``on_disk=True``
+        then close to, but not exactly, what was written; ``quantization="binary"``
+        searches 1-bit codes and re-ranks with the exact vectors. ``on_disk=True``
         keeps the vectors in a file instead of memory.
+
+        ``expiry`` lets points expire at the time in a metadata field (see
+        :class:`Expiry`).
 
         ``vectors`` adds named dense vectors every point must carry, each with
         its own dimension and metric; ``sparse_vectors`` adds named sparse
@@ -205,6 +211,7 @@ class Client:
                 on_disk,
                 vectors,
                 sparse_vectors,
+                expiry,
             )
         )
         return Collection(self, name)
@@ -226,6 +233,7 @@ class Client:
         on_disk: bool = False,
         vectors: Mapping[str, VectorParams] | None = None,
         sparse_vectors: Mapping[str, SparseVectorParams] | Sequence[str] | None = None,
+        expiry: Expiry | None = None,
     ) -> Collection:
         """Returns the collection, creating it first if it does not exist."""
         try:
@@ -243,6 +251,7 @@ class Client:
                 on_disk=on_disk,
                 vectors=vectors,
                 sparse_vectors=sparse_vectors,
+                expiry=expiry,
             )
         except ConflictError:
             return Collection(self, name)
@@ -578,16 +587,18 @@ class Collection:
         on_disk: bool | None = None,
         vectors: Mapping[str, Mapping[str, Any]] | None = None,
         sparse_vectors: Mapping[str, SparseVectorParams] | None = None,
+        expiry: Expiry | Literal[False] | None = None,
     ) -> CollectionInfo:
-        """Changes index, quantization or on-disk settings; may take a while.
+        """Changes index, quantization, on-disk or expiry settings; may take a while.
 
         ``index`` is an index object (replacing the current settings) or a
         dict merged into them, e.g. ``{"ef_search": 128}``. ``vectors`` maps
         named vectors to dicts of the same keys. Anything but an ``ef_search``
-        change rebuilds the index.
+        change rebuilds the index. ``expiry`` replaces the expiry settings,
+        and ``expiry=False`` turns expiry off; points keep their expiry times.
         """
         call = proto.update_collection(
-            self.name, index, quantization, on_disk, vectors, sparse_vectors
+            self.name, index, quantization, on_disk, vectors, sparse_vectors, expiry
         )
         return self._client._run(call)
 

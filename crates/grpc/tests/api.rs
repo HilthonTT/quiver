@@ -934,3 +934,44 @@ async fn update_rename_and_aliases() {
         .unwrap_err();
     assert_eq!(err.code(), Code::NotFound);
 }
+
+#[tokio::test]
+async fn binary_quantization_and_expiry_over_grpc() {
+    let db = Arc::new(Database::in_memory());
+    let mut client = start(Arc::clone(&db), KeyStore::default()).await;
+    let expiry = pb::ExpiryConfig {
+        field: "exp".into(),
+        default_ttl: Some(60),
+    };
+    let info = client
+        .create_collection(pb::CreateCollectionRequest {
+            name: "b".into(),
+            dimension: 2,
+            quantization: pb::Quantization::Binary.into(),
+            expiry: Some(expiry.clone()),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(info.quantization, i32::from(pb::Quantization::Binary));
+    assert_eq!(info.expiry, Some(expiry));
+    assert_eq!(info.field_indexes, ["exp"], "the expiry field is indexed");
+    let config = db.collection("b").unwrap().config();
+    assert_eq!(config.quantization, quiver_db::Quantization::Binary);
+    assert_eq!(
+        config.expiry,
+        Some(quiver_db::ExpiryConfig::new("exp").default_ttl(60))
+    );
+
+    let info = client
+        .update_collection(pb::UpdateCollectionRequest {
+            name: "b".into(),
+            update_json: r#"{"expiry": null}"#.into(),
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(info.expiry, None);
+    assert_eq!(db.collection("b").unwrap().config().expiry, None);
+}

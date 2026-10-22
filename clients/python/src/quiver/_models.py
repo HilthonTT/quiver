@@ -25,7 +25,15 @@ MetadataMode = Literal["merge", "replace"]
 * ``replace`` → the whole value is replaced (``None`` removes the metadata)
 """
 
-Quantization = Literal["none", "scalar"]
+Quantization = Literal["none", "scalar", "binary"]
+"""How vectors are held in memory:
+
+* ``none`` → full 32-bit floats
+* ``scalar`` → 8-bit codes, about a quarter of the memory; lossy
+* ``binary`` → 1 bit per component, searched instead of the vectors, which are
+  kept exactly and re-rank the results (combine with ``on_disk=True`` to save
+  memory); for high-dimensional embeddings
+"""
 
 SparseModifier = Literal["none", "idf"]
 """How sparse query weights are adjusted before scoring:
@@ -113,7 +121,8 @@ class VectorParams:
         dimension: Number of components.
         metric: Distance metric.
         index: Index type (HNSW by default).
-        quantization: ``"scalar"`` keeps 8-bit codes, about a quarter of the memory.
+        quantization: ``"scalar"`` keeps 8-bit codes, about a quarter of the memory;
+            ``"binary"`` searches 1-bit codes and re-ranks with the exact vectors.
         on_disk: Keep the vectors in a file instead of memory (durable storage only).
     """
 
@@ -134,6 +143,36 @@ class VectorParams:
         if self.on_disk:
             body["on_disk"] = True
         return body
+
+
+@dataclass(frozen=True)
+class Expiry:
+    """Lets a collection's points expire.
+
+    A point expires once the number in its metadata field ``field`` (a Unix
+    time in seconds; a dot-separated path, as in filters) is not after the
+    current time. Expired points disappear from every read at once and are
+    deleted by a periodic sweep.
+
+    Args:
+        field: The metadata field holding each point's expiry time.
+        default_ttl: Seconds to keep points written without ``field``: they
+            get it set to the time they were written plus this. Without it,
+            such points never expire.
+    """
+
+    field: str
+    default_ttl: int | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        body: dict[str, Any] = {"field": self.field}
+        if self.default_ttl is not None:
+            body["default_ttl"] = self.default_ttl
+        return body
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> Expiry:
+        return cls(field=data["field"], default_ttl=data.get("default_ttl"))
 
 
 @dataclass(frozen=True)
@@ -336,6 +375,8 @@ class CollectionInfo:
     """Named dense vectors' settings, by name."""
     sparse_vectors: dict[str, dict[str, Any]] = field(default_factory=dict)
     """Named sparse vectors' settings, by name."""
+    expiry: Expiry | None = None
+    """How points expire, if they do."""
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> CollectionInfo:
@@ -351,6 +392,7 @@ class CollectionInfo:
             on_disk=data.get("on_disk", False),
             vectors=dict(data.get("vectors", {})),
             sparse_vectors=dict(data.get("sparse_vectors", {})),
+            expiry=Expiry.from_dict(data["expiry"]) if data.get("expiry") else None,
         )
 
 

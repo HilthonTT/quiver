@@ -72,6 +72,15 @@ enum Quantization {
   QUANTIZATION_BINARY = 2;
 }
 
+// Lets points expire once the Unix time (seconds) in a metadata field has passed.
+message ExpiryConfig {
+  // The metadata field (dot-separated path) holding each point's expiry time.
+  string field = 1;
+  // Points written without the field get it set to the write time plus this
+  // many seconds; unset means such points never expire.
+  optional uint64 default_ttl = 2;
+}
+
 enum Metric {
   METRIC_UNSPECIFIED = 0; // defaults to cosine
   METRIC_COSINE = 1;
@@ -151,6 +160,8 @@ message CollectionInfo {
   map<string, VectorParams> vectors = 10;
   // Named sparse vectors points may carry.
   map<string, SparseVectorParams> sparse_vectors = 11;
+  // Unset when points do not expire.
+  ExpiryConfig expiry = 12;
 }
 
 message Point {
@@ -191,6 +202,7 @@ message SnapshotInfo {
   bool on_disk = 14;
   map<string, VectorParams> vectors = 15;
   map<string, SparseVectorParams> sparse_vectors = 16;
+  ExpiryConfig expiry = 17;
 }
 
 message HealthRequest {}
@@ -226,12 +238,15 @@ message CreateCollectionRequest {
   bool on_disk = 7;
   map<string, VectorParams> vectors = 8;
   map<string, SparseVectorParams> sparse_vectors = 9;
+  // Unset: points never expire.
+  ExpiryConfig expiry = 10;
 }
 
 message UpdateCollectionRequest {
   string name = 1;
   // The changes, as JSON in the shape of the REST API's
-  // `PATCH /collections/{name}` body, e.g. `{"index": {"ef_search": 128}}`.
+  // `PATCH /collections/{name}` body, e.g. `{"index": {"ef_search": 128}}`,
+  // `{"expiry": {"field": "expires_at"}}`, or `{"expiry": null}` to turn expiry off.
   string update_json = 2;
 }
 

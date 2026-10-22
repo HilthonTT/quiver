@@ -16,6 +16,7 @@ from quiver import (
     AuthenticationError,
     Client,
     ConflictError,
+    Expiry,
     Flat,
     InvalidRequestError,
     KDTree,
@@ -532,6 +533,35 @@ def test_quantization(client: Client, mock: Recorder) -> None:
     assert client.collection("docs").info().quantization == "scalar"
     mock.on("GET", "/collections/docs", 200, INFO)
     assert client.collection("docs").info().quantization == "none"
+
+    mock.on("POST", "/collections", 201, {**INFO, "quantization": "binary"})
+    client.create_collection("docs", 3, quantization="binary", on_disk=True)
+    assert mock.last_json()["quantization"] == "binary"
+
+
+def test_expiry(client: Client, mock: Recorder) -> None:
+    expiry = {"field": "exp", "default_ttl": 60}
+    mock.on("POST", "/collections", 201, {**INFO, "expiry": expiry})
+    client.create_collection("docs", 3, expiry=Expiry("exp", default_ttl=60))
+    assert mock.last_json()["expiry"] == expiry
+    client.create_collection("docs", 3, expiry=Expiry("meta.exp"))
+    assert mock.last_json()["expiry"] == {"field": "meta.exp"}
+    client.create_collection("docs", 3)
+    assert "expiry" not in mock.last_json()
+
+    mock.on("GET", "/collections/docs", 200, {**INFO, "expiry": expiry})
+    col = client.collection("docs")
+    assert col.info().expiry == Expiry("exp", 60)
+    mock.on("GET", "/collections/docs", 200, INFO)
+    assert col.info().expiry is None
+
+    mock.on("PATCH", "/collections/docs", 200, INFO)
+    col.update(expiry=Expiry("exp"))
+    assert mock.last_json() == {"expiry": {"field": "exp"}}
+    col.update(expiry=False)
+    assert mock.last_json() == {"expiry": None}
+    col.update(on_disk=True)
+    assert "expiry" not in mock.last_json()
 
 
 def test_tls_options(tmp_path: Path) -> None:

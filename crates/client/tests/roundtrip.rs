@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use quiver_client::{Client, ClientError, SearchRequest};
+use quiver_client::{Client, ClientError, CollectionUpdate, SearchRequest};
 use quiver_db::auth::{ApiKey, KeyStore, Role};
 use quiver_db::{Database, DbOptions, StorageKind};
 use quiver_http::HttpOptions;
@@ -402,4 +402,21 @@ async fn named_sparse_hybrid_and_catalog() {
     c.delete_alias("live").await.unwrap();
     let err = c.delete_alias("live").await.unwrap_err();
     assert!(matches!(err, ClientError::Api { status, .. } if status == 404));
+}
+
+#[tokio::test]
+async fn binary_quantization_and_expiry_roundtrip() {
+    let server = start(KeyStore::default()).await;
+    let c = Client::new(&server.url).unwrap();
+    let config = CollectionConfig::new(2)
+        .quantization(quiver_types::Quantization::Binary)
+        .expiry(quiver_types::ExpiryConfig::new("exp").default_ttl(60));
+    let info = c.create_collection("b", &config).await.unwrap();
+    assert_eq!(info.config, config);
+    assert_eq!(c.get_collection("b").await.unwrap().config, config);
+
+    let off: CollectionUpdate = serde_json::from_value(json!({"expiry": null})).unwrap();
+    let info = c.update_collection("b", &off).await.unwrap();
+    assert_eq!(info.config.expiry, None);
+    assert_eq!(info.config.quantization, quiver_types::Quantization::Binary);
 }

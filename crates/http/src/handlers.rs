@@ -12,9 +12,10 @@ use tokio::io::AsyncWriteExt;
 use std::collections::BTreeMap;
 
 use quiver_db::{
-    Collection, CollectionConfig, CollectionInfo, CollectionUpdate, Database, Filter, Fusion, HybridQuery,
-    IndexConfig, MetadataMode, Metric, Point, PointInput, PointSelector, Prefetch, Quantization, QueryVector,
-    RestoreOptions, SearchHit, SearchOptions, SnapshotInfo, SparseVector, SparseVectorConfig, VectorConfig,
+    Collection, CollectionConfig, CollectionInfo, CollectionUpdate, Database, ExpiryConfig, Filter, Fusion,
+    HybridQuery, IndexConfig, MetadataMode, Metric, Point, PointInput, PointSelector, Prefetch, Quantization,
+    QueryVector, RestoreOptions, SearchHit, SearchOptions, SnapshotInfo, SparseVector, SparseVectorConfig,
+    VectorConfig,
 };
 
 use crate::error::ApiError;
@@ -124,6 +125,8 @@ pub struct CreateCollection {
     vectors: BTreeMap<String, VectorConfig>,
     #[serde(default)]
     sparse_vectors: BTreeMap<String, SparseVectorConfig>,
+    #[serde(default)]
+    expiry: Option<ExpiryConfig>,
 }
 
 pub async fn list_collections(State(db): State<AppState>) -> ApiResult<Json<Value>> {
@@ -143,7 +146,7 @@ pub async fn create_collection(
         on_disk: req.on_disk,
         vectors: req.vectors,
         sparse_vectors: req.sparse_vectors,
-        expiry: None,
+        expiry: req.expiry,
     };
     let info = blocking(move || {
         Ok(db
@@ -163,7 +166,7 @@ pub async fn get_collection(
     Ok(Json(blocking(move || Ok(c.info())).await?))
 }
 
-/// Changes index, quantization or on-disk settings; may rebuild indexes.
+/// Changes index, quantization, on-disk or expiry settings; may rebuild indexes.
 pub async fn update_collection(
     State(db): State<AppState>,
     Path(name): Path<String>,

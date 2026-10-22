@@ -1,8 +1,8 @@
 use std::collections::{BTreeMap, HashMap};
 
 use quiver_db::{
-    CollectionConfig, CollectionInfo, Error, HnswParams, IndexConfig, KdTreeParams, Metric, NamedVectors,
-    Point, Quantization, ScoredHit, SearchHit, SnapshotInfo, SparseModifier, SparseVector,
+    CollectionConfig, CollectionInfo, Error, ExpiryConfig, HnswParams, IndexConfig, KdTreeParams, Metric,
+    NamedVectors, Point, Quantization, ScoredHit, SearchHit, SnapshotInfo, SparseModifier, SparseVector,
     SparseVectorConfig, SparseVectors, VectorConfig, new_id,
 };
 use serde_json::Value;
@@ -105,8 +105,22 @@ pub(crate) fn config_from_pb(req: &pb::CreateCollectionRequest) -> Result<Collec
             .iter()
             .map(|(name, v)| Ok((name.clone(), sparse_params_from_pb(v)?)))
             .collect::<Result<_, Status>>()?,
-        expiry: None,
+        expiry: req.expiry.as_ref().map(expiry_from_pb),
     })
+}
+
+fn expiry_from_pb(e: &pb::ExpiryConfig) -> ExpiryConfig {
+    ExpiryConfig {
+        field: e.field.clone(),
+        default_ttl: e.default_ttl,
+    }
+}
+
+fn expiry_to_pb(e: &ExpiryConfig) -> pb::ExpiryConfig {
+    pb::ExpiryConfig {
+        field: e.field.clone(),
+        default_ttl: e.default_ttl,
+    }
 }
 
 fn vector_params_from_pb(v: &pb::VectorParams) -> Result<VectorConfig, Status> {
@@ -211,6 +225,7 @@ pub(crate) fn info_to_pb(info: CollectionInfo) -> pb::CollectionInfo {
     let (vectors, sparse_vectors) = vector_maps_to_pb(&info.config);
     pb::CollectionInfo {
         on_disk: info.config.on_disk,
+        expiry: info.config.expiry.as_ref().map(expiry_to_pb),
         vectors,
         sparse_vectors,
         name: info.name,
@@ -301,6 +316,7 @@ pub(crate) fn snapshot_to_pb(s: SnapshotInfo) -> pb::SnapshotInfo {
     let (vectors, sparse_vectors) = vector_maps_to_pb(&m.config);
     pb::SnapshotInfo {
         on_disk: m.config.on_disk,
+        expiry: m.config.expiry.as_ref().map(expiry_to_pb),
         vectors,
         sparse_vectors,
         dimension: m.config.dimension as u32,
@@ -340,6 +356,7 @@ mod tests {
         let config = CollectionConfig::new(3)
             .on_disk(true)
             .quantization(Quantization::Binary)
+            .expiry(ExpiryConfig::new("exp").default_ttl(60))
             .with_vector(
                 "t",
                 VectorConfig::new(2)
@@ -367,6 +384,7 @@ mod tests {
             on_disk: info.on_disk,
             vectors: info.vectors,
             sparse_vectors: info.sparse_vectors,
+            expiry: info.expiry,
             ..Default::default()
         };
         assert_eq!(config_from_pb(&req).unwrap(), config);

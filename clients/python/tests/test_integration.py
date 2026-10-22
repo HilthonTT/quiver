@@ -20,6 +20,7 @@ from quiver import (
     AsyncClient,
     Client,
     ConflictError,
+    Expiry,
     Flat,
     InvalidRequestError,
     KDTree,
@@ -253,6 +254,36 @@ def test_update_rename_and_aliases(client: Client, name: str) -> None:
             client.delete_alias(alias)
     finally:
         client.delete_collection(new_name)
+
+
+def test_binary_quantization_and_expiry(client: Client, name: str) -> None:
+    col = client.create_collection(
+        name, 2, metric="euclidean", quantization="binary", expiry=Expiry("exp", default_ttl=60)
+    )
+    try:
+        info = col.info()
+        assert info.quantization == "binary"
+        assert info.expiry == Expiry("exp", 60)
+        col.upsert(
+            [
+                ("gone", [0.25, -1.0], {"exp": 1000}),
+                ("kept", [0.5, 1.0], {"exp": 100_000_000_000}),
+                ("ttl", [1.0, 1.0]),
+            ]
+        )
+        assert len(col) == 2
+        assert col.get("gone") is None
+        kept, ttl = col.get("kept"), col.get("ttl")
+        assert kept is not None and kept.vector == [0.5, 1.0]
+        assert ttl is not None and ttl.metadata is not None
+        assert isinstance(ttl.metadata["exp"], int)
+        assert {h.id for h in col.search([0.25, -1.0], k=10)} == {"kept", "ttl"}
+        with pytest.raises(InvalidRequestError):
+            col.upsert([("bad", [1, 0], {"exp": "tomorrow"})])
+        assert col.update(expiry=False).expiry is None
+        assert len(col) == 3
+    finally:
+        client.delete_collection(name)
 
 
 def test_async_named_vectors(name: str) -> None:

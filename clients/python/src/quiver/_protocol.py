@@ -9,13 +9,14 @@ from __future__ import annotations
 
 from collections.abc import Callable, Iterable, Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Generic, TypeVar
+from typing import Any, Generic, Literal, TypeVar
 from urllib.parse import quote
 
 from ._errors import error_for_status
 from ._models import (
     HNSW,
     CollectionInfo,
+    Expiry,
     Filter,
     Index,
     MetadataMode,
@@ -120,6 +121,7 @@ def create_collection(
     on_disk: bool = False,
     vectors: Mapping[str, VectorParams] | None = None,
     sparse_vectors: SparseParamsLike | None = None,
+    expiry: Expiry | None = None,
 ) -> Call[CollectionInfo]:
     body: dict[str, Any] = {
         "name": name,
@@ -140,6 +142,8 @@ def create_collection(
             body["sparse_vectors"] = {n: v.to_dict() for n, v in sparse_vectors.items()}
         else:
             body["sparse_vectors"] = {n: {} for n in sparse_vectors}
+    if expiry is not None:
+        body["expiry"] = expiry.to_dict()
     return Call("POST", "/collections", CollectionInfo.from_dict, json=body)
 
 
@@ -154,6 +158,7 @@ def update_collection(
     on_disk: bool | None,
     vectors: Mapping[str, Mapping[str, Any]] | None,
     sparse_vectors: Mapping[str, SparseVectorParams] | None,
+    expiry: Expiry | Literal[False] | None = None,
 ) -> Call[CollectionInfo]:
     body: dict[str, Any] = {}
     if index is not None:
@@ -169,6 +174,10 @@ def update_collection(
         }
     if sparse_vectors:
         body["sparse_vectors"] = {n: v.to_dict() for n, v in sparse_vectors.items()}
+    if expiry is False:
+        body["expiry"] = None
+    elif expiry is not None:
+        body["expiry"] = expiry.to_dict()
     return Call("PATCH", f"/collections/{_seg(name)}", CollectionInfo.from_dict, json=body)
 
 
