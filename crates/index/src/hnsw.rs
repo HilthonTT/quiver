@@ -137,7 +137,38 @@ impl HnswIndex {
             .collect();
         candidates.sort_unstable();
         let pruned = self.select_neighbors(&candidates, max, store);
-        self.links[from as usize][layer] = pruned.iter().map(|n| n.slot).collect();
+        let mut list: Vec<u32> = pruned.iter().map(|n| n.slot).collect();
+        for c in candidates.iter().rev() {
+            if list.contains(&c.slot) {
+                continue;
+            }
+            let query = store.vector(c.slot);
+            let Some(i) = list
+                .iter()
+                .position(|&s| store.index_distance(metric, &query, s) == 0.0)
+            else {
+                continue;
+            };
+            if c.slot == to && self.adopt(to, list[i], layer) {
+                list[i] = to;
+            } else if !self.adopt(list[i], c.slot, layer) && list.contains(&to) {
+                self.adopt(to, c.slot, layer);
+            }
+        }
+        self.links[from as usize][layer] = list;
+    }
+
+    fn adopt(&mut self, parent: u32, child: u32, layer: usize) -> bool {
+        let max = self.max_links(layer);
+        let list = &mut self.links[parent as usize][layer];
+        if list.contains(&child) {
+            return true;
+        }
+        if list.len() >= max {
+            return false;
+        }
+        list.push(child);
+        true
     }
 
     fn select_neighbors(&self, candidates: &[Neighbor], m: usize, store: &VectorColumn) -> Vec<Neighbor> {
@@ -520,6 +551,50 @@ mod tests {
             .filter(|&s| hnsw.search(&store.vector(s), 1, Some(200), &store, &|_| true)[0].dist == 0.0)
             .count();
         assert_eq!(self_found, 200);
+    }
+
+    #[test]
+    fn every_duplicate_stays_reachable() {
+        let mut store = VectorColumn::new(4);
+        let mut hnsw = HnswIndex::new(HnswParams::default(), Metric::Euclidean);
+        let mut rng = SplitMix64(1);
+        for i in 0..2_000u32 {
+            let v: Vec<f32> = if i % 10 != 0 {
+                vec![0.5; 4]
+            } else {
+                (0..4).map(|_| rng.next_f64() as f32).collect()
+            };
+            store.push(&v);
+            hnsw.add(i, &store);
+        }
+        let lost: Vec<u32> = (0..2_000u32)
+            .filter(|&s| {
+                hnsw.search(&[0.5; 4], 1, Some(400), &store, &|x| x == s)
+                    .is_empty()
+            })
+            .collect();
+        assert!(
+            lost.is_empty(),
+            "{} unreachable, e.g. {:?}",
+            lost.len(),
+            &lost[..lost.len().min(5)]
+        );
+    }
+
+    #[test]
+    fn every_copy_of_repeated_vectors_is_found() {
+        let mut store = VectorColumn::new(4);
+        let mut hnsw = HnswIndex::new(HnswParams::default(), Metric::Euclidean);
+        let mut rng = SplitMix64(2);
+        let distinct: Vec<Vec<f32>> = (0..300)
+            .map(|_| (0..4).map(|_| rng.next_f64() as f32).collect())
+            .collect();
+        for i in 0..3_000u32 {
+            store.push(&distinct[i as usize % 300]);
+            hnsw.add(i, &store);
+        }
+        let found = hnsw.search(&[0.5; 4], 3_000, Some(3_000), &store, &|_| true);
+        assert_eq!(found.len(), 3_000);
     }
 
     #[test]
