@@ -379,7 +379,7 @@ class Collection:
         """Fetches one point, or ``None`` if it does not exist."""
         return self._client._run(proto.get_point(self.name, id, with_vectors))
 
-    def get_many(self, ids: Sequence[str], *, with_vectors: bool = True) -> list[Point]:
+    def get_many(self, ids: str | Iterable[str], *, with_vectors: bool = True) -> list[Point]:
         """Fetches several points; missing ids are skipped."""
         return self._client._run(proto.lookup(self.name, ids, with_vectors))
 
@@ -427,7 +427,7 @@ class Collection:
                 return
             cursor = page.next_cursor
 
-    def delete(self, ids: Sequence[str]) -> int:
+    def delete(self, ids: str | Iterable[str]) -> int:
         """Deletes points by id. Returns how many existed."""
         return self._client._run(proto.delete_points(self.name, ids))
 

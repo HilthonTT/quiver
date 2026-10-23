@@ -137,7 +137,7 @@ def create_collection(
         "index": (index or HNSW()).to_dict(),
     }
     if field_indexes:
-        body["field_indexes"] = list(field_indexes)
+        body["field_indexes"] = _ids(field_indexes)
     if quantization != "none":
         body["quantization"] = quantization
     if on_disk:
@@ -148,7 +148,7 @@ def create_collection(
         if isinstance(sparse_vectors, Mapping):
             body["sparse_vectors"] = {n: v.to_dict() for n, v in sparse_vectors.items()}
         else:
-            body["sparse_vectors"] = {n: {} for n in sparse_vectors}
+            body["sparse_vectors"] = {n: {} for n in _ids(sparse_vectors)}
     if expiry is not None:
         body["expiry"] = expiry.to_dict()
     return Call("POST", "/collections", CollectionInfo.from_dict, json=body)
@@ -281,12 +281,12 @@ def get_point(name: str, point_id: str, with_vectors: bool) -> Call[Point | None
     )
 
 
-def lookup(name: str, ids: Sequence[str], with_vectors: bool) -> Call[list[Point]]:
+def lookup(name: str, ids: str | Iterable[str], with_vectors: bool) -> Call[list[Point]]:
     return Call(
         "POST",
         f"/collections/{_seg(name)}/points/lookup",
         lambda b: [Point.from_dict(p) for p in b["points"]],
-        json={"ids": list(ids), "with_vectors": with_vectors},
+        json={"ids": _ids(ids), "with_vectors": with_vectors},
     )
 
 
@@ -337,12 +337,12 @@ def facet(name: str, field: str, filter: Filter | None, limit: int) -> Call[list
     )
 
 
-def delete_points(name: str, ids: Sequence[str]) -> Call[int]:
+def delete_points(name: str, ids: str | Iterable[str]) -> Call[int]:
     return Call(
         "POST",
         f"/collections/{_seg(name)}/points/delete",
         lambda b: int(b["deleted"]),
-        json={"ids": list(ids)},
+        json={"ids": _ids(ids)},
     )
 
 

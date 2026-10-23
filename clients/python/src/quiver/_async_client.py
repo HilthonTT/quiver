@@ -328,7 +328,7 @@ class AsyncCollection:
         """Fetches one point, or ``None`` if it does not exist."""
         return await self._client._run(proto.get_point(self.name, id, with_vectors))
 
-    async def get_many(self, ids: Sequence[str], *, with_vectors: bool = True) -> list[Point]:
+    async def get_many(self, ids: str | Iterable[str], *, with_vectors: bool = True) -> list[Point]:
         """Fetches several points; missing ids are skipped."""
         return await self._client._run(proto.lookup(self.name, ids, with_vectors))
 
@@ -377,7 +377,7 @@ class AsyncCollection:
                 return
             cursor = page.next_cursor
 
-    async def delete(self, ids: Sequence[str]) -> int:
+    async def delete(self, ids: str | Iterable[str]) -> int:
         """Deletes points by id. Returns how many existed."""
         return await self._client._run(proto.delete_points(self.name, ids))
 

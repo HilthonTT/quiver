@@ -246,6 +246,21 @@ def test_delete(client: Client, mock: Recorder) -> None:
     assert mock.last_json() == {"ids": ["a", "zz"]}
 
 
+def test_a_lone_string_is_one_id_or_name(client: Client, mock: Recorder) -> None:
+    col = client.collection("docs")
+    mock.on("POST", "/collections/docs/points/delete", 200, {"deleted": 1})
+    col.delete("ab")
+    assert mock.last_json() == {"ids": ["ab"]}
+    mock.on("POST", "/collections/docs/points/lookup", 200, {"points": []})
+    col.get_many("ab")
+    assert mock.last_json()["ids"] == ["ab"]
+    mock.on("POST", "/collections", 201, INFO)
+    client.create_collection("docs", 3, field_indexes="lang", sparse_vectors="text")
+    body = mock.last_json()
+    assert body["field_indexes"] == ["lang"]
+    assert body["sparse_vectors"] == {"text": {}}
+
+
 def _data_ops_routes(mock: Recorder) -> None:
     hit = {"results": [{"id": "b", "distance": 0.5}]}
     mock.on("POST", "/collections/docs/points/count", 200, {"count": 3})
