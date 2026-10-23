@@ -1440,3 +1440,249 @@ async fn readonly_keys_cannot_change_settings_or_aliases() {
     let (status, _) = app.get("/aliases").await;
     assert_eq!(status, StatusCode::OK);
 }
+
+#[tokio::test]
+async fn search_offsets_and_groups() {
+    let app = TestApp::seeded().await;
+    let (status, body) = app
+        .post(
+            "/collections/books/search",
+            json!({"vector": [0.0, 0.0], "k": 1, "offset": 1}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(hit_ids(&body), ["b"]);
+    let (status, body) = app
+        .post(
+            "/collections/books/search",
+            json!({"vector": [0.0, 0.0], "k": 10, "offset": 9_995}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+
+    let (status, body) = app
+        .post(
+            "/collections/books/search/groups",
+            json!({"vector": [0.0, 0.0], "group_by": "genre", "groups": 2, "group_size": 2}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["groups"][0]["key"], "sf");
+    assert_eq!(body["groups"][0]["hits"][0]["id"], "a");
+    assert_eq!(body["groups"][0]["hits"][1]["id"], "c");
+    assert_eq!(body["groups"][1]["key"], "fantasy");
+
+    let (status, body) = app
+        .post(
+            "/collections/books/search/groups",
+            json!({"id": "a", "group_by": "genre", "group_size": 1}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["groups"][0]["key"], "fantasy");
+    assert_eq!(body["groups"][1]["hits"][0]["id"], "c");
+
+    for bad in [
+        json!({"vector": [0.0, 0.0], "group_by": "genre", "groups": 0}),
+        json!({"vector": [0.0, 0.0], "group_by": "genre", "groups": 1000, "group_size": 1000}),
+        json!({"vector": [0.0, 0.0]}),
+        json!({"vector": [0.0, 0.0], "group_by": "genre", "k": 3}),
+    ] {
+        let (status, body) = app.post("/collections/books/search/groups", bad.clone()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{bad}: {body}");
+    }
+}
+
+#[tokio::test]
+async fn facets_and_ordered_scrolls() {
+    let app = TestApp::seeded().await;
+    let (status, body) = app
+        .post("/collections/books/points/facet", json!({"field": "genre"}))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        body["values"],
+        json!([{"value": "sf", "count": 2}, {"value": "fantasy", "count": 1}])
+    );
+    let (_, body) = app
+        .post(
+            "/collections/books/points/facet",
+            json!({"field": "genre", "filter": {"genre": {"$prefix": "fan"}}}),
+        )
+        .await;
+    assert_eq!(body["values"], json!([{"value": "fantasy", "count": 1}]));
+    let (status, _) = app
+        .post(
+            "/collections/books/points/facet",
+            json!({"field": "genre", "limit": 0}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+
+    let (status, body) = app
+        .post(
+            "/collections/books/points/scroll",
+            json!({"limit": 2, "order_by": {"field": "genre", "direction": "desc"}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let ids: Vec<&str> = body["points"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|p| p["id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["a", "c"]);
+    let cursor = body["next_cursor"].as_str().unwrap().to_owned();
+    let (_, body) = app
+        .post(
+            "/collections/books/points/scroll",
+            json!({"limit": 2, "cursor": cursor, "order_by": {"field": "genre", "direction": "desc"}}),
+        )
+        .await;
+    assert_eq!(body["points"][0]["id"], "b");
+    assert_eq!(body["next_cursor"], Value::Null);
+
+    let (_, body) = app
+        .post(
+            "/collections/books/points/scroll",
+            json!({"filter": {"genre": "sf"}, "with_vectors": true}),
+        )
+        .await;
+    assert_eq!(body["points"].as_array().unwrap().len(), 2);
+    assert_eq!(body["points"][1]["vector"], json!([5.0, 5.0]));
+
+    let (status, _) = app
+        .post(
+            "/collections/books/points/scroll",
+            json!({"cursor": "a", "order_by": {"field": "genre"}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}
+
+#[tokio::test]
+async fn discover_and_new_filters() {
+    let app = TestApp::seeded().await;
+    let (status, body) = app
+        .post(
+            "/collections/books/discover",
+            json!({"target": [0.0, 0.0], "context": [{"positive": [1.0, 0.0], "negative": [-1.0, 0.0]}], "k": 2}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(hit_ids(&body), ["b", "c"]);
+
+    let (status, body) = app
+        .post(
+            "/collections/books/discover",
+            json!({"context": [{"positive": "b", "negative": "c"}], "k": 1}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(hit_ids(&body), ["a"]);
+
+    let (status, body) = app.post("/collections/books/discover", json!({"k": 1})).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    let (status, body) = app
+        .post("/collections/books/discover", json!({"target": "nope"}))
+        .await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "{body}");
+
+    let (status, body) = app
+        .post(
+            "/collections/books/points/count",
+            json!({"filter": {"genre": {"$regex": "^(sf|fan)"}}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["count"], 3);
+    let (status, body) = app
+        .post(
+            "/collections/books/points/count",
+            json!({"filter": {"genre": {"$regex": "("}}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+}
+
+#[tokio::test]
+async fn score_fusion_rescore_and_query_offset() {
+    let app = hybrid_app().await;
+    let (status, body) = app
+        .post(
+            "/collections/docs/query",
+            json!({
+                "prefetch": [
+                    {"vector": [0.0, 0.0], "limit": 3},
+                    {"sparse": {"indices": [1], "values": [1.0]}, "using": "text"}
+                ],
+                "fusion": {"type": "relative_score"},
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(body["results"][0]["id"], "a");
+    assert_eq!(body["results"][0]["score"], 2.0);
+
+    let (status, body) = app
+        .post(
+            "/collections/docs/query",
+            json!({"prefetch": [{"vector": [0.0, 0.0]}], "fusion": {"type": "dbsf"}, "k": 1, "offset": 1}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(hit_ids(&body), ["b"]);
+
+    let (status, body) = app
+        .post(
+            "/collections/docs/query",
+            json!({
+                "prefetch": [{"vector": [0.0, 0.0], "limit": 2}],
+                "rescore": {"vector": [0.0, 1.0, 0.0], "using": "title"},
+            }),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(hit_ids(&body), ["b", "a"]);
+
+    let (status, _) = app
+        .post(
+            "/collections/docs/query",
+            json!({"prefetch": [{"vector": [0.0, 0.0]}], "fusion": {"type": "max"}}),
+        )
+        .await;
+    assert!(status.is_client_error());
+}
+
+#[tokio::test]
+async fn read_only_keys_can_use_the_new_queries() {
+    let mut app = TestApp::with_options(HttpOptions {
+        keys: keys(),
+        ..Default::default()
+    });
+    app.key = Some("rw-secret");
+    app.post("/collections", json!({"name": "x", "dimension": 2}))
+        .await;
+    app.post(
+        "/collections/x/points",
+        json!({"points": [{"id": "p", "vector": [1.0, 0.0], "metadata": {"g": 1}}]}),
+    )
+    .await;
+    app.key = Some("ro-secret");
+    for (uri, body) in [
+        (
+            "/collections/x/search/groups",
+            json!({"vector": [1.0, 0.0], "group_by": "g"}),
+        ),
+        ("/collections/x/points/facet", json!({"field": "g"})),
+        (
+            "/collections/x/points/scroll",
+            json!({"order_by": {"field": "g"}}),
+        ),
+        ("/collections/x/discover", json!({"target": [1.0, 0.0]})),
+    ] {
+        let (status, res) = app.post(uri, body).await;
+        assert_eq!(status, StatusCode::OK, "{uri}: {res}");
+    }
+}

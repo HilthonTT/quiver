@@ -5,8 +5,9 @@ use std::sync::Arc;
 
 use quiver_db::auth::Role;
 use quiver_db::{
-    Collection, CollectionUpdate, Database, Filter, Fusion, HybridQuery, MetadataMode, Point, PointSelector,
-    Prefetch, QueryVector, RestoreOptions, SearchHit, SearchOptions,
+    Collection, CollectionUpdate, ContextPair, Database, Direction, Example, Filter, Fusion, GroupBy,
+    HybridQuery, MetadataMode, OrderBy, Point, PointSelector, Prefetch, QueryVector, Rescore, RestoreOptions,
+    ScrollOptions, SearchHit, SearchOptions, SearchTarget,
 };
 use tokio::io::AsyncWriteExt;
 use tokio_stream::{Stream, StreamExt};
@@ -26,6 +27,8 @@ const MAX_SCROLL: usize = 10_000;
 const MAX_IDS: usize = 10_000;
 /// Upper bound on the searches a query fuses.
 const MAX_PREFETCH: usize = 16;
+const MAX_FACET: usize = 1_000;
+const MAX_CONTEXT: usize = 64;
 /// Largest snapshot upload accepted, as in the REST API.
 const MAX_UPLOAD_BYTES: u64 = 16 << 30;
 /// Size of the chunks a download is sent in.
@@ -100,6 +103,7 @@ struct Settings<'a> {
     max_distance: Option<f32>,
     with_vectors: bool,
     with_metadata: Option<bool>,
+    offset: u32,
 }
 
 impl Settings<'_> {
@@ -108,6 +112,11 @@ impl Settings<'_> {
         if k > MAX_K {
             return Err(Status::invalid_argument(format!(
                 "k must be between 1 and {MAX_K}"
+            )));
+        }
+        if k + self.offset as usize > MAX_K {
+            return Err(Status::invalid_argument(format!(
+                "k + offset must be at most {MAX_K}"
             )));
         }
         Ok((
@@ -119,7 +128,7 @@ impl Settings<'_> {
                 include_vectors: self.with_vectors,
                 include_metadata: self.with_metadata.unwrap_or(true),
                 max_distance: self.max_distance,
-                offset: 0,
+                offset: self.offset as usize,
             },
         ))
     }
@@ -145,8 +154,57 @@ fn search_options(req: &pb::SearchRequest) -> Result<(usize, SearchOptions), Sta
         max_distance: req.max_distance,
         with_vectors: req.with_vectors,
         with_metadata: req.with_metadata,
+        offset: req.offset,
     }
     .options()
+}
+
+fn target_from_pb(
+    vector: Vec<f32>,
+    id: String,
+    sparse: Option<pb::SparseVector>,
+    using: &str,
+) -> Result<SearchTarget, Status> {
+    match (vector.is_empty(), id.is_empty(), sparse) {
+        (false, true, None) => Ok(SearchTarget::Vector(vector)),
+        (true, false, None) => Ok(SearchTarget::Id(id)),
+        (true, true, Some(sparse)) => {
+            if using.is_empty() {
+                return Err(Status::invalid_argument(
+                    "name the sparse vector to search in `using`",
+                ));
+            }
+            Ok(SearchTarget::Sparse {
+                vector: sparse_from_pb(sparse),
+                using: using.to_owned(),
+            })
+        }
+        _ => Err(Status::invalid_argument(
+            "give exactly one of vector, id and sparse",
+        )),
+    }
+}
+
+fn example_from_pb(e: Option<pb::Example>, what: &str) -> Result<Example, Status> {
+    match e.and_then(|e| e.example) {
+        Some(pb::example::Example::Id(id)) if !id.is_empty() => Ok(Example::Id(id)),
+        Some(pb::example::Example::Vector(v)) if !v.values.is_empty() => Ok(Example::Vector(v.values)),
+        _ => Err(Status::invalid_argument(format!(
+            "{what} needs an id or a vector"
+        ))),
+    }
+}
+
+fn fusion_from_pb(fusion: i32, rrf_k: Option<u32>) -> Result<Fusion, Status> {
+    match pb::Fusion::try_from(fusion) {
+        Ok(pb::Fusion::Rrf) => Ok(rrf_k.map_or_else(Fusion::default, |k| Fusion::Rrf { k })),
+        Ok(_) if rrf_k.is_some() => Err(Status::invalid_argument(
+            "rrf_k only applies to reciprocal rank fusion",
+        )),
+        Ok(pb::Fusion::RelativeScore) => Ok(Fusion::RelativeScore),
+        Ok(pb::Fusion::Dbsf) => Ok(Fusion::Dbsf),
+        Err(_) => Err(Status::invalid_argument(format!("unknown fusion {fusion}"))),
+    }
 }
 
 fn run_search(
@@ -451,10 +509,28 @@ impl pb::quiver_server::Quiver for QuiverService {
         if limit > MAX_SCROLL {
             return Err(Status::invalid_argument(format!("limit must be <= {MAX_SCROLL}")));
         }
-        let cursor = (!req.cursor.is_empty()).then(|| req.cursor.clone());
+        let mut opts = ScrollOptions::new(limit);
+        opts.cursor = (!req.cursor.is_empty()).then(|| req.cursor.clone());
+        opts.filter = filter_from_pb(&req.filter_json)?;
+        opts.order_by = match &req.order_by {
+            None => None,
+            Some(o) => Some(OrderBy {
+                field: o.field.clone(),
+                direction: match pb::Direction::try_from(o.direction) {
+                    Ok(pb::Direction::Asc) => Direction::Asc,
+                    Ok(pb::Direction::Desc) => Direction::Desc,
+                    Err(_) => {
+                        return Err(Status::invalid_argument(format!(
+                            "unknown direction {}",
+                            o.direction
+                        )));
+                    }
+                },
+            }),
+        };
         let collection = req.collection.clone();
         let page = self
-            .blocking(move |db| Ok(db.collection(&collection)?.scroll(cursor.as_deref(), limit)))
+            .blocking(move |db| db.collection(&collection)?.scroll_with(&opts))
             .await?;
         let points = page
             .points
@@ -523,6 +599,7 @@ impl pb::quiver_server::Quiver for QuiverService {
             max_distance: req.max_distance,
             with_vectors: req.with_vectors,
             with_metadata: req.with_metadata,
+            offset: req.offset,
         }
         .options()?;
         let hits = self
@@ -545,6 +622,11 @@ impl pb::quiver_server::Quiver for QuiverService {
                 "k must be between 1 and {MAX_K}"
             )));
         }
+        if k + req.offset as usize > MAX_K {
+            return Err(Status::invalid_argument(format!(
+                "k + offset must be at most {MAX_K}"
+            )));
+        }
         if req.prefetch.is_empty() || req.prefetch.len() > MAX_PREFETCH {
             return Err(Status::invalid_argument(format!(
                 "give between 1 and {MAX_PREFETCH} prefetch searches"
@@ -556,12 +638,15 @@ impl pb::quiver_server::Quiver for QuiverService {
                 .into_iter()
                 .map(|p| prefetch_from_pb(p, k))
                 .collect::<Result<_, _>>()?,
-            fusion: req.rrf_k.map_or_else(Fusion::default, |k| Fusion::Rrf { k }),
+            fusion: fusion_from_pb(req.fusion, req.rrf_k)?,
             filter: filter_from_pb(&req.filter_json)?,
             include_vectors: req.with_vectors,
             include_metadata: req.with_metadata.unwrap_or(true),
-            rescore: None,
-            offset: 0,
+            rescore: req.rescore.map(|r| Rescore {
+                vector: r.vector,
+                using: (!r.using.is_empty()).then_some(r.using),
+            }),
+            offset: req.offset as usize,
         };
         let collection = req.collection;
         let hits = self
@@ -569,6 +654,124 @@ impl pb::quiver_server::Quiver for QuiverService {
             .await?;
         Ok(Response::new(pb::QueryResponse {
             hits: hits.into_iter().map(scored_to_pb).collect(),
+        }))
+    }
+
+    async fn search_groups(&self, req: Request<pb::SearchGroupsRequest>) -> Rpc<pb::SearchGroupsResponse> {
+        require(&req, Role::ReadOnly)?;
+        let req = req.into_inner();
+        let groups = if req.groups == 0 { 10 } else { req.groups as usize };
+        let group_size = if req.group_size == 0 {
+            3
+        } else {
+            req.group_size as usize
+        };
+        if groups * group_size > MAX_K {
+            return Err(Status::invalid_argument(format!(
+                "groups * group_size must be at most {MAX_K}"
+            )));
+        }
+        if req.group_by.is_empty() {
+            return Err(Status::invalid_argument("group_by is required"));
+        }
+        let target = target_from_pb(req.vector, req.id, req.sparse, &req.using)?;
+        let (_, mut opts) = Settings {
+            using: &req.using,
+            k: 1,
+            filter_json: &req.filter_json,
+            ef: req.ef,
+            max_distance: req.max_distance,
+            with_vectors: req.with_vectors,
+            with_metadata: req.with_metadata,
+            offset: 0,
+        }
+        .options()?;
+        if matches!(target, SearchTarget::Sparse { .. }) {
+            opts.using = None;
+        }
+        let group = GroupBy::new(req.group_by, groups, group_size);
+        let collection = req.collection;
+        let found = self
+            .blocking(move |db| db.collection(&collection)?.search_groups(&target, &group, &opts))
+            .await?;
+        Ok(Response::new(pb::SearchGroupsResponse {
+            groups: found
+                .into_iter()
+                .map(|g| pb::HitGroup {
+                    key_json: g.key.to_string(),
+                    hits: g.hits.into_iter().map(hit_to_pb).collect(),
+                })
+                .collect(),
+        }))
+    }
+
+    async fn discover(&self, req: Request<pb::DiscoverRequest>) -> Rpc<pb::SearchResponse> {
+        require(&req, Role::ReadOnly)?;
+        let req = req.into_inner();
+        if req.context.len() > MAX_CONTEXT {
+            return Err(Status::invalid_argument(format!(
+                "at most {MAX_CONTEXT} context pairs per request"
+            )));
+        }
+        let target = req
+            .target
+            .map(|t| example_from_pb(Some(t), "target"))
+            .transpose()?;
+        let context = req
+            .context
+            .into_iter()
+            .map(|p| {
+                Ok(ContextPair {
+                    positive: example_from_pb(p.positive, "a context pair's positive")?,
+                    negative: example_from_pb(p.negative, "a context pair's negative")?,
+                })
+            })
+            .collect::<Result<Vec<_>, Status>>()?;
+        let (k, opts) = Settings {
+            using: &req.using,
+            k: req.k,
+            filter_json: &req.filter_json,
+            ef: req.ef,
+            max_distance: req.max_distance,
+            with_vectors: req.with_vectors,
+            with_metadata: req.with_metadata,
+            offset: req.offset,
+        }
+        .options()?;
+        let collection = req.collection;
+        let hits = self
+            .blocking(move |db| {
+                db.collection(&collection)?
+                    .discover(target.as_ref(), &context, k, &opts)
+            })
+            .await?;
+        Ok(Response::new(pb::SearchResponse {
+            hits: hits.into_iter().map(hit_to_pb).collect(),
+        }))
+    }
+
+    async fn facet(&self, req: Request<pb::FacetRequest>) -> Rpc<pb::FacetResponse> {
+        require(&req, Role::ReadOnly)?;
+        let req = req.into_inner();
+        let limit = if req.limit == 0 { 10 } else { req.limit as usize };
+        if limit > MAX_FACET {
+            return Err(Status::invalid_argument(format!("limit must be <= {MAX_FACET}")));
+        }
+        let filter = filter_from_pb(&req.filter_json)?;
+        let values = self
+            .blocking(move |db| {
+                db.collection(&req.collection)?
+                    .facet(&req.field, filter.as_ref(), limit)
+            })
+            .await?;
+        Ok(Response::new(pb::FacetResponse {
+            values: values
+                .into_iter()
+                .map(|v| pb::FacetValue {
+                    value_json: v.value.to_string(),
+                    count: v.count as u64,
+                })
+                .collect(),
         }))
     }
 

@@ -25,8 +25,10 @@ from quiver import (
     InvalidRequestError,
     KDTree,
     NotFoundError,
+    OrderBy,
     Point,
     Prefetch,
+    Rescore,
     SparseVector,
     SparseVectorParams,
     VectorParams,
@@ -303,3 +305,77 @@ def test_async_named_vectors(name: str) -> None:
             await client.rename_collection(f"{name}_x", name)
 
     asyncio.run(run())
+
+
+def test_query_features(client: Client, name: str) -> None:
+    col = client.create_collection(
+        name,
+        1,
+        metric="euclidean",
+        index=Flat(),
+        vectors={"fine": VectorParams(1, metric="euclidean", index=Flat())},
+        sparse_vectors=["text"],
+    )
+    col.upsert(
+        Point(
+            f"p{i:02}",
+            [float(i)],
+            {"doc": f"d{i // 4}", "n": i, "title": f"Chapter {i} of Dune", "tags": ["a", str(i)]},
+            vectors={"fine": [float(20 - i)]},
+            sparse_vectors={"text": {1: float(20 - i)}},
+        )
+        for i in range(20)
+    )
+
+    all_hits = col.search([0], k=10)
+    assert col.search([0], k=3, offset=4) == all_hits[4:7]
+    assert [h.id for h in col.search_by_id("p00", k=1, offset=1)] == ["p02"]
+
+    groups = col.search_groups([9], group_by="doc", groups=2, group_size=2)
+    assert [g.key for g in groups] == ["d2", "d1"]
+    assert [h.id for h in groups[0].hits] == ["p09", "p08"]
+    sparse_groups = col.search_groups(sparse={1: 1.0}, using="text", group_by="doc", groups=1)
+    assert sparse_groups[0].key == "d0"
+
+    facets = col.facet("doc", filter={"n": {"$gte": 10}}, limit=2)
+    assert [(f.value, f.count) for f in facets] == [("d3", 4), ("d4", 4)]
+
+    ordered = [p.id for p in col.iter_points(page_size=3, order_by=OrderBy("n", "desc"))]
+    assert ordered == [f"p{i:02}" for i in reversed(range(20))]
+    page = col.scroll(limit=2, filter={"title": {"$text": "chapter 7"}})
+    assert [p.id for p in page.points] == ["p07"]
+    assert col.count({"tags": {"$all": ["a", "3"]}}) == 1
+    assert col.count({"title": {"$regex": "^Chapter 1\\d "}}) == 10
+
+    for fusion in ("relative_score", "dbsf"):
+        fused = col.query(
+            [Prefetch(vector=[0]), Prefetch(sparse={1: 1.0}, using="text")], k=3, fusion=fusion
+        )
+        assert fused[0].id == "p00"
+    rescored = col.query([Prefetch(vector=[0], limit=3)], rescore=Rescore([20], using="fine"))
+    assert [h.id for h in rescored] == ["p00", "p01", "p02"]
+    assert [h.id for h in col.query([Prefetch(vector=[0])], k=1, offset=2)] == ["p02"]
+
+    found = col.discover([10], [([15], [5])], k=2)
+    assert [h.id for h in found] == ["p11", "p12"]
+    context_only = col.discover(context=[("p19", [0])], k=3)
+    assert all(h.distance == 0.0 for h in context_only)
+    with pytest.raises(NotFoundError):
+        col.discover("missing")
+
+
+def test_async_query_features(name: str) -> None:
+    async def main() -> None:
+        assert URL
+        async with AsyncClient(URL, api_key=os.environ.get("QUIVER_API_KEY")) as c:
+            col = await c.create_collection(name, 1, metric="euclidean", index=Flat())
+            await col.upsert(Point(f"p{i}", [float(i)], {"g": i % 2}) for i in range(6))
+            groups = await col.search_groups([0], group_by="g", group_size=2)
+            assert [g.key for g in groups] == [0, 1]
+            assert [f.count for f in await col.facet("g")] == [3, 3]
+            page = await col.scroll(order_by=OrderBy("g", "desc"), limit=3)
+            assert [p.id for p in page.points] == ["p1", "p3", "p5"]
+            assert [h.id for h in await col.discover([0], k=1, offset=1)] == ["p1"]
+            await c.delete_collection(name)
+
+    asyncio.run(main())

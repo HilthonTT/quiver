@@ -12,10 +12,10 @@ use tokio::io::AsyncWriteExt;
 use std::collections::BTreeMap;
 
 use quiver_db::{
-    Collection, CollectionConfig, CollectionInfo, CollectionUpdate, Database, ExpiryConfig, Filter, Fusion,
-    HybridQuery, IndexConfig, MetadataMode, Metric, Point, PointInput, PointSelector, Prefetch, Quantization,
-    QueryVector, RestoreOptions, SearchHit, SearchOptions, SnapshotInfo, SparseVector, SparseVectorConfig,
-    VectorConfig,
+    Collection, CollectionConfig, CollectionInfo, CollectionUpdate, ContextPair, Database, Example,
+    ExpiryConfig, Filter, Fusion, GroupBy, HybridQuery, IndexConfig, MetadataMode, Metric, OrderBy, Point,
+    PointInput, PointSelector, Prefetch, Quantization, QueryVector, Rescore, RestoreOptions, ScrollOptions,
+    SearchHit, SearchOptions, SearchTarget, SnapshotInfo, SparseVector, SparseVectorConfig, VectorConfig,
 };
 
 use crate::error::ApiError;
@@ -30,6 +30,8 @@ pub const MAX_SCROLL: usize = 10_000;
 pub const MAX_IDS: usize = 10_000;
 /// Upper bound on the searches a hybrid query fuses.
 pub const MAX_PREFETCH: usize = 16;
+pub const MAX_FACET: usize = 1_000;
+pub const MAX_CONTEXT: usize = 64;
 
 /// Maximum snapshot upload size in bytes, attached to the upload route.
 #[derive(Debug, Clone, Copy)]
@@ -417,6 +419,75 @@ pub async fn scroll_points(
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct ScrollRequest {
+    #[serde(default)]
+    cursor: Option<String>,
+    #[serde(default = "default_limit")]
+    limit: usize,
+    #[serde(default)]
+    filter: Option<Value>,
+    #[serde(default)]
+    order_by: Option<OrderBy>,
+    #[serde(default)]
+    with_vectors: bool,
+}
+
+pub async fn scroll_points_with(
+    State(db): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<ScrollRequest>,
+) -> ApiResult<Json<Value>> {
+    if req.limit > MAX_SCROLL {
+        return Err(ApiError::bad_request(format!("limit must be <= {MAX_SCROLL}")));
+    }
+    let opts = ScrollOptions {
+        cursor: req.cursor,
+        limit: req.limit,
+        filter: parse_filter(req.filter.as_ref())?,
+        order_by: req.order_by,
+    };
+    let c = collection(&db, &name)?;
+    let page = blocking(move || c.scroll_with(&opts)).await?;
+    let points: Vec<Value> = page
+        .points
+        .into_iter()
+        .map(|p| present(p, req.with_vectors))
+        .collect();
+    Ok(Json(json!({ "points": points, "next_cursor": page.next_cursor })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct FacetRequest {
+    field: String,
+    #[serde(default)]
+    filter: Option<Value>,
+    #[serde(default = "default_facet_limit")]
+    limit: usize,
+}
+
+fn default_facet_limit() -> usize {
+    10
+}
+
+pub async fn facet_points(
+    State(db): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<FacetRequest>,
+) -> ApiResult<Json<Value>> {
+    if req.limit == 0 || req.limit > MAX_FACET {
+        return Err(ApiError::bad_request(format!(
+            "limit must be between 1 and {MAX_FACET}"
+        )));
+    }
+    let filter = parse_filter(req.filter.as_ref())?;
+    let c = collection(&db, &name)?;
+    let values = blocking(move || c.facet(&req.field, filter.as_ref(), req.limit)).await?;
+    Ok(Json(json!({ "values": values })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct DeleteRequest {
     #[serde(default)]
     ids: Option<Vec<String>>,
@@ -520,6 +591,8 @@ pub struct SearchRequest {
     #[serde(default = "default_k")]
     k: usize,
     #[serde(default)]
+    offset: usize,
+    #[serde(default)]
     filter: Option<Value>,
     #[serde(default)]
     ef: Option<usize>,
@@ -541,6 +614,7 @@ fn default_k() -> usize {
 struct Settings<'a> {
     using: Option<&'a str>,
     k: usize,
+    offset: usize,
     filter: Option<&'a Value>,
     ef: Option<usize>,
     max_distance: Option<f32>,
@@ -550,9 +624,7 @@ struct Settings<'a> {
 
 impl Settings<'_> {
     fn options(self) -> ApiResult<SearchOptions> {
-        if self.k == 0 || self.k > MAX_K {
-            return Err(ApiError::bad_request(format!("k must be between 1 and {MAX_K}")));
-        }
+        check_k(self.k, self.offset)?;
         Ok(SearchOptions {
             using: self.using.map(str::to_owned),
             filter: parse_filter(self.filter)?,
@@ -560,24 +632,51 @@ impl Settings<'_> {
             include_vectors: self.with_vectors,
             include_metadata: self.with_metadata,
             max_distance: self.max_distance,
-            offset: 0,
+            offset: self.offset,
         })
     }
 }
 
-/// What a validated search runs against.
-enum SearchBy {
-    Vector(Vec<f32>),
-    Id(String),
-    /// A sparse vector, against the sparse vector named.
-    Sparse(SparseVector, String),
+fn check_k(k: usize, offset: usize) -> ApiResult<()> {
+    if k == 0 || k > MAX_K {
+        return Err(ApiError::bad_request(format!("k must be between 1 and {MAX_K}")));
+    }
+    if k.saturating_add(offset) > MAX_K {
+        return Err(ApiError::bad_request(format!(
+            "k + offset must be at most {MAX_K}"
+        )));
+    }
+    Ok(())
+}
+
+fn search_target(
+    vector: Option<Vec<f32>>,
+    id: Option<String>,
+    sparse: Option<SparseVector>,
+    opts: &mut SearchOptions,
+) -> ApiResult<SearchTarget> {
+    match (vector, id, sparse) {
+        (Some(v), None, None) => Ok(SearchTarget::Vector(v)),
+        (None, Some(id), None) => Ok(SearchTarget::Id(id)),
+        (None, None, Some(vector)) => {
+            let using = opts
+                .using
+                .take()
+                .ok_or_else(|| ApiError::bad_request("name the sparse vector to search in `using`"))?;
+            Ok(SearchTarget::Sparse { vector, using })
+        }
+        _ => Err(ApiError::bad_request(
+            "give exactly one of `vector`, `id` and `sparse`",
+        )),
+    }
 }
 
 impl SearchRequest {
-    fn prepare(self) -> ApiResult<(SearchBy, usize, SearchOptions)> {
+    fn prepare(self) -> ApiResult<(SearchTarget, usize, SearchOptions)> {
         let mut opts = Settings {
             using: self.using.as_deref(),
             k: self.k,
+            offset: self.offset,
             filter: self.filter.as_ref(),
             ef: self.ef,
             max_distance: self.max_distance,
@@ -585,37 +684,86 @@ impl SearchRequest {
             with_metadata: self.with_metadata,
         }
         .options()?;
-        let by = match (self.vector, self.id, self.sparse) {
-            (Some(v), None, None) => SearchBy::Vector(v),
-            (None, Some(id), None) => SearchBy::Id(id),
-            (None, None, Some(sparse)) => {
-                let name = opts
-                    .using
-                    .take()
-                    .ok_or_else(|| ApiError::bad_request("name the sparse vector to search in `using`"))?;
-                SearchBy::Sparse(sparse, name)
-            }
-            _ => {
-                return Err(ApiError::bad_request(
-                    "give exactly one of `vector`, `id` and `sparse`",
-                ));
-            }
-        };
-        Ok((by, self.k, opts))
+        let target = search_target(self.vector, self.id, self.sparse, &mut opts)?;
+        Ok((target, self.k, opts))
     }
 }
 
 fn run_search(
     c: &Collection,
-    by: &SearchBy,
+    target: &SearchTarget,
     k: usize,
     opts: &SearchOptions,
 ) -> quiver_db::Result<Vec<SearchHit>> {
-    match by {
-        SearchBy::Vector(v) => c.search_with(v, k, opts),
-        SearchBy::Id(id) => c.search_by_id(id, k, opts),
-        SearchBy::Sparse(v, name) => c.search_sparse(name, v, k, opts),
+    match target {
+        SearchTarget::Vector(v) => c.search_with(v, k, opts),
+        SearchTarget::Id(id) => c.search_by_id(id, k, opts),
+        SearchTarget::Sparse { vector, using } => c.search_sparse(using, vector, k, opts),
     }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct GroupSearchRequest {
+    #[serde(default)]
+    vector: Option<Vec<f32>>,
+    #[serde(default)]
+    id: Option<String>,
+    #[serde(default)]
+    sparse: Option<SparseVector>,
+    #[serde(default)]
+    using: Option<String>,
+    group_by: String,
+    #[serde(default = "default_groups")]
+    groups: usize,
+    #[serde(default = "default_group_size")]
+    group_size: usize,
+    #[serde(default)]
+    filter: Option<Value>,
+    #[serde(default)]
+    ef: Option<usize>,
+    #[serde(default)]
+    max_distance: Option<f32>,
+    #[serde(default)]
+    with_vectors: bool,
+    #[serde(default = "yes")]
+    with_metadata: bool,
+}
+
+fn default_groups() -> usize {
+    10
+}
+
+fn default_group_size() -> usize {
+    3
+}
+
+pub async fn search_groups(
+    State(db): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<GroupSearchRequest>,
+) -> ApiResult<Json<Value>> {
+    if req.groups == 0 || req.group_size == 0 || req.groups.saturating_mul(req.group_size) > MAX_K {
+        return Err(ApiError::bad_request(format!(
+            "`groups` and `group_size` must be at least 1, and `groups` × `group_size` at most {MAX_K}"
+        )));
+    }
+    let mut opts = Settings {
+        using: req.using.as_deref(),
+        k: req.groups * req.group_size,
+        offset: 0,
+        filter: req.filter.as_ref(),
+        ef: req.ef,
+        max_distance: req.max_distance,
+        with_vectors: req.with_vectors,
+        with_metadata: req.with_metadata,
+    }
+    .options()?;
+    let target = search_target(req.vector, req.id, req.sparse, &mut opts)?;
+    let group = GroupBy::new(req.group_by, req.groups, req.group_size);
+    let c = collection(&db, &name)?;
+    let groups = blocking(move || c.search_groups(&target, &group, &opts)).await?;
+    Ok(Json(json!({ "groups": groups })))
 }
 
 #[derive(Debug, Deserialize)]
@@ -673,6 +821,8 @@ pub struct RecommendRequest {
     #[serde(default = "default_k")]
     k: usize,
     #[serde(default)]
+    offset: usize,
+    #[serde(default)]
     filter: Option<Value>,
     #[serde(default)]
     ef: Option<usize>,
@@ -698,6 +848,7 @@ pub async fn recommend(
     let opts = Settings {
         using: req.using.as_deref(),
         k: req.k,
+        offset: req.offset,
         filter: req.filter.as_ref(),
         ef: req.ef,
         max_distance: req.max_distance,
@@ -712,13 +863,68 @@ pub async fn recommend(
 
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
+pub struct DiscoverRequest {
+    #[serde(default)]
+    target: Option<Example>,
+    #[serde(default)]
+    context: Vec<ContextPair>,
+    #[serde(default)]
+    using: Option<String>,
+    #[serde(default = "default_k")]
+    k: usize,
+    #[serde(default)]
+    offset: usize,
+    #[serde(default)]
+    filter: Option<Value>,
+    #[serde(default)]
+    ef: Option<usize>,
+    #[serde(default)]
+    max_distance: Option<f32>,
+    #[serde(default)]
+    with_vectors: bool,
+    #[serde(default = "yes")]
+    with_metadata: bool,
+}
+
+pub async fn discover(
+    State(db): State<AppState>,
+    Path(name): Path<String>,
+    Json(req): Json<DiscoverRequest>,
+) -> ApiResult<Json<Value>> {
+    if req.context.len() > MAX_CONTEXT {
+        return Err(ApiError::bad_request(format!(
+            "at most {MAX_CONTEXT} context pairs per request"
+        )));
+    }
+    let opts = Settings {
+        using: req.using.as_deref(),
+        k: req.k,
+        offset: req.offset,
+        filter: req.filter.as_ref(),
+        ef: req.ef,
+        max_distance: req.max_distance,
+        with_vectors: req.with_vectors,
+        with_metadata: req.with_metadata,
+    }
+    .options()?;
+    let c = collection(&db, &name)?;
+    let results = blocking(move || c.discover(req.target.as_ref(), &req.context, req.k, &opts)).await?;
+    Ok(Json(json!({ "results": results })))
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct QueryRequest {
     /// The searches whose rankings are fused.
     prefetch: Vec<PrefetchRequest>,
     #[serde(default)]
     fusion: Fusion,
+    #[serde(default)]
+    rescore: Option<Rescore>,
     #[serde(default = "default_k")]
     k: usize,
+    #[serde(default)]
+    offset: usize,
     /// Applies to every search.
     #[serde(default)]
     filter: Option<Value>,
@@ -796,9 +1002,7 @@ pub async fn query(
     Path(name): Path<String>,
     Json(req): Json<QueryRequest>,
 ) -> ApiResult<Json<Value>> {
-    if req.k == 0 || req.k > MAX_K {
-        return Err(ApiError::bad_request(format!("k must be between 1 and {MAX_K}")));
-    }
+    check_k(req.k, req.offset)?;
     if req.prefetch.is_empty() || req.prefetch.len() > MAX_PREFETCH {
         return Err(ApiError::bad_request(format!(
             "give between 1 and {MAX_PREFETCH} prefetch searches"
@@ -815,8 +1019,8 @@ pub async fn query(
         filter: parse_filter(req.filter.as_ref())?,
         include_vectors: req.with_vectors,
         include_metadata: req.with_metadata,
-        rescore: None,
-        offset: 0,
+        rescore: req.rescore,
+        offset: req.offset,
     };
     let c = collection(&db, &name)?;
     let results = blocking(move || c.query(&query, k)).await?;

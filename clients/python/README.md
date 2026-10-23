@@ -58,12 +58,15 @@ Vectors can be lists, tuples or numpy arrays. Large iterables (including generat
 | `recommend(positive, negative=(), k=10, ...)` | Points like the positive examples and unlike the negative ones |
 | `search_batch(vectors, k=10, ...)` | Many searches in one request |
 | `search_sparse(vector, k=10, using=...)` | Sparse (keyword) search; `distance` is the negated score |
-| `query(prefetch, k=10, filter=None, rrf_k=60)` | Hybrid search: fuse several dense and sparse searches |
+| `query(prefetch, k=10, filter=None, fusion="rrf", rrf_k=60, rescore=None)` | Hybrid search: fuse several dense and sparse searches, or re-rank them |
+| `search_groups(vector, group_by=..., groups=10, group_size=3)` | Best hits per value of a metadata field (also `id=` or `sparse=`) |
+| `discover(target=None, context=(), k=10, ...)` | Points on the positive side of each `(positive, negative)` pair |
+| `facet(field, filter=None, limit=10)` | Point counts per value of a field, most common first |
 | `update(index=, quantization=, on_disk=, vectors=, sparse_vectors=, expiry=)` | Change settings (may rebuild indexes) |
 | `rename(new_name)` | Rename the collection; the handle follows it |
 | `get(id)` / `get_many(ids)` | Fetch points (`get` returns `None` if missing) |
-| `scroll(cursor=None, limit=100)` | One page of points in id order, with `next_cursor` |
-| `iter_points(page_size=500)` | Iterate over every point, following the cursors |
+| `scroll(cursor=None, limit=100, filter=None, order_by=None)` | One page of points (in id order unless `order_by`), with `next_cursor` |
+| `iter_points(page_size=500, filter=None, order_by=None)` | Iterate over every point, following the cursors |
 | `delete(ids)` / `delete_where(filter)` | Delete points by id or by filter; returns how many existed |
 | `update_metadata(metadata, ids=None, filter=None, mode="merge")` | Change metadata without resending vectors |
 | `count(filter=None)` | Number of points, optionally matching a filter |
@@ -71,7 +74,8 @@ Vectors can be lists, tuples or numpy arrays. Large iterables (including generat
 | `flush()` / `compact()` | Force a checkpoint / reclaim deleted space |
 | `create_snapshot()` / `snapshots()` | Back up this collection / list its backups |
 
-Every search method takes `using="name"` to search a named vector instead of the main one.
+Every search method takes `using="name"` to search a named vector instead of the main one,
+and `offset=` to skip that many of the best hits (for paging; `k + offset` is at most 10 000).
 
 Distances are always **lower = closer**: `1 - cos` for cosine, L2 for Euclidean, `-(a·b)` for dot product, L1 for Manhattan, and the count of differing components for Hamming.
 
@@ -93,6 +97,16 @@ while True:
 ids = [p.id for p in movies.iter_points()]  # or let the client follow the cursors
 ```
 
+`filter=` keeps only matching points, and `order_by="year"` (or
+`OrderBy("year", "desc")`) pages by a numeric or string metadata field instead,
+then by id; points without it are left out. Cursors are opaque strings either way.
+
+```python
+from quiver import OrderBy
+
+newest = movies.scroll(limit=20, order_by=OrderBy("year", "desc"), filter={"genre": "sci-fi"})
+```
+
 ### Data operations
 
 ```python
@@ -112,6 +126,23 @@ movies.search([1.0, 0.0, 0.0, 0.1], k=10, max_distance=0.3)  # only close hits
 
 `max_distance` drops hits farther than the threshold; results are still capped
 at `k`, and with HNSW the threshold applies to the approximate top `k`.
+
+### Groups, facets and discovery
+
+```python
+for group in chunks.search_groups(embedding, group_by="doc_id", groups=5, group_size=2):
+    print(group.key, [hit.id for hit in group.hits])  # the 2 best chunks of each of 5 documents
+
+movies.facet("genre", filter={"year": {"$gte": 2000}})  # [FacetValue(value="drama", count=41), ...]
+
+movies.discover("alien", context=[("arrival", "amelie")], k=5)  # ids or vectors
+movies.discover(context=[("arrival", "amelie"), ([0.1, 0.9, 0.0, 0.0], "titanic")])
+```
+
+With a `target`, discovery ranks hits first by how many context pairs they
+satisfy (closer to the positive than to the negative), then by distance to the
+target. Without one, it scores every point by how far it is from satisfying all
+pairs (`distance` 0 means it satisfies them all).
 
 ### Named vectors, sparse vectors and hybrid search
 
@@ -144,6 +175,16 @@ papers.query(
 
 Every point must carry every named vector; sparse vectors (a `SparseVector(indices, values)`
 or an `{index: value}` dict) are optional. `query` returns `ScoredResult`s, highest `score` first.
+
+`fusion="relative_score"` (min-max) and `fusion="dbsf"` (mean ± 3σ) fuse normalised
+scores instead of ranks. `rescore=Rescore(vector, using="name")` re-ranks every
+prefetched point by its exact distance to `vector` (its score is the negated distance):
+
+```python
+from quiver import Rescore
+
+papers.query([Prefetch(vector=small, using="coarse", limit=100)], k=10, rescore=Rescore(full))
+```
 
 ### Binary quantization and expiring points
 
@@ -204,6 +245,12 @@ MongoDB-style metadata filters:
 {"award": {"$exists": True}}
 {"$or": [{"genre": "drama"}, {"rating": {"$gt": 8}}]}  # $and $or $not
 {"author.country": "BE"}  # nested fields
+{"title": {"$text": "left hand darkness"}}  # every word, any order, case-insensitive
+{"sku": {"$prefix": "BK-"}}  # also {"$regex": "^BK-\\d+$"}
+{"tags": {"$all": ["a", "b"]}}  # also {"$size": 2}
+{"reviews": {"$elemMatch": {"stars": {"$gte": 4}, "verified": True}}}
+{"loc": {"$geoRadius": {"center": {"lat": 50.85, "lon": 4.35}, "meters": 5000}}}
+{"loc": {"$geoBox": {"top_left": {"lat": 51, "lon": 4}, "bottom_right": {"lat": 50, "lon": 5}}}}
 ```
 
 ### Async

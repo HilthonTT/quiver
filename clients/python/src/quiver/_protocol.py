@@ -16,15 +16,21 @@ from ._errors import error_for_status
 from ._models import (
     HNSW,
     CollectionInfo,
+    Example,
     Expiry,
+    FacetValue,
     Filter,
+    Fusion,
+    Group,
     Index,
     MetadataMode,
     Metric,
+    OrderBy,
     Point,
     PointLike,
     Prefetch,
     Quantization,
+    Rescore,
     ScoredResult,
     ScrollPage,
     SearchResult,
@@ -33,6 +39,7 @@ from ._models import (
     SparseVectorParams,
     Vector,
     VectorParams,
+    as_example,
     as_list,
     as_sparse,
     to_point_dict,
@@ -253,7 +260,7 @@ def insert(name: str, point: dict[str, Any]) -> Call[str]:
 
 # Ids that `GET /points/{id}` cannot reach, because the server's fixed
 # `/points/...` routes take those paths; they are fetched through lookup.
-_ROUTED_POINT_IDS = frozenset({"lookup", "delete", "count", "metadata"})
+_ROUTED_POINT_IDS = frozenset({"lookup", "delete", "count", "metadata", "scroll", "facet"})
 
 
 def get_point(name: str, point_id: str, with_vectors: bool) -> Call[Point | None]:
@@ -295,6 +302,41 @@ def scroll(name: str, cursor: str | None, limit: int, with_vectors: bool) -> Cal
     )
 
 
+def scroll_with(
+    name: str,
+    cursor: str | None,
+    limit: int,
+    with_vectors: bool,
+    filter: Filter | None,
+    order_by: OrderBy | None,
+) -> Call[ScrollPage]:
+    body: dict[str, Any] = {"limit": limit, "with_vectors": with_vectors}
+    if cursor is not None:
+        body["cursor"] = cursor
+    if filter is not None:
+        body["filter"] = dict(filter)
+    if order_by is not None:
+        body["order_by"] = order_by.to_dict()
+    return Call(
+        "POST",
+        f"/collections/{_seg(name)}/points/scroll",
+        lambda b: ScrollPage([Point.from_dict(p) for p in b["points"]], b.get("next_cursor")),
+        json=body,
+    )
+
+
+def facet(name: str, field: str, filter: Filter | None, limit: int) -> Call[list[FacetValue]]:
+    body: dict[str, Any] = {"field": field, "limit": limit}
+    if filter is not None:
+        body["filter"] = dict(filter)
+    return Call(
+        "POST",
+        f"/collections/{_seg(name)}/points/facet",
+        lambda b: [FacetValue.from_dict(v) for v in b["values"]],
+        json=body,
+    )
+
+
 def delete_points(name: str, ids: Sequence[str]) -> Call[int]:
     return Call(
         "POST",
@@ -317,9 +359,12 @@ def search_options(
     with_vectors: bool,
     with_metadata: bool,
     using: str | None = None,
+    offset: int = 0,
 ) -> dict[str, Any]:
     """The settings shared by searches and recommendations."""
     body: dict[str, Any] = {"k": k, "with_vectors": with_vectors, "with_metadata": with_metadata}
+    if offset:
+        body["offset"] = offset
     if using is not None:
         body["using"] = using
     if filter is not None:
@@ -340,8 +385,11 @@ def search_body(
     with_metadata: bool,
     max_distance: float | None = None,
     using: str | None = None,
+    offset: int = 0,
 ) -> dict[str, Any]:
-    options = search_options(k, filter, ef, max_distance, with_vectors, with_metadata, using)
+    options = search_options(
+        k, filter, ef, max_distance, with_vectors, with_metadata, using, offset
+    )
     return {"vector": as_list(vector), **options}
 
 
@@ -359,16 +407,23 @@ def query(
     rrf_k: int,
     with_vectors: bool,
     with_metadata: bool,
+    fusion: Fusion = "rrf",
+    rescore: Rescore | None = None,
+    offset: int = 0,
 ) -> Call[list[ScoredResult]]:
     body: dict[str, Any] = {
         "prefetch": [p.to_dict() for p in prefetch],
-        "fusion": {"type": "rrf", "k": rrf_k},
+        "fusion": {"type": "rrf", "k": rrf_k} if fusion == "rrf" else {"type": fusion},
         "k": k,
         "with_vectors": with_vectors,
         "with_metadata": with_metadata,
     }
     if filter is not None:
         body["filter"] = dict(filter)
+    if rescore is not None:
+        body["rescore"] = rescore.to_dict()
+    if offset:
+        body["offset"] = offset
     return Call(
         "POST",
         f"/collections/{_seg(name)}/query",
@@ -387,6 +442,60 @@ def recommend(
     body = {"positive": _ids(positive), "negative": _ids(negative), **options}
     return Call(
         "POST", f"/collections/{_seg(name)}/recommend", lambda b: _hits(b["results"]), json=body
+    )
+
+
+def search_target(
+    vector: Vector | None, id: str | None, sparse: SparseLike | None
+) -> dict[str, Any]:
+    given = [x for x in (vector, id, sparse) if x is not None]
+    if len(given) != 1:
+        raise ValueError("pass exactly one of vector, id= and sparse=")
+    if vector is not None:
+        return {"vector": as_list(vector)}
+    if id is not None:
+        return {"id": id}
+    assert sparse is not None
+    return {"sparse": as_sparse(sparse)}
+
+
+def search_groups(
+    name: str,
+    target: dict[str, Any],
+    group_by: str,
+    groups: int,
+    group_size: int,
+    options: dict[str, Any],
+) -> Call[list[Group]]:
+    if "sparse" in target and "using" not in options:
+        raise ValueError("name the sparse vector to search with using=")
+    rest = {key: value for key, value in options.items() if key != "k"}
+    body = {**target, "group_by": group_by, "groups": groups, "group_size": group_size, **rest}
+    return Call(
+        "POST",
+        f"/collections/{_seg(name)}/search/groups",
+        lambda b: [Group.from_dict(g) for g in b["groups"]],
+        json=body,
+    )
+
+
+def discover(
+    name: str,
+    target: Example | None,
+    context: Iterable[tuple[Example, Example]],
+    options: dict[str, Any],
+) -> Call[list[SearchResult]]:
+    body: dict[str, Any] = {
+        "context": [
+            {"positive": as_example(positive), "negative": as_example(negative)}
+            for positive, negative in context
+        ],
+        **options,
+    }
+    if target is not None:
+        body["target"] = as_example(target)
+    return Call(
+        "POST", f"/collections/{_seg(name)}/discover", lambda b: _hits(b["results"]), json=body
     )
 
 

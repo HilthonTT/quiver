@@ -14,7 +14,10 @@
 
 use quiver_types::snapshot::SnapshotInfo;
 use quiver_types::{CollectionConfig, CollectionInfo, Point, PointInput, SearchHit};
-pub use quiver_types::{CollectionUpdate, Fusion, MetadataMode, ScoredHit, SparseVector, VectorUpdate};
+pub use quiver_types::{
+    CollectionUpdate, ContextPair, Direction, Example, FacetCount, Fusion, HitGroup, MetadataMode, OrderBy,
+    Rescore, ScoredHit, SparseVector, VectorUpdate,
+};
 use reqwest::{Method, RequestBuilder, StatusCode, Url};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
@@ -45,7 +48,9 @@ pub enum ClientError {
 pub type Result<T> = std::result::Result<T, ClientError>;
 
 /// Point ids that `GET collections/{name}/points/{id}` cannot address.
-const RESERVED_POINT_IDS: [&str; 6] = [".", "..", "lookup", "delete", "count", "metadata"];
+const RESERVED_POINT_IDS: [&str; 8] = [
+    ".", "..", "lookup", "delete", "count", "metadata", "scroll", "facet",
+];
 
 /// Overall limit for one request, matching the Python client.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
@@ -125,8 +130,14 @@ pub struct SearchRequest {
     /// Drop hits farther than this; with HNSW it applies to the approximate top `k`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_distance: Option<f32>,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub offset: usize,
     pub with_vectors: bool,
     pub with_metadata: bool,
+}
+
+fn is_zero(n: &usize) -> bool {
+    *n == 0
 }
 
 impl SearchRequest {
@@ -141,6 +152,7 @@ impl SearchRequest {
             filter: None,
             ef: None,
             max_distance: None,
+            offset: 0,
             with_vectors: false,
             with_metadata: true,
         }
@@ -170,6 +182,196 @@ impl SearchRequest {
         self.using = Some(name.into());
         self
     }
+
+    #[must_use]
+    pub fn offset(mut self, offset: usize) -> Self {
+        self.offset = offset;
+        self
+    }
+
+    #[must_use]
+    pub fn filter(mut self, filter: Value) -> Self {
+        self.filter = Some(filter);
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct GroupSearchRequest {
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub vector: Vec<f32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub sparse: Option<SparseVector>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub using: Option<String>,
+    pub group_by: String,
+    pub groups: usize,
+    pub group_size: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ef: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_distance: Option<f32>,
+    pub with_vectors: bool,
+    pub with_metadata: bool,
+}
+
+impl GroupSearchRequest {
+    pub fn new(vector: Vec<f32>, group_by: impl Into<String>, groups: usize, group_size: usize) -> Self {
+        Self {
+            vector,
+            id: None,
+            sparse: None,
+            using: None,
+            group_by: group_by.into(),
+            groups,
+            group_size,
+            filter: None,
+            ef: None,
+            max_distance: None,
+            with_vectors: false,
+            with_metadata: true,
+        }
+    }
+
+    pub fn by_id(
+        id: impl Into<String>,
+        group_by: impl Into<String>,
+        groups: usize,
+        group_size: usize,
+    ) -> Self {
+        Self {
+            id: Some(id.into()),
+            ..Self::new(Vec::new(), group_by, groups, group_size)
+        }
+    }
+
+    pub fn sparse(
+        using: impl Into<String>,
+        vector: SparseVector,
+        group_by: impl Into<String>,
+        groups: usize,
+        group_size: usize,
+    ) -> Self {
+        Self {
+            sparse: Some(vector),
+            using: Some(using.into()),
+            ..Self::new(Vec::new(), group_by, groups, group_size)
+        }
+    }
+
+    #[must_use]
+    pub fn using(mut self, name: impl Into<String>) -> Self {
+        self.using = Some(name.into());
+        self
+    }
+
+    #[must_use]
+    pub fn filter(mut self, filter: Value) -> Self {
+        self.filter = Some(filter);
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct DiscoverRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub target: Option<Example>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub context: Vec<ContextPair>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub using: Option<String>,
+    pub k: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub offset: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub ef: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_distance: Option<f32>,
+    pub with_vectors: bool,
+    pub with_metadata: bool,
+}
+
+impl DiscoverRequest {
+    pub fn new(target: Option<Example>, context: Vec<ContextPair>, k: usize) -> Self {
+        Self {
+            target,
+            context,
+            using: None,
+            k,
+            offset: 0,
+            filter: None,
+            ef: None,
+            max_distance: None,
+            with_vectors: false,
+            with_metadata: true,
+        }
+    }
+
+    #[must_use]
+    pub fn using(mut self, name: impl Into<String>) -> Self {
+        self.using = Some(name.into());
+        self
+    }
+
+    #[must_use]
+    pub fn filter(mut self, filter: Value) -> Self {
+        self.filter = Some(filter);
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct ScrollRequest {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cursor: Option<String>,
+    pub limit: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter: Option<Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub order_by: Option<OrderBy>,
+    pub with_vectors: bool,
+}
+
+impl ScrollRequest {
+    pub fn new(limit: usize) -> Self {
+        Self {
+            cursor: None,
+            limit,
+            filter: None,
+            order_by: None,
+            with_vectors: false,
+        }
+    }
+
+    #[must_use]
+    pub fn cursor(mut self, cursor: impl Into<String>) -> Self {
+        self.cursor = Some(cursor.into());
+        self
+    }
+
+    #[must_use]
+    pub fn filter(mut self, filter: Value) -> Self {
+        self.filter = Some(filter);
+        self
+    }
+
+    #[must_use]
+    pub fn order_by(mut self, order_by: OrderBy) -> Self {
+        self.order_by = Some(order_by);
+        self
+    }
+
+    #[must_use]
+    pub fn with_vectors(mut self, yes: bool) -> Self {
+        self.with_vectors = yes;
+        self
+    }
 }
 
 /// Several searches whose rankings are fused into one (hybrid search).
@@ -177,7 +379,11 @@ impl SearchRequest {
 pub struct QueryRequest {
     pub prefetch: Vec<Prefetch>,
     pub fusion: Fusion,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rescore: Option<Rescore>,
     pub k: usize,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub offset: usize,
     /// Metadata filter applied to every search.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub filter: Option<Value>,
@@ -191,11 +397,31 @@ impl QueryRequest {
         Self {
             prefetch,
             fusion: Fusion::default(),
+            rescore: None,
             k,
+            offset: 0,
             filter: None,
             with_vectors: false,
             with_metadata: true,
         }
+    }
+
+    #[must_use]
+    pub fn fusion(mut self, fusion: Fusion) -> Self {
+        self.fusion = fusion;
+        self
+    }
+
+    #[must_use]
+    pub fn rescore(mut self, rescore: Rescore) -> Self {
+        self.rescore = Some(rescore);
+        self
+    }
+
+    #[must_use]
+    pub fn offset(mut self, offset: usize) -> Self {
+        self.offset = offset;
+        self
     }
 }
 
@@ -286,6 +512,8 @@ pub struct RecommendRequest {
     pub ef: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_distance: Option<f32>,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub offset: usize,
     pub with_vectors: bool,
     pub with_metadata: bool,
 }
@@ -301,6 +529,7 @@ impl RecommendRequest {
             filter: None,
             ef: None,
             max_distance: None,
+            offset: 0,
             with_vectors: false,
             with_metadata: true,
         }
@@ -579,6 +808,26 @@ impl Client {
         Self::json(self.request(Method::GET, &path).query(&query)).await
     }
 
+    pub async fn scroll_with(&self, collection: &str, req: &ScrollRequest) -> Result<ScrollPage> {
+        let path = format!("collections/{}/points/scroll", seg(collection));
+        Self::json(self.request(Method::POST, &path).json(req)).await
+    }
+
+    pub async fn facet(
+        &self,
+        collection: &str,
+        field: &str,
+        filter: Option<&Value>,
+        limit: usize,
+    ) -> Result<Vec<FacetCount>> {
+        let path = format!("collections/{}/points/facet", seg(collection));
+        let mut body = json!({ "field": field, "limit": limit });
+        if let Some(f) = filter {
+            body["filter"] = f.clone();
+        }
+        Self::field(self.request(Method::POST, &path).json(&body), "values").await
+    }
+
     /// Deletes points by id and returns how many existed.
     pub async fn delete_points(&self, collection: &str, ids: &[String]) -> Result<usize> {
         let path = format!("collections/{}/points/delete", seg(collection));
@@ -647,6 +896,16 @@ impl Client {
             "results",
         )
         .await
+    }
+
+    pub async fn search_groups(&self, collection: &str, req: &GroupSearchRequest) -> Result<Vec<HitGroup>> {
+        let path = format!("collections/{}/search/groups", seg(collection));
+        Self::field(self.request(Method::POST, &path).json(req), "groups").await
+    }
+
+    pub async fn discover(&self, collection: &str, req: &DiscoverRequest) -> Result<Vec<SearchHit>> {
+        let path = format!("collections/{}/discover", seg(collection));
+        Self::field(self.request(Method::POST, &path).json(req), "results").await
     }
 
     /// Recommends points from positive (and optionally negative) examples,

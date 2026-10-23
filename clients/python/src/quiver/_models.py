@@ -358,6 +358,68 @@ class Prefetch:
         return body
 
 
+Fusion = Literal["rrf", "relative_score", "dbsf"]
+"""How :meth:`Collection.query` combines its searches."""
+
+Direction = Literal["asc", "desc"]
+
+Example = str | Vector
+"""A point id, or a dense vector."""
+
+
+def as_example(example: Example) -> str | list[float]:
+    return example if isinstance(example, str) else as_list(example)
+
+
+@dataclass(frozen=True)
+class Rescore:
+    """Re-ranks the points :meth:`Collection.query` gathered by their distance to ``vector``."""
+
+    vector: Vector
+    using: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        body: dict[str, Any] = {"vector": as_list(self.vector)}
+        if self.using is not None:
+            body["using"] = self.using
+        return body
+
+
+@dataclass(frozen=True)
+class OrderBy:
+    """Orders :meth:`Collection.scroll` by a metadata field, then by id."""
+
+    field: str
+    direction: Direction = "asc"
+
+    def to_dict(self) -> dict[str, Any]:
+        return {"field": self.field, "direction": self.direction}
+
+
+@dataclass(frozen=True)
+class Group:
+    """The best hits sharing one value of the field :meth:`Collection.search_groups` groups by."""
+
+    key: Any
+    hits: list[SearchResult]
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> Group:
+        return cls(key=data["key"], hits=[SearchResult.from_dict(h) for h in data["hits"]])
+
+
+@dataclass(frozen=True)
+class FacetValue:
+    """How many points have one value of the field :meth:`Collection.facet` counts."""
+
+    value: Any
+    count: int
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> FacetValue:
+        return cls(value=data["value"], count=int(data["count"]))
+
+
 @dataclass(frozen=True)
 class CollectionInfo:
     """Configuration and statistics of a collection."""

@@ -292,7 +292,7 @@ async fn scroll_follows_cursors_in_id_order() {
         collection: "c".into(),
         cursor: cursor.into(),
         limit,
-        with_vectors: false,
+        ..Default::default()
     };
 
     let first = client.scroll(scroll("", 2)).await.unwrap().into_inner();
@@ -974,4 +974,411 @@ async fn binary_quantization_and_expiry_over_grpc() {
         .into_inner();
     assert_eq!(info.expiry, None);
     assert_eq!(db.collection("b").unwrap().config().expiry, None);
+}
+
+fn line_search(k: u32, offset: u32) -> pb::SearchRequest {
+    pb::SearchRequest {
+        collection: "c".into(),
+        vector: vec![0.0, 0.0],
+        k,
+        offset,
+        ..Default::default()
+    }
+}
+
+#[tokio::test]
+async fn offsets_page_through_searches_recommendations_and_queries() {
+    let mut client = start(line(), KeyStore::default()).await;
+    let page = client.search(line_search(3, 2)).await.unwrap().into_inner();
+    assert_eq!(ids(&page.hits), ["x2", "x3", "x4"]);
+
+    let batch = client
+        .search_batch(pb::SearchBatchRequest {
+            searches: vec![line_search(1, 0), line_search(1, 5)],
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(ids(&batch.results[1].hits), ["x5"]);
+
+    let rec = client
+        .recommend(pb::RecommendRequest {
+            collection: "c".into(),
+            positive: vec!["x0".into()],
+            k: 2,
+            offset: 1,
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    assert_eq!(ids(&rec.hits), ["x2", "x3"]);
+
+    let query = client
+        .query(pb::QueryRequest {
+            collection: "c".into(),
+            prefetch: vec![pb::Prefetch {
+                vector: vec![0.0, 0.0],
+                ..Default::default()
+            }],
+            k: 2,
+            offset: 3,
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_inner();
+    let got: Vec<&str> = query.hits.iter().map(|h| h.id.as_str()).collect();
+    assert_eq!(got, ["x3", "x4"]);
+
+    let err = client.search(line_search(10, 9_991)).await.unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn query_fusions_and_rescoring() {
+    let mut client = start(line(), KeyStore::default()).await;
+    let prefetch = |v: [f32; 2], limit| pb::Prefetch {
+        vector: v.to_vec(),
+        limit,
+        ..Default::default()
+    };
+    for fusion in [pb::Fusion::RelativeScore, pb::Fusion::Dbsf] {
+        let hits = client
+            .query(pb::QueryRequest {
+                collection: "c".into(),
+                prefetch: vec![prefetch([0.0, 0.0], 10)],
+                k: 3,
+                fusion: fusion as i32,
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .into_inner()
+            .hits;
+        let got: Vec<&str> = hits.iter().map(|h| h.id.as_str()).collect();
+        assert_eq!(got, ["x0", "x1", "x2"], "{fusion:?}");
+    }
+    let minmax = client
+        .query(pb::QueryRequest {
+            collection: "c".into(),
+            prefetch: vec![prefetch([0.0, 0.0], 10)],
+            k: 10,
+            fusion: pb::Fusion::RelativeScore as i32,
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .hits;
+    assert_eq!(minmax[0].score, 1.0);
+    assert_eq!(minmax[9].score, 0.0);
+
+    let rescored = client
+        .query(pb::QueryRequest {
+            collection: "c".into(),
+            prefetch: vec![prefetch([0.0, 0.0], 3)],
+            k: 10,
+            rescore: Some(pb::Rescore {
+                vector: vec![9.0, 0.0],
+                using: String::new(),
+            }),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .hits;
+    let got: Vec<&str> = rescored.iter().map(|h| h.id.as_str()).collect();
+    assert_eq!(got, ["x2", "x1", "x0"]);
+
+    let err = client
+        .query(pb::QueryRequest {
+            collection: "c".into(),
+            prefetch: vec![prefetch([0.0, 0.0], 3)],
+            fusion: pb::Fusion::Dbsf as i32,
+            rrf_k: Some(10),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
+    let err = client
+        .query(pb::QueryRequest {
+            collection: "c".into(),
+            prefetch: vec![prefetch([0.0, 0.0], 3)],
+            fusion: 99,
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn search_groups_over_grpc() {
+    let mut client = start(line(), KeyStore::default()).await;
+    let groups = client
+        .search_groups(pb::SearchGroupsRequest {
+            collection: "c".into(),
+            vector: vec![0.0, 0.0],
+            group_by: "even".into(),
+            groups: 2,
+            group_size: 2,
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .groups;
+    assert_eq!(groups.len(), 2);
+    assert_eq!(groups[0].key_json, "true");
+    assert_eq!(ids(&groups[0].hits), ["x0", "x2"]);
+    assert_eq!(groups[1].key_json, "false");
+    assert_eq!(ids(&groups[1].hits), ["x1", "x3"]);
+
+    let by_id = client
+        .search_groups(pb::SearchGroupsRequest {
+            collection: "c".into(),
+            id: "x0".into(),
+            group_by: "even".into(),
+            groups: 1,
+            group_size: 1,
+            filter_json: r#"{"i": {"$gte": 5}}"#.into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .groups;
+    assert_eq!(by_id[0].key_json, "false");
+    assert_eq!(ids(&by_id[0].hits), ["x5"]);
+
+    for bad in [
+        pb::SearchGroupsRequest {
+            collection: "c".into(),
+            vector: vec![0.0, 0.0],
+            ..Default::default()
+        },
+        pb::SearchGroupsRequest {
+            collection: "c".into(),
+            vector: vec![0.0, 0.0],
+            id: "x0".into(),
+            group_by: "even".into(),
+            ..Default::default()
+        },
+        pb::SearchGroupsRequest {
+            collection: "c".into(),
+            vector: vec![0.0, 0.0],
+            group_by: "even".into(),
+            groups: 1_000,
+            group_size: 1_000,
+            ..Default::default()
+        },
+    ] {
+        let err = client.search_groups(bad).await.unwrap_err();
+        assert_eq!(err.code(), Code::InvalidArgument);
+    }
+}
+
+#[tokio::test]
+async fn facets_over_grpc() {
+    let mut client = start(line(), KeyStore::default()).await;
+    let values = client
+        .facet(pb::FacetRequest {
+            collection: "c".into(),
+            field: "even".into(),
+            filter_json: r#"{"i": {"$lt": 3}}"#.into(),
+            limit: 0,
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .values;
+    let got: Vec<(&str, u64)> = values.iter().map(|v| (v.value_json.as_str(), v.count)).collect();
+    assert_eq!(got, [("true", 2), ("false", 1)]);
+
+    let err = client
+        .facet(pb::FacetRequest {
+            collection: "c".into(),
+            field: "even".into(),
+            limit: 1_001,
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn discover_over_grpc() {
+    let mut client = start(line(), KeyStore::default()).await;
+    let id = |id: &str| pb::Example {
+        example: Some(pb::example::Example::Id(id.into())),
+    };
+    let vector = |v: [f32; 2]| pb::Example {
+        example: Some(pb::example::Example::Vector(pb::DenseVector {
+            values: v.to_vec(),
+        })),
+    };
+    let hits = client
+        .discover(pb::DiscoverRequest {
+            collection: "c".into(),
+            target: Some(vector([5.0, 0.0])),
+            context: vec![pb::ContextPair {
+                positive: Some(id("x9")),
+                negative: Some(id("x0")),
+            }],
+            k: 2,
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .hits;
+    assert_eq!(ids(&hits), ["x5", "x6"]);
+
+    let context_only = client
+        .discover(pb::DiscoverRequest {
+            collection: "c".into(),
+            context: vec![pb::ContextPair {
+                positive: Some(vector([9.0, 0.0])),
+                negative: Some(vector([0.0, 0.0])),
+            }],
+            k: 2,
+            filter_json: r#"{"even": true}"#.into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap()
+        .into_inner()
+        .hits;
+    assert_eq!(ids(&context_only), ["x6", "x8"]);
+    assert!(context_only.iter().all(|h| h.distance == 0.0));
+
+    for bad in [
+        pb::DiscoverRequest {
+            collection: "c".into(),
+            ..Default::default()
+        },
+        pb::DiscoverRequest {
+            collection: "c".into(),
+            target: Some(pb::Example { example: None }),
+            ..Default::default()
+        },
+        pb::DiscoverRequest {
+            collection: "c".into(),
+            context: vec![pb::ContextPair {
+                positive: Some(id("x1")),
+                negative: None,
+            }],
+            ..Default::default()
+        },
+    ] {
+        let err = client.discover(bad).await.unwrap_err();
+        assert_eq!(err.code(), Code::InvalidArgument);
+    }
+    let err = client
+        .discover(pb::DiscoverRequest {
+            collection: "c".into(),
+            target: Some(id("nope")),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::NotFound);
+}
+
+#[tokio::test]
+async fn scroll_filters_and_orders_by_a_field() {
+    let mut client = start(line(), KeyStore::default()).await;
+    let mut cursor = String::new();
+    let mut seen = Vec::new();
+    loop {
+        let page = client
+            .scroll(pb::ScrollRequest {
+                collection: "c".into(),
+                limit: 2,
+                cursor: cursor.clone(),
+                filter_json: r#"{"even": true}"#.into(),
+                order_by: Some(pb::OrderBy {
+                    field: "i".into(),
+                    direction: pb::Direction::Desc as i32,
+                }),
+                ..Default::default()
+            })
+            .await
+            .unwrap()
+            .into_inner();
+        seen.extend(page.points.into_iter().map(|p| p.id));
+        match page.next_cursor {
+            Some(next) => cursor = next,
+            None => break,
+        }
+    }
+    assert_eq!(seen, ["x8", "x6", "x4", "x2", "x0"]);
+
+    let err = client
+        .scroll(pb::ScrollRequest {
+            collection: "c".into(),
+            limit: 2,
+            order_by: Some(pb::OrderBy {
+                field: "i".into(),
+                direction: 7,
+            }),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::InvalidArgument);
+}
+
+#[tokio::test]
+async fn new_read_rpcs_accept_read_only_keys() {
+    let mut client = start(line(), keys()).await;
+    let ro = |msg| with_auth(msg, "x-api-key", "ro-secret");
+    client
+        .facet(ro(pb::FacetRequest {
+            collection: "c".into(),
+            field: "even".into(),
+            ..Default::default()
+        }))
+        .await
+        .unwrap();
+    client
+        .search_groups(with_auth(
+            pb::SearchGroupsRequest {
+                collection: "c".into(),
+                vector: vec![0.0, 0.0],
+                group_by: "even".into(),
+                ..Default::default()
+            },
+            "x-api-key",
+            "ro-secret",
+        ))
+        .await
+        .unwrap();
+    client
+        .discover(with_auth(
+            pb::DiscoverRequest {
+                collection: "c".into(),
+                target: Some(pb::Example {
+                    example: Some(pb::example::Example::Id("x1".into())),
+                }),
+                ..Default::default()
+            },
+            "x-api-key",
+            "ro-secret",
+        ))
+        .await
+        .unwrap();
+    let err = client
+        .facet(pb::FacetRequest {
+            collection: "c".into(),
+            field: "even".into(),
+            ..Default::default()
+        })
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::Unauthenticated);
 }

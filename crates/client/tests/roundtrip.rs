@@ -420,3 +420,155 @@ async fn binary_quantization_and_expiry_roundtrip() {
     assert_eq!(info.config.expiry, None);
     assert_eq!(info.config.quantization, quiver_types::Quantization::Binary);
 }
+
+#[tokio::test]
+async fn groups_facets_scrolls_discovery_and_fusion() {
+    use quiver_client::{
+        ContextPair, DiscoverRequest, Example, Fusion, GroupSearchRequest, OrderBy, Prefetch, QueryRequest,
+        RecommendRequest, Rescore, ScrollRequest,
+    };
+
+    let server = start(KeyStore::default()).await;
+    let c = Client::new(&server.url).unwrap();
+    let config: CollectionConfig =
+        serde_json::from_value(json!({"dimension": 1, "metric": "euclidean", "index": {"type": "flat"}}))
+            .unwrap();
+    c.create_collection("line", &config).await.unwrap();
+    let points: Vec<PointInput> = (0..12)
+        .map(|i| {
+            serde_json::from_value(json!({
+                "id": format!("p{i:02}"),
+                "vector": [i as f32],
+                "metadata": {"doc": format!("d{}", i / 3), "n": i, "even": i % 2 == 0},
+            }))
+            .unwrap()
+        })
+        .collect();
+    c.upsert("line", points).await.unwrap();
+    let ids = |hits: &[quiver_types::SearchHit]| hits.iter().map(|h| h.id.clone()).collect::<Vec<_>>();
+
+    let page = c
+        .search("line", &SearchRequest::new(vec![0.0], 2).offset(3))
+        .await
+        .unwrap();
+    assert_eq!(ids(&page), ["p03", "p04"]);
+    let by_id = c
+        .search("line", &SearchRequest::by_id("p00", 1).offset(1))
+        .await
+        .unwrap();
+    assert_eq!(ids(&by_id), ["p02"]);
+    let batch = c
+        .search_batch("line", &[SearchRequest::new(vec![11.0], 1).offset(2)])
+        .await
+        .unwrap();
+    assert_eq!(ids(&batch[0]), ["p09"]);
+    let mut rec = RecommendRequest::new(vec!["p00".into()], 1);
+    rec.offset = 1;
+    assert_eq!(ids(&c.recommend("line", &rec).await.unwrap()), ["p02"]);
+
+    let groups = c
+        .search_groups("line", &GroupSearchRequest::new(vec![4.4], "doc", 2, 2))
+        .await
+        .unwrap();
+    assert_eq!(groups[0].key, json!("d1"));
+    assert_eq!(ids(&groups[0].hits), ["p04", "p05"]);
+    assert_eq!(groups[1].key, json!("d2"));
+    let by_id = c
+        .search_groups(
+            "line",
+            &GroupSearchRequest::by_id("p00", "even", 2, 1).filter(json!({"n": {"$lt": 5}})),
+        )
+        .await
+        .unwrap();
+    assert_eq!(by_id.len(), 2);
+    assert_eq!(ids(&by_id[0].hits), ["p01"]);
+
+    let facets = c.facet("line", "even", None, 10).await.unwrap();
+    assert_eq!(facets.len(), 2);
+    assert!(facets.iter().all(|f| f.count == 6));
+    let facets = c
+        .facet("line", "doc", Some(&json!({"n": {"$gte": 8}})), 1)
+        .await
+        .unwrap();
+    assert_eq!(facets[0].value, json!("d3"));
+    assert_eq!(facets[0].count, 3);
+
+    let mut req = ScrollRequest::new(5)
+        .order_by(OrderBy::desc("n"))
+        .filter(json!({"even": true}));
+    let mut seen = Vec::new();
+    loop {
+        let page = c.scroll_with("line", &req).await.unwrap();
+        seen.extend(page.points.into_iter().map(|p| p.id));
+        match page.next_cursor {
+            Some(cursor) => req = req.cursor(cursor),
+            None => break,
+        }
+    }
+    assert_eq!(seen, ["p10", "p08", "p06", "p04", "p02", "p00"]);
+    let page = c
+        .scroll_with("line", &ScrollRequest::new(1).with_vectors(true))
+        .await
+        .unwrap();
+    assert_eq!(page.points[0].vector, vec![0.0]);
+
+    let hits = c
+        .discover(
+            "line",
+            &DiscoverRequest::new(
+                Some(Example::Vector(vec![6.0])),
+                vec![ContextPair {
+                    positive: Example::Id("p11".into()),
+                    negative: Example::Vector(vec![0.0]),
+                }],
+                2,
+            ),
+        )
+        .await
+        .unwrap();
+    assert_eq!(ids(&hits), ["p06", "p07"]);
+    let err = c
+        .discover("line", &DiscoverRequest::new(None, Vec::new(), 1))
+        .await
+        .unwrap_err();
+    assert!(matches!(err, ClientError::Api { status, .. } if status == 400));
+
+    let fused = c
+        .query(
+            "line",
+            &QueryRequest::new(vec![Prefetch::dense(vec![0.0]).limit(4)], 2)
+                .fusion(Fusion::RelativeScore)
+                .offset(1),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        fused.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
+        ["p01", "p02"]
+    );
+    let rescored = c
+        .query(
+            "line",
+            &QueryRequest::new(vec![Prefetch::dense(vec![0.0]).limit(3)], 3)
+                .fusion(Fusion::Dbsf)
+                .rescore(Rescore {
+                    vector: vec![10.0],
+                    using: None,
+                }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        rescored.iter().map(|h| h.id.as_str()).collect::<Vec<_>>(),
+        ["p02", "p01", "p00"]
+    );
+
+    c.upsert(
+        "line",
+        vec![point("scroll", vec![1.0]), point("facet", vec![2.0])],
+    )
+    .await
+    .unwrap();
+    assert_eq!(c.get_point("line", "scroll").await.unwrap().unwrap().id, "scroll");
+    assert_eq!(c.get_point("line", "facet").await.unwrap().unwrap().id, "facet");
+}

@@ -50,6 +50,9 @@ service Quiver {
   rpc Recommend(RecommendRequest) returns (SearchResponse);
   // Hybrid search: several dense and sparse searches fused into one ranking.
   rpc Query(QueryRequest) returns (QueryResponse);
+  rpc SearchGroups(SearchGroupsRequest) returns (SearchGroupsResponse);
+  rpc Discover(DiscoverRequest) returns (SearchResponse);
+  rpc Facet(FacetRequest) returns (FacetResponse);
 
   // Snapshots
   rpc CreateSnapshot(CreateSnapshotRequest) returns (SnapshotInfo);
@@ -341,6 +344,18 @@ message ScrollRequest {
   bool with_vectors = 4;
   // Exclusive: start after this id. Empty means from the start.
   string cursor = 5;
+  string filter_json = 6;
+  OrderBy order_by = 7;
+}
+
+enum Direction {
+  DIRECTION_ASC = 0;
+  DIRECTION_DESC = 1;
+}
+
+message OrderBy {
+  string field = 1;
+  Direction direction = 2;
 }
 message ScrollResponse {
   reserved 2;
@@ -371,6 +386,7 @@ message SearchRequest {
   // Search the sparse vector `using` with this. Hits' distances are their
   // negated scores.
   SparseVector sparse = 11;
+  uint32 offset = 12;
 }
 message SearchResponse {
   repeated SearchHit hits = 1;
@@ -401,6 +417,7 @@ message RecommendRequest {
   optional bool with_metadata = 9;
   // The named vector to compare; empty means the main one.
   string using = 10;
+  uint32 offset = 11;
 }
 
 // One search whose ranking a query fuses. Give exactly one of `vector` and `sparse`.
@@ -432,6 +449,87 @@ message QueryRequest {
   bool with_vectors = 6;
   // Defaults to true when unset.
   optional bool with_metadata = 7;
+  Fusion fusion = 8;
+  Rescore rescore = 9;
+  uint32 offset = 10;
+}
+
+enum Fusion {
+  FUSION_RRF = 0;
+  FUSION_RELATIVE_SCORE = 1;
+  FUSION_DBSF = 2;
+}
+
+message Rescore {
+  repeated float vector = 1;
+  string using = 2;
+}
+
+message SearchGroupsRequest {
+  string collection = 1;
+  repeated float vector = 2;
+  string id = 3;
+  SparseVector sparse = 4;
+  string using = 5;
+  string group_by = 6;
+  uint32 groups = 7;
+  uint32 group_size = 8;
+  string filter_json = 9;
+  optional uint32 ef = 10;
+  optional float max_distance = 11;
+  bool with_vectors = 12;
+  optional bool with_metadata = 13;
+}
+
+message HitGroup {
+  string key_json = 1;
+  repeated SearchHit hits = 2;
+}
+
+message SearchGroupsResponse {
+  repeated HitGroup groups = 1;
+}
+
+message Example {
+  oneof example {
+    string id = 1;
+    DenseVector vector = 2;
+  }
+}
+
+message ContextPair {
+  Example positive = 1;
+  Example negative = 2;
+}
+
+message DiscoverRequest {
+  string collection = 1;
+  Example target = 2;
+  repeated ContextPair context = 3;
+  string using = 4;
+  uint32 k = 5;
+  uint32 offset = 6;
+  string filter_json = 7;
+  optional uint32 ef = 8;
+  optional float max_distance = 9;
+  bool with_vectors = 10;
+  optional bool with_metadata = 11;
+}
+
+message FacetRequest {
+  string collection = 1;
+  string field = 2;
+  string filter_json = 3;
+  uint32 limit = 4;
+}
+
+message FacetValue {
+  string value_json = 1;
+  uint64 count = 2;
+}
+
+message FacetResponse {
+  repeated FacetValue values = 1;
 }
 
 message ScoredHit {

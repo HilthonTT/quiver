@@ -15,16 +15,22 @@ from . import _protocol as proto
 from ._errors import ConflictError, NotFoundError, QuiverConnectionError
 from ._models import (
     CollectionInfo,
+    Example,
     Expiry,
+    FacetValue,
     Filter,
+    Fusion,
+    Group,
     Index,
     Metadata,
     MetadataMode,
     Metric,
+    OrderBy,
     Point,
     PointLike,
     Prefetch,
     Quantization,
+    Rescore,
     ScoredResult,
     ScrollPage,
     SearchResult,
@@ -378,7 +384,13 @@ class Collection:
         return self._client._run(proto.lookup(self.name, ids, with_vectors))
 
     def scroll(
-        self, cursor: str | None = None, *, limit: int = 100, with_vectors: bool = False
+        self,
+        cursor: str | None = None,
+        *,
+        limit: int = 100,
+        with_vectors: bool = False,
+        filter: Filter | None = None,
+        order_by: str | OrderBy | None = None,
     ) -> ScrollPage:
         """Fetches up to ``limit`` points with ids after ``cursor``, in ascending id order.
 
@@ -386,13 +398,30 @@ class Collection:
         after the last one. Points changed between pages are never skipped or
         repeated.
         """
-        return self._client._run(proto.scroll(self.name, cursor, limit, with_vectors))
+        if filter is None and order_by is None:
+            return self._client._run(proto.scroll(self.name, cursor, limit, with_vectors))
+        order = OrderBy(order_by) if isinstance(order_by, str) else order_by
+        call = proto.scroll_with(self.name, cursor, limit, with_vectors, filter, order)
+        return self._client._run(call)
 
-    def iter_points(self, *, page_size: int = 500, with_vectors: bool = False) -> Iterator[Point]:
+    def iter_points(
+        self,
+        *,
+        page_size: int = 500,
+        with_vectors: bool = False,
+        filter: Filter | None = None,
+        order_by: str | OrderBy | None = None,
+    ) -> Iterator[Point]:
         """Iterates over every point in the collection in id order, page by page."""
         cursor: str | None = None
         while True:
-            page = self.scroll(cursor, limit=page_size, with_vectors=with_vectors)
+            page = self.scroll(
+                cursor,
+                limit=page_size,
+                with_vectors=with_vectors,
+                filter=filter,
+                order_by=order_by,
+            )
             yield from page.points
             if page.next_cursor is None:
                 return
@@ -436,6 +465,7 @@ class Collection:
         vector: Vector,
         k: int = 10,
         *,
+        offset: int = 0,
         filter: Filter | None = None,
         ef: int | None = None,
         max_distance: float | None = None,
@@ -465,6 +495,7 @@ class Collection:
             with_metadata,
             max_distance=max_distance,
             using=using,
+            offset=offset,
         )
         return self._client._run(proto.search(self.name, body))
 
@@ -473,6 +504,7 @@ class Collection:
         id: str,
         k: int = 10,
         *,
+        offset: int = 0,
         filter: Filter | None = None,
         ef: int | None = None,
         max_distance: float | None = None,
@@ -486,7 +518,7 @@ class Collection:
         Raises :class:`NotFoundError` (code ``point_not_found``) if it does not exist.
         """
         options = proto.search_options(
-            k, filter, ef, max_distance, with_vectors, with_metadata, using
+            k, filter, ef, max_distance, with_vectors, with_metadata, using, offset
         )
         body = proto.search_by_id_body(id, options)
         return self._client._run(proto.search(self.name, body))
@@ -497,6 +529,7 @@ class Collection:
         negative: str | Sequence[str] = (),
         k: int = 10,
         *,
+        offset: int = 0,
         filter: Filter | None = None,
         ef: int | None = None,
         max_distance: float | None = None,
@@ -511,7 +544,7 @@ class Collection:
         themselves are never returned.
         """
         options = proto.search_options(
-            k, filter, ef, max_distance, with_vectors, with_metadata, using
+            k, filter, ef, max_distance, with_vectors, with_metadata, using, offset
         )
         return self._client._run(proto.recommend(self.name, positive, negative, options))
 
@@ -520,6 +553,7 @@ class Collection:
         vectors: Sequence[Vector],
         k: int = 10,
         *,
+        offset: int = 0,
         filter: Filter | None = None,
         ef: int | None = None,
         with_vectors: bool = False,
@@ -528,7 +562,9 @@ class Collection:
     ) -> list[list[SearchResult]]:
         """Runs several searches in one round trip (max 256)."""
         bodies = [
-            proto.search_body(v, k, filter, ef, with_vectors, with_metadata, using=using)
+            proto.search_body(
+                v, k, filter, ef, with_vectors, with_metadata, using=using, offset=offset
+            )
             for v in vectors
         ]
         return self._client._run(proto.search_batch(self.name, bodies))
@@ -538,6 +574,7 @@ class Collection:
         vector: SparseLike,
         k: int = 10,
         *,
+        offset: int = 0,
         using: str,
         filter: Filter | None = None,
         max_distance: float | None = None,
@@ -554,7 +591,7 @@ class Collection:
         is ``"idf"``); each hit's ``distance`` is its negated score.
         """
         options = proto.search_options(
-            k, filter, None, max_distance, with_vectors, with_metadata, using
+            k, filter, None, max_distance, with_vectors, with_metadata, using, offset
         )
         body = proto.sparse_search_body(vector, options)
         return self._client._run(proto.search(self.name, body))
@@ -564,8 +601,11 @@ class Collection:
         prefetch: Sequence[Prefetch],
         k: int = 10,
         *,
+        offset: int = 0,
         filter: Filter | None = None,
         rrf_k: int = 60,
+        fusion: Fusion = "rrf",
+        rescore: Rescore | None = None,
         with_vectors: bool = False,
         with_metadata: bool = True,
     ) -> list[ScoredResult]:
@@ -576,8 +616,69 @@ class Collection:
 
         >>> docs.query([Prefetch(vector=embedding), Prefetch(sparse={17: 1.0}, using="text")])
         """
-        call = proto.query(self.name, prefetch, k, filter, rrf_k, with_vectors, with_metadata)
+        call = proto.query(
+            self.name,
+            prefetch,
+            k,
+            filter,
+            rrf_k,
+            with_vectors,
+            with_metadata,
+            fusion=fusion,
+            rescore=rescore,
+            offset=offset,
+        )
         return self._client._run(call)
+
+    def facet(
+        self, field: str, *, filter: Filter | None = None, limit: int = 10
+    ) -> list[FacetValue]:
+        """Counts the points per value of ``field``, most common first."""
+        return self._client._run(proto.facet(self.name, field, filter, limit))
+
+    def search_groups(
+        self,
+        vector: Vector | None = None,
+        *,
+        group_by: str,
+        groups: int = 10,
+        group_size: int = 3,
+        id: str | None = None,
+        sparse: SparseLike | None = None,
+        using: str | None = None,
+        filter: Filter | None = None,
+        ef: int | None = None,
+        max_distance: float | None = None,
+        with_vectors: bool = False,
+        with_metadata: bool = True,
+    ) -> list[Group]:
+        """The best ``group_size`` hits for each of the ``groups`` best ``group_by`` values."""
+        target = proto.search_target(vector, id, sparse)
+        options = proto.search_options(
+            1, filter, ef, max_distance, with_vectors, with_metadata, using
+        )
+        call = proto.search_groups(self.name, target, group_by, groups, group_size, options)
+        return self._client._run(call)
+
+    def discover(
+        self,
+        target: Example | None = None,
+        context: Sequence[tuple[Example, Example]] = (),
+        k: int = 10,
+        *,
+        offset: int = 0,
+        filter: Filter | None = None,
+        ef: int | None = None,
+        max_distance: float | None = None,
+        with_vectors: bool = False,
+        with_metadata: bool = True,
+        using: str | None = None,
+    ) -> list[SearchResult]:
+        """Finds points on the positive side of each context pair, nearest ``target`` first."""
+        options = proto.search_options(
+            k, filter, ef, max_distance, with_vectors, with_metadata, using, offset
+        )
+        return self._client._run(proto.discover(self.name, target, context, options))
 
     def update(
         self,

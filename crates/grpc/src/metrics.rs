@@ -10,7 +10,7 @@ use quiver_db::Database;
 use tonic::codegen::http;
 
 /// Every RPC of `quiver.v1.Quiver`. Only these become metric labels.
-const METHODS: [&str; 32] = [
+const METHODS: [&str; 35] = [
     "Health",
     "Info",
     "ListCollections",
@@ -36,6 +36,9 @@ const METHODS: [&str; 32] = [
     "SearchBatch",
     "Recommend",
     "Query",
+    "SearchGroups",
+    "Discover",
+    "Facet",
     "CreateSnapshot",
     "ListSnapshots",
     "GetSnapshot",

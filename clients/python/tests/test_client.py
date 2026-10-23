@@ -21,9 +21,12 @@ from quiver import (
     InvalidRequestError,
     KDTree,
     NotFoundError,
+    OrderBy,
     PermissionDeniedError,
     Point,
+    Prefetch,
     QuiverConnectionError,
+    Rescore,
     ScrollPage,
     SearchResult,
     ServerError,
@@ -139,7 +142,7 @@ def test_get_returns_none_when_missing(client: Client, mock: Recorder) -> None:
     assert client.collection("docs").get("nope") is None
 
 
-@pytest.mark.parametrize("point_id", ["lookup", "delete", "count", "metadata"])
+@pytest.mark.parametrize("point_id", ["lookup", "delete", "count", "metadata", "scroll", "facet"])
 def test_ids_taken_by_fixed_routes_are_fetched_by_lookup(
     client: Client, async_client: AsyncClient, mock: Recorder, point_id: str
 ) -> None:
@@ -250,6 +253,32 @@ def _data_ops_routes(mock: Recorder) -> None:
     mock.on("POST", "/collections/docs/points/metadata", 200, {"updated": 1})
     mock.on("POST", "/collections/docs/search", 200, hit)
     mock.on("POST", "/collections/docs/recommend", 200, hit)
+    mock.on("POST", "/collections/docs/discover", 200, hit)
+    mock.on("POST", "/collections/docs/search/batch", 200, {"results": [hit["results"]]})
+    mock.on(
+        "POST",
+        "/collections/docs/query",
+        200,
+        {"results": [{"id": "b", "score": 0.5}]},
+    )
+    mock.on(
+        "POST",
+        "/collections/docs/search/groups",
+        200,
+        {"groups": [{"key": "sf", "hits": hit["results"]}]},
+    )
+    mock.on(
+        "POST",
+        "/collections/docs/points/facet",
+        200,
+        {"values": [{"value": "sf", "count": 2}]},
+    )
+    mock.on(
+        "POST",
+        "/collections/docs/points/scroll",
+        200,
+        {"points": [{"id": "b"}], "next_cursor": '[1965,"b"]'},
+    )
 
 
 # Each data operation, its result from the routes above, and the body it must send.
@@ -312,11 +341,195 @@ DATA_OPS: list[tuple[str, tuple[Any, ...], dict[str, Any], Any, dict[str, Any]]]
             "max_distance": 1.0,
         },
     ),
+    (
+        "search",
+        ([1, 0],),
+        {"k": 3, "offset": 6},
+        "b",
+        {"vector": [1.0, 0.0], "k": 3, "offset": 6, "with_vectors": False, "with_metadata": True},
+    ),
+    (
+        "search_batch",
+        ([[1, 0]],),
+        {"offset": 2},
+        "b",
+        {
+            "searches": [
+                {
+                    "vector": [1.0, 0.0],
+                    "k": 10,
+                    "offset": 2,
+                    "with_vectors": False,
+                    "with_metadata": True,
+                }
+            ]
+        },
+    ),
+    (
+        "search_sparse",
+        ({3: 1.0},),
+        {"using": "text", "offset": 1},
+        "b",
+        {
+            "sparse": {"indices": [3], "values": [1.0]},
+            "k": 10,
+            "offset": 1,
+            "using": "text",
+            "with_vectors": False,
+            "with_metadata": True,
+        },
+    ),
+    (
+        "recommend",
+        ("a",),
+        {"offset": 4},
+        "b",
+        {
+            "positive": ["a"],
+            "negative": [],
+            "k": 10,
+            "offset": 4,
+            "with_vectors": False,
+            "with_metadata": True,
+        },
+    ),
+    (
+        "query",
+        ([Prefetch(vector=[1, 0], limit=5)],),
+        {"fusion": "dbsf", "offset": 1},
+        "b",
+        {
+            "prefetch": [{"vector": [1.0, 0.0], "weight": 1.0, "limit": 5}],
+            "fusion": {"type": "dbsf"},
+            "k": 10,
+            "offset": 1,
+            "with_vectors": False,
+            "with_metadata": True,
+        },
+    ),
+    (
+        "query",
+        ([Prefetch(vector=[1, 0])],),
+        {"rescore": Rescore([0, 1, 0], using="fine"), "rrf_k": 10},
+        "b",
+        {
+            "prefetch": [{"vector": [1.0, 0.0], "weight": 1.0}],
+            "fusion": {"type": "rrf", "k": 10},
+            "rescore": {"vector": [0.0, 1.0, 0.0], "using": "fine"},
+            "k": 10,
+            "with_vectors": False,
+            "with_metadata": True,
+        },
+    ),
+    (
+        "search_groups",
+        (np.array([1, 0]),),
+        {"group_by": "genre", "groups": 2, "group_size": 1, "filter": {"year": {"$gt": 1}}},
+        "sf",
+        {
+            "vector": [1.0, 0.0],
+            "group_by": "genre",
+            "groups": 2,
+            "group_size": 1,
+            "with_vectors": False,
+            "with_metadata": True,
+            "filter": {"year": {"$gt": 1}},
+        },
+    ),
+    (
+        "search_groups",
+        (),
+        {"id": "a", "group_by": "genre"},
+        "sf",
+        {
+            "id": "a",
+            "group_by": "genre",
+            "groups": 10,
+            "group_size": 3,
+            "with_vectors": False,
+            "with_metadata": True,
+        },
+    ),
+    (
+        "search_groups",
+        (),
+        {"sparse": {1: 2.0}, "using": "text", "group_by": "genre"},
+        "sf",
+        {
+            "sparse": {"indices": [1], "values": [2.0]},
+            "group_by": "genre",
+            "groups": 10,
+            "group_size": 3,
+            "using": "text",
+            "with_vectors": False,
+            "with_metadata": True,
+        },
+    ),
+    (
+        "facet",
+        ("genre",),
+        {"filter": {"title": {"$text": "dune"}}, "limit": 5},
+        "sf",
+        {"field": "genre", "limit": 5, "filter": {"title": {"$text": "dune"}}},
+    ),
+    (
+        "discover",
+        ("a", [("b", np.array([0.5, 0.5]))]),
+        {"k": 2, "offset": 1},
+        "b",
+        {
+            "target": "a",
+            "context": [{"positive": "b", "negative": [0.5, 0.5]}],
+            "k": 2,
+            "offset": 1,
+            "with_vectors": False,
+            "with_metadata": True,
+        },
+    ),
+    (
+        "discover",
+        (None, [([1, 0], "c")]),
+        {},
+        "b",
+        {
+            "context": [{"positive": [1.0, 0.0], "negative": "c"}],
+            "k": 10,
+            "with_vectors": False,
+            "with_metadata": True,
+        },
+    ),
+    (
+        "scroll",
+        (),
+        {"order_by": "year", "limit": 1},
+        (["b"], '[1965,"b"]'),
+        {"limit": 1, "with_vectors": False, "order_by": {"field": "year", "direction": "asc"}},
+    ),
+    (
+        "scroll",
+        ('[1965,"b"]',),
+        {"order_by": OrderBy("year", "desc"), "filter": {"tags": {"$all": ["a"]}}},
+        (["b"], '[1965,"b"]'),
+        {
+            "limit": 100,
+            "with_vectors": False,
+            "cursor": '[1965,"b"]',
+            "filter": {"tags": {"$all": ["a"]}},
+            "order_by": {"field": "year", "direction": "desc"},
+        },
+    ),
 ]
 
 
 def _summary(result: Any) -> Any:
-    return result[0].id if isinstance(result, list) else result
+    if isinstance(result, ScrollPage):
+        return [p.id for p in result.points], result.next_cursor
+    if isinstance(result, list) and result:
+        first = result[0][0] if isinstance(result[0], list) else result[0]
+        for attr in ("id", "key", "value"):
+            if hasattr(first, attr):
+                return getattr(first, attr)
+    return result
 
 
 @pytest.mark.parametrize(("method", "args", "kwargs", "expected", "body"), DATA_OPS)
@@ -574,3 +787,43 @@ def test_tls_options(tmp_path: Path) -> None:
         Client("https://localhost:6900", ca_cert=tmp_path / "missing.pem")
     with pytest.raises(OSError):
         AsyncClient("https://localhost:6900", client_cert=tmp_path / "missing.pem")
+
+
+def test_unfiltered_scroll_keeps_the_get_endpoint(client: Client, mock: Recorder) -> None:
+    mock.on("GET", "/collections/docs/points", 200, {"points": [], "next_cursor": None})
+    client.collection("docs").scroll(limit=5)
+    assert mock.requests[-1].method == "GET"
+
+
+def test_iter_points_passes_ordering_through(client: Client, mock: Recorder) -> None:
+    pages = iter(
+        [
+            {"points": [{"id": "x"}], "next_cursor": '[1,"x"]'},
+            {"points": [{"id": "y"}], "next_cursor": None},
+        ]
+    )
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        mock.requests.append(request)
+        return httpx.Response(200, json=next(pages))
+
+    http = httpx.Client(base_url="http://test", transport=httpx.MockTransport(handler))
+    col = Client(http_client=http).collection("docs")
+    ids = [p.id for p in col.iter_points(page_size=1, order_by=OrderBy("n", "desc"))]
+    assert ids == ["x", "y"]
+    assert mock.last_json() == {
+        "limit": 1,
+        "with_vectors": False,
+        "cursor": '[1,"x"]',
+        "order_by": {"field": "n", "direction": "desc"},
+    }
+
+
+def test_new_searches_validate_their_targets(client: Client) -> None:
+    col = client.collection("docs")
+    with pytest.raises(ValueError):
+        col.search_groups(group_by="g")
+    with pytest.raises(ValueError):
+        col.search_groups([1, 0], id="a", group_by="g")
+    with pytest.raises(ValueError):
+        col.search_groups(sparse={1: 1.0}, group_by="g")
