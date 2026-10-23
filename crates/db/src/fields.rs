@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::ops::Bound;
 
 use quiver_storage::VectorStore;
-use quiver_types::filter::Condition;
+use quiver_types::filter::{Condition, tokenize};
 use quiver_types::{Filter, MAX_FIELD_INDEXES, Result, validate_field_path};
 use serde_json::Value;
 
@@ -56,6 +56,7 @@ struct FieldIndex {
     path: Vec<String>,
     nums: BTreeMap<Num, Vec<u32>>,
     strs: BTreeMap<String, Vec<u32>>,
+    tokens: BTreeMap<String, Vec<u32>>,
     bools: [Vec<u32>; 2],
     nulls: Vec<u32>,
     /// Slots where the field exists, whatever its value.
@@ -69,6 +70,7 @@ impl FieldIndex {
             path: name.split('.').map(str::to_owned).collect(),
             nums: BTreeMap::new(),
             strs: BTreeMap::new(),
+            tokens: BTreeMap::new(),
             bools: [Vec::new(), Vec::new()],
             nulls: Vec::new(),
             present: Vec::new(),
@@ -98,7 +100,12 @@ impl FieldIndex {
                     self.nums.entry(Num::new(x)).or_default().push(slot);
                 }
             }
-            Value::String(s) => self.strs.entry(s.clone()).or_default().push(slot),
+            Value::String(s) => {
+                self.strs.entry(s.clone()).or_default().push(slot);
+                for token in tokenize(s) {
+                    self.tokens.entry(token).or_default().push(slot);
+                }
+            }
             Value::Array(_) | Value::Object(_) => {}
         }
     }
@@ -160,10 +167,45 @@ impl FieldIndex {
                     _ => return None,
                 }
             }
+            Condition::Prefix(p) => self
+                .strs
+                .range::<str, _>((Bound::Included(p.as_str()), Bound::Unbounded))
+                .take_while(|(s, _)| s.starts_with(p.as_str()))
+                .for_each(|(_, slots)| out.extend(slots)),
+            Condition::Text(tokens) => return self.all_of(tokens.iter().map(|t| self.token(t))),
+            Condition::All(values) => {
+                return self.all_of(values.iter().map(|v| {
+                    let mut slots = Vec::new();
+                    self.equal(v, &mut slots).map(|()| slots)
+                }));
+            }
+            Condition::Regex(_)
+            | Condition::Size(_)
+            | Condition::ElemMatch(_)
+            | Condition::GeoRadius { .. }
+            | Condition::GeoBox { .. } => out.extend(&self.present),
             // Negations match points the index has no entry for.
             Condition::Ne(_) | Condition::Nin(_) | Condition::Exists(false) => return None,
         }
         Some(out)
+    }
+
+    fn token(&self, token: &str) -> Option<Vec<u32>> {
+        Some(self.tokens.get(token).cloned().unwrap_or_default())
+    }
+
+    fn all_of(&self, lists: impl Iterator<Item = Option<Vec<u32>>>) -> Option<Vec<u32>> {
+        let mut acc: Option<Vec<u32>> = None;
+        for list in lists {
+            let mut slots = list?;
+            slots.sort_unstable();
+            slots.dedup();
+            acc = Some(match acc {
+                None => slots,
+                Some(a) => intersect(&a, &slots),
+            });
+        }
+        acc
     }
 }
 
@@ -403,6 +445,42 @@ mod tests {
         ] {
             assert_eq!(check(&idx, &s, unplannable.clone()), None, "{unplannable}");
         }
+    }
+
+    #[test]
+    fn new_operators_use_the_index() {
+        let s = store(&[
+            json!({"t": "Dune Messiah", "tags": ["a", "b"], "loc": {"lat": 1, "lon": 1}}),
+            json!({"t": "Children of Dune", "tags": ["a"], "loc": [{"lat": 5, "lon": 5}]}),
+            json!({"t": "The Hobbit", "tags": "b"}),
+            json!({"other": 1}),
+        ]);
+        let idx = FieldIndexes::build(&["t".into(), "tags".into(), "loc".into()], &s);
+        assert_eq!(check(&idx, &s, json!({"t": {"$text": "dune"}})), Some(vec![0, 1]));
+        assert_eq!(check(&idx, &s, json!({"t": {"$text": "dune of"}})), Some(vec![1]));
+        assert_eq!(check(&idx, &s, json!({"t": {"$text": "nothing"}})), Some(vec![]));
+        assert_eq!(check(&idx, &s, json!({"t": {"$prefix": "Dune"}})), Some(vec![0]));
+        assert_eq!(
+            check(&idx, &s, json!({"t": {"$regex": "Hob"}})),
+            Some(vec![0, 1, 2])
+        );
+        assert_eq!(
+            check(&idx, &s, json!({"tags": {"$all": ["a", "b"]}})),
+            Some(vec![0])
+        );
+        assert_eq!(
+            check(&idx, &s, json!({"tags": {"$size": 1}})),
+            Some(vec![0, 1, 2])
+        );
+        assert_eq!(
+            check(
+                &idx,
+                &s,
+                json!({"loc": {"$geoRadius": {"center": {"lat": 1, "lon": 1}, "meters": 10}}})
+            ),
+            Some(vec![0, 1])
+        );
+        assert_eq!(check(&idx, &s, json!({"tags": {"$all": [{"x": 1}]}})), None);
     }
 
     #[test]
