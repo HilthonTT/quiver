@@ -106,17 +106,23 @@ fn parse_frames(buf: &[u8]) -> std::result::Result<(Vec<Mutation>, usize), usize
     let mut pos = 0;
 
     while buf.len() - pos >= 8 {
-        let zero_tail = || buf[pos..].iter().all(|&b| b == 0);
+        let zero_from = |from: usize| buf[from..].iter().all(|&b| b == 0);
         let len = u32::from_le_bytes(buf[pos..pos + 4].try_into().expect("4 bytes")) as usize;
         let crc = u32::from_le_bytes(buf[pos + 4..pos + 8].try_into().expect("4 bytes"));
         let start = pos + 8;
-        if len > MAX_FRAME || buf.len() - start < len {
+        if len > MAX_FRAME {
+            if zero_from(start) {
+                break;
+            }
+            return Err(pos);
+        }
+        if buf.len() - start < len {
             break;
         }
         let end = start + len;
         let payload = &buf[start..end];
         if crc32fast::hash(payload) != crc {
-            if end == buf.len() || zero_tail() {
+            if zero_from(end) {
                 break;
             }
             return Err(pos);
@@ -124,7 +130,7 @@ fn parse_frames(buf: &[u8]) -> std::result::Result<(Vec<Mutation>, usize), usize
         match serde_json::from_slice(payload) {
             Ok(entry) => entries.push(entry),
             // A zero header has a valid checksum (crc32 of nothing is 0).
-            Err(_) if zero_tail() => break,
+            Err(_) if zero_from(pos) => break,
             // Any other checksum-valid frame was written completely, so
             // failing to parse it is corruption, never a torn write.
             Err(_) => return Err(pos),
@@ -255,6 +261,36 @@ mod tests {
         let (_, entries) = Wal::open(&path, false).unwrap();
         assert_eq!(entries.len(), 3);
         assert_eq!(std::fs::metadata(&path).unwrap().len() as usize, valid);
+    }
+
+    #[test]
+    fn zeros_starting_inside_a_frame_are_a_torn_tail() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.log");
+        let mut bytes = three_frames(&path);
+        let second = bytes.len() / 3;
+        for b in &mut bytes[second + 12..] {
+            *b = 0;
+        }
+        std::fs::write(&path, &bytes).unwrap();
+
+        let (_, entries) = Wal::open(&path, false).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(std::fs::metadata(&path).unwrap().len() as usize, second);
+    }
+
+    #[test]
+    fn oversized_length_before_later_frames_is_reported_and_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.log");
+        let mut bytes = three_frames(&path);
+        let second = bytes.len() / 3;
+        bytes[second + 3] ^= 0x80;
+        std::fs::write(&path, &bytes).unwrap();
+
+        let err = Wal::open(&path, false).unwrap_err();
+        assert!(matches!(err, Error::Corrupt(_)), "{err:?}");
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
     }
 
     #[test]
