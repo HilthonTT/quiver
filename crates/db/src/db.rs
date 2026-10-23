@@ -8,7 +8,7 @@ use quiver_snapshot::{SnapshotInfo, SnapshotRegistry};
 use quiver_storage::{StorageKind, StorageOptions, state};
 use quiver_types::{CollectionConfig, CollectionInfo, CollectionUpdate, Error, Result, validate_name};
 
-use crate::collection::{Collection, Env, META_FILE};
+use crate::collection::{Collection, Env, META_FILE, with_expiry_field};
 use crate::fields::FieldIndexes;
 use crate::metrics::Metrics;
 
@@ -220,7 +220,7 @@ impl Database {
         config: CollectionConfig,
         field_indexes: &[String],
     ) -> Result<Arc<Collection>> {
-        FieldIndexes::validate(field_indexes)?;
+        FieldIndexes::validate(&with_expiry_field(&config, field_indexes.to_vec()))?;
         let collection = self.create_collection(name, config)?;
         for field in field_indexes {
             collection.create_field_index(field)?;

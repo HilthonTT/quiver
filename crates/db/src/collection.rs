@@ -120,7 +120,7 @@ impl Inner {
 }
 
 /// `names` with the field holding expiry times, which must be indexed.
-fn with_expiry_field(config: &CollectionConfig, mut names: Vec<String>) -> Vec<String> {
+pub(crate) fn with_expiry_field(config: &CollectionConfig, mut names: Vec<String>) -> Vec<String> {
     if let Some(e) = &config.expiry
         && !names.contains(&e.field)
     {
@@ -785,7 +785,7 @@ impl Collection {
     }
 
     pub fn scroll_with(&self, opts: &ScrollOptions) -> Result<ScrollPage> {
-        let inner = self.inner.read();
+        let inner = self.read()?;
         let now = expiry::now();
         let store = &inner.store;
         let Some(order) = &opts.order_by else {
@@ -857,7 +857,7 @@ impl Collection {
 
     /// The `k` points nearest to `vector` in the dense vector `opts.using`.
     pub fn search_with(&self, vector: &[f32], k: usize, opts: &SearchOptions) -> Result<Vec<SearchHit>> {
-        let inner = self.inner.read();
+        let inner = self.read()?;
         let using = opts.using.as_deref();
         let config = inner.config.dense(using)?;
         let mut query = vector.to_vec();
@@ -869,7 +869,7 @@ impl Collection {
     /// Searches with the stored vector of point `id`, leaving that point out
     /// of the results.
     pub fn search_by_id(&self, id: &str, k: usize, opts: &SearchOptions) -> Result<Vec<SearchHit>> {
-        let inner = self.inner.read();
+        let inner = self.read()?;
         let using = opts.using.as_deref();
         let config = inner.config.dense(using)?;
         let slot = inner
@@ -898,7 +898,7 @@ impl Collection {
     ) -> Result<Vec<SearchHit>> {
         let mut query = vector.clone();
         query.normalize()?;
-        let inner = self.inner.read();
+        let inner = self.read()?;
         inner.config.sparse(name)?;
         let found = search_sparse(&inner, name, &query, k, opts);
         Ok(hits(&inner.store, found, opts))
@@ -914,7 +914,7 @@ impl Collection {
         if group.groups == 0 || group.group_size == 0 {
             return Err(Error::invalid("`groups` and `group_size` must be at least 1"));
         }
-        let inner = self.inner.read();
+        let inner = self.read()?;
         let opts = SearchOptions {
             offset: 0,
             ..opts.clone()
@@ -979,7 +979,7 @@ impl Collection {
 
     pub fn facet(&self, field: &str, filter: Option<&Filter>, limit: usize) -> Result<Vec<FacetCount>> {
         validate_field_path(field)?;
-        let inner = self.inner.read();
+        let inner = self.read()?;
         let now = expiry::now();
         let path = grouping::split_path(field);
         let mut facets = Facets::default();
@@ -1003,7 +1003,7 @@ impl Collection {
         if target.is_none() && context.is_empty() {
             return Err(Error::invalid("discover needs a target, context pairs or both"));
         }
-        let inner = self.inner.read();
+        let inner = self.read()?;
         let using = opts.using.as_deref();
         let config = inner.config.dense(using)?;
         let store = &inner.store;
@@ -1092,7 +1092,7 @@ impl Collection {
         if query.prefetch.is_empty() {
             return Err(Error::invalid("a query needs at least one search to fuse"));
         }
-        let inner = self.inner.read();
+        let inner = self.read()?;
         let mut ranked = Vec::with_capacity(query.prefetch.len());
         for p in &query.prefetch {
             if !p.weight.is_finite() || p.weight < 0.0 {
@@ -1190,7 +1190,7 @@ impl Collection {
         if positive.is_empty() {
             return Err(Error::invalid("recommend needs at least one positive example"));
         }
-        let inner = self.inner.read();
+        let inner = self.read()?;
         let using = opts.using.as_deref();
         let config = inner.config.dense(using)?;
         let store = &inner.store;
@@ -1298,7 +1298,7 @@ impl Collection {
 
     /// Writes the collection's points and indexes, every vector included.
     pub fn export_state(&self, w: impl std::io::Write) -> Result<()> {
-        let inner = self.inner.read();
+        let inner = self.read()?;
         state::encode(
             w,
             &inner.store,
@@ -1316,6 +1316,12 @@ impl Collection {
     /// Whether this handle was dropped, replaced or moved.
     pub(crate) fn is_closed(&self) -> bool {
         self.closed.load(Ordering::Acquire)
+    }
+
+    fn read(&self) -> Result<parking_lot::RwLockReadGuard<'_, Inner>> {
+        let inner = self.inner.read();
+        self.ensure_open()?;
+        Ok(inner)
     }
 
     fn ensure_open(&self) -> Result<()> {
@@ -1604,7 +1610,9 @@ fn apply_upsert(inner: &mut Inner, points: Vec<Point>) {
     let mut replaced = 0;
     for p in points {
         if let Some(old) = store.slot_of(&p.id) {
-            indexes.remove(old, store);
+            if old < first {
+                indexes.remove(old, store);
+            }
             replaced += 1;
         }
         store.push_point(p);

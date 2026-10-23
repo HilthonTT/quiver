@@ -24,7 +24,7 @@ impl Key {
                     Key::Int(i128::from(u))
                 } else {
                     let x = n.as_f64()?;
-                    if x.fract() == 0.0 && x.abs() < 9.0e15 {
+                    if x.fract() == 0.0 && x.abs() < i128::MAX as f64 {
                         Key::Int(x as i128)
                     } else {
                         Key::Float(x.to_bits())
@@ -122,6 +122,8 @@ mod tests {
         assert_eq!(got, [Key::Int(1), Key::Str("1".into()), Key::Bool(true)]);
         assert!(keys(Some(&json!({"k": {"a": 1}})), &path).is_empty());
         assert!(keys(None, &path).is_empty());
+        let big = json!({"k": [1.0e16, 10_000_000_000_000_000u64]});
+        assert_eq!(keys(Some(&big), &path).len(), 1);
     }
 
     #[test]

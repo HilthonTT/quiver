@@ -146,3 +146,31 @@ fn snapshots_cannot_restore_over_an_alias() {
         Err(Error::AliasExists(_))
     ));
 }
+
+#[test]
+fn searches_on_a_renamed_handle_fail_cleanly() {
+    use quiver_db::{SearchOptions, SparseVector, SparseVectorConfig, VectorConfig};
+    let db = Database::in_memory();
+    let config = CollectionConfig::new(2)
+        .with_vector("v", VectorConfig::new(2))
+        .with_sparse_vector("s", SparseVectorConfig::default());
+    let old = db.create_collection("a", config).unwrap();
+    old.upsert([Point::new("p", vec![1.0, 0.0])
+        .with_vector("v", vec![1.0, 0.0])
+        .with_sparse_vector("s", SparseVector::new(vec![1], vec![1.0]))])
+        .unwrap();
+    db.rename_collection("a", "b").unwrap();
+
+    let not_found = |r: quiver_db::Result<Vec<quiver_db::SearchHit>>| {
+        assert!(matches!(r, Err(Error::CollectionNotFound(_))), "{r:?}");
+    };
+    not_found(old.search(&[1.0, 0.0], 1));
+    not_found(old.search_with(&[1.0, 0.0], 1, &SearchOptions::default().using("v")));
+    not_found(old.search_by_id("p", 1, &SearchOptions::default()));
+    not_found(old.search_sparse(
+        "s",
+        &SparseVector::new(vec![1], vec![1.0]),
+        1,
+        &SearchOptions::default(),
+    ));
+}

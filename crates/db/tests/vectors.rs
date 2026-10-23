@@ -539,3 +539,30 @@ fn ef_search_changes_keep_the_graph() {
     let after = c.search(&vec_for(3, 4, 1), 10).unwrap();
     assert_eq!(after[0], before[0]);
 }
+
+#[test]
+fn repeated_ids_in_one_batch_keep_sparse_statistics_right() {
+    let idf = config().with_sparse_vector(
+        "text",
+        SparseVectorConfig {
+            modifier: SparseModifier::Idf,
+        },
+    );
+    let db = Database::in_memory();
+    let once = db.create_collection("once", idf.clone()).unwrap();
+    let twice = db.create_collection("twice", idf).unwrap();
+    twice.upsert([point(1), point(1)]).unwrap();
+    once.upsert([point(0), point(1)]).unwrap();
+    twice.upsert([point(0), point(1), point(1)]).unwrap();
+    assert_eq!(twice.len(), 2);
+
+    let q = sparse(&[(1, 1.0)]);
+    let opts = SearchOptions::default();
+    let want = once.search_sparse("text", &q, 10, &opts).unwrap();
+    let got = twice.search_sparse("text", &q, 10, &opts).unwrap();
+    assert_eq!(got.len(), want.len());
+    for (g, w) in got.iter().zip(&want) {
+        assert_eq!(g.id, w.id);
+        assert_eq!(g.distance, w.distance);
+    }
+}

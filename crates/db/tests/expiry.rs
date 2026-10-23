@@ -214,3 +214,18 @@ fn expiry_survives_restarts_and_snapshots() {
     assert_eq!(restored.len(), 1);
     assert_eq!(restored.purge_expired().unwrap(), 1);
 }
+
+#[test]
+fn field_index_limit_counts_the_expiry_field_before_creating() {
+    let db = Database::in_memory();
+    let fields: Vec<String> = (0..quiver_db::types::MAX_FIELD_INDEXES)
+        .map(|i| format!("f{i}"))
+        .collect();
+    assert!(db.create_collection_with_fields("c", config(), &fields).is_err());
+    assert!(
+        db.collection("c").is_err(),
+        "a failed create must not leave the collection behind"
+    );
+    db.create_collection_with_fields("c", config(), &fields[1..])
+        .unwrap();
+}
