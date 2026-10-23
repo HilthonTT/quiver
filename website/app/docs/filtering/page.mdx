@@ -14,13 +14,13 @@ from quiver import Client, Flat
 client = Client("http://localhost:6900")
 films = client.create_collection("films", dimension=2, metric="euclidean", index=Flat())
 films.upsert([
-    ("alien", [0.0, 1.0], {"genre": "sci-fi", "year": 1979, "rating": 8.5,
+    ("alien", [0.0, 1.0], {"title": "Alien", "genre": "sci-fi", "year": 1979, "rating": 8.5,
                            "tags": ["classic", "horror"], "director": {"country": "UK"}}),
-    ("arrival", [1.0, 0.0], {"genre": "sci-fi", "year": 2016, "rating": 7.9,
+    ("arrival", [1.0, 0.0], {"title": "Arrival", "genre": "sci-fi", "year": 2016, "rating": 7.9,
                              "tags": ["drama"], "director": {"country": "CA"}}),
-    ("amelie", [1.0, 1.0], {"genre": "romance", "year": 2001, "award": "César",
+    ("amelie", [1.0, 1.0], {"title": "Le Fabuleux Destin d’Amélie Poulain", "genre": "romance", "year": 2001, "award": "César",
                             "tags": ["classic"], "director": {"country": "FR"}}),
-    ("heat", [2.0, 2.0], {"genre": "crime", "year": 1995, "rating": 8.3}),
+    ("heat", [2.0, 2.0], {"title": "Heat", "genre": "crime", "year": 1995, "rating": 8.3}),
 ])
 
 def matching(filter):
@@ -116,6 +116,98 @@ print(matching({"tags": ["classic"]}))
 
 `$ne` and `$nin` are the negations: on an array they match only when no element (and not the array itself) equals the value.
 
+Three operators look at the array as a whole:
+
+| Operator | Matches when the field | Argument |
+| --- | --- | --- |
+| `$all` | contains every one of the values (a single value counts as a one-element array) | a non-empty array |
+| `$size` | is an array of exactly this length | a non-negative integer |
+| `$elemMatch` | is an array with at least one element matching the filter | a filter, or operators applied to each element |
+
+```python
+print(matching({"tags": {"$all": ["classic", "horror"]}}))
+print(matching({"tags": {"$size": 1}}))
+print(matching({"tags": {"$elemMatch": {"$gte": "d", "$lt": "h"}}}))
+```
+
+```text
+['alien']
+['amelie', 'arrival']
+['arrival']
+```
+
+`$elemMatch` keeps conditions together on one element. For an array of objects, `{"cast": {"$elemMatch": {"name": "Weaver", "role": "lead"}}}` needs one cast member who is both, where `{"cast.name": ...}` style conditions cannot express that. Its filter may use `$and`, `$or` and `$not` too.
+
+## Text and patterns
+
+| Operator | Matches when the field | Argument |
+| --- | --- | --- |
+| `$text` | is a string containing every word of the query | a string with at least one word |
+| `$prefix` | is a string starting with the argument (case-sensitive) | a string |
+| `$regex` | is a string the regular expression matches anywhere | a pattern of at most 1,024 bytes |
+
+As elsewhere, on an array of strings any element may match.
+
+```python
+print(matching({"title": {"$text": "amélie destin"}}))
+print(matching({"title": {"$text": "AMELIE"}}))
+print(matching({"title": {"$prefix": "A"}}))
+print(matching({"genre": {"$regex": "^(sci|cri)"}}))
+print(matching({"title": {"$regex": "(?i)^a"}}))
+```
+
+```text
+['amelie']
+[]
+['alien', 'arrival']
+['alien', 'arrival', 'heat']
+['alien', 'arrival']
+```
+
+`$text` splits both the query and the field into words at every character that is not a letter or digit, and lowercases them. Word order does not matter. There is no stemming or accent folding, so `AMELIE` does not match `Amélie`. It is a filter, not a ranking: for keyword relevance, use [sparse vectors](/docs/searching/#sparse-search).
+
+`$regex` uses Rust's [`regex`](https://docs.rs/regex) syntax. Anchor it with `^` and `$` to match the whole string, and add `(?i)` for case-insensitive matching. Matching always takes linear time, so a pattern cannot stall the server.
+
+## Geo
+
+A geo point is an object `{"lat": ..., "lon": ...}` with latitude in -90..=90 and longitude in -180..=180. A field holding an array of geo points matches if any of them does. Other values never match.
+
+| Operator | Matches when the point is | Argument |
+| --- | --- | --- |
+| `$geoRadius` | within `meters` of `center` (great-circle distance) | `{"center": {"lat", "lon"}, "meters": number}` |
+| `$geoBox` | inside the box | `{"top_left": {"lat", "lon"}, "bottom_right": {"lat", "lon"}}` |
+
+```bash
+curl -X POST localhost:6900/collections -H 'content-type: application/json' \
+  -d '{"name": "stations", "dimension": 1, "metric": "euclidean"}' > /dev/null
+curl -X POST localhost:6900/collections/stations/points -H 'content-type: application/json' -d '{"points": [
+  {"id": "brussels", "vector": [1], "metadata": {"loc": {"lat": 50.8456, "lon": 4.3571}}},
+  {"id": "antwerp",  "vector": [1], "metadata": {"loc": {"lat": 51.2172, "lon": 4.4211}}},
+  {"id": "ghent",    "vector": [1], "metadata": {"loc": {"lat": 51.0357, "lon": 3.7106}}},
+  {"id": "liege",    "vector": [1], "metadata": {"loc": {"lat": 50.6245, "lon": 5.5667}}}
+]}' > /dev/null
+curl -X POST localhost:6900/collections/stations/search -H 'content-type: application/json' -d '{
+  "vector": [1], "with_metadata": false,
+  "filter": {"loc": {"$geoRadius": {"center": {"lat": 50.8456, "lon": 4.3571}, "meters": 45000}}}
+}'
+```
+
+```json
+{"results":[{"distance":0.0,"id":"brussels"},{"distance":0.0,"id":"antwerp"}]}
+```
+
+```python
+stations = client.collection("stations")
+box = {"top_left": {"lat": 51.3, "lon": 3.5}, "bottom_right": {"lat": 50.9, "lon": 4.5}}
+print(sorted(h.id for h in stations.search([1.0], filter={"loc": {"$geoBox": box}})))
+```
+
+```text
+['antwerp', 'ghent']
+```
+
+`top_left` must not be south of `bottom_right`. A box whose `top_left` longitude is greater than its `bottom_right` one crosses the antimeridian, so `170` to `-170` covers the 20 degrees around it.
+
 ## Types and numbers
 
 - Range operators compare numbers with numbers and strings with strings (byte-wise, so `"sci-fi" > "r"`). A number never compares with a string, so the condition fails.
@@ -150,7 +242,7 @@ print(ids.count({"user": 9007199254740993}), ids.count({"user": 9007199254740992
 
 - A missing field fails every condition except `$ne`, `$nin` and `{"$exists": false}`.
 - `{}` matches every point; a JSON `null` filter means no filter. A delete refuses `{}` (see [data operations](/docs/data-operations/)).
-- A filter must be a JSON object. Unknown operators, a wrongly typed argument, an empty `$and`/`$or` or an empty field name fail with `400 invalid_filter`:
+- A filter must be a JSON object. Unknown operators, a wrongly typed argument, an empty `$and`/`$or`/`$all`/`$elemMatch`, a `$text` without words, an invalid `$regex`, an out-of-range geo point or an empty field name fail with `400 invalid_filter`:
 
 ```bash
 curl -X POST localhost:6900/collections/films/points/count -H 'content-type: application/json' \
@@ -189,7 +281,7 @@ client.create_collection("docs", 384, field_indexes=["user_id", "stats.views"])
 
 A field is a dot-separated path, as in filters; arrays are indexed by element. Up to 32 fields per collection. `DELETE /collections/{name}/indexes/{field}` drops one, and `field_indexes` in the collection's info lists them.
 
-An index answers equality, `$in`, `$gt`/`$gte`/`$lt`/`$lte` on numbers and strings, and `{"$exists": true}`. In an `$and` (or an object with several fields), any indexed condition narrows the points looked at; an `$or` needs every branch indexed. `$ne`, `$nin`, `$not` and `{"$exists": false}` are checked point by point, as are conditions on fields without an index.
+An index answers equality, `$in`, `$all`, `$gt`/`$gte`/`$lt`/`$lte` on numbers and strings, `$prefix`, `$text` (the index keeps the words of each string) and `{"$exists": true}`. For `$regex`, `$size`, `$elemMatch` and the geo operators it narrows the points to those that have the field, and checks each of them. In an `$and` (or an object with several fields), any indexed condition narrows the points looked at; an `$or` needs every branch indexed. `$ne`, `$nin`, `$not` and `{"$exists": false}` are checked point by point, as are conditions on fields without an index.
 
 Indexes never change results: the full filter is still checked on every point an index returns. When the index narrows a search to 20,000 points or fewer, Quiver scores those points directly instead of searching the vector index, so selective filtered searches become exact.
 

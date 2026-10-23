@@ -118,15 +118,18 @@ print([hit.id for hit in movies.search(query, k=2)])
 | `upsert(points, batch_size=1000)` | insert or replace points; returns the count written |
 | `insert(vector, metadata=None, id=None)` | insert one point; returns its id |
 | `get(id, with_vectors=True)` / `get_many(ids, with_vectors=True)` | fetch points |
-| `search(vector, k=10, filter=, ef=, max_distance=, with_vectors=False, with_metadata=True, using=None)` | [search](/docs/searching/); `using` names a named vector |
+| `search(vector, k=10, offset=0, filter=, ef=, max_distance=, with_vectors=False, with_metadata=True, using=None)` | [search](/docs/searching/); `using` names a named vector, `offset` [pages](/docs/searching/#paging-results) |
 | `search_by_id(id, k=10, ..., using=None)` | neighbours of a stored point, without it |
 | `recommend(positive, negative=(), k=10, ..., using=None)` | like the positives, unlike the negatives |
 | `search_batch(vectors, k=10, filter=, ef=, ..., using=None)` | up to 256 searches in one request |
 | `search_sparse(vector, k=10, using=, filter=, max_distance=, ...)` | [sparse search](/docs/searching/#sparse-search) |
-| `query(prefetch, k=10, filter=, rrf_k=60, ...)` | [hybrid search](/docs/searching/#hybrid-search); returns `ScoredResult`s |
-| `scroll(cursor=None, limit=100, with_vectors=False)` | one `ScrollPage` in id order |
-| `iter_points(page_size=500, with_vectors=False)` | every point, following the cursors |
+| `search_groups(vector, group_by=, groups=10, group_size=3, id=, sparse=, using=, filter=, ...)` | [grouped search](/docs/searching/#grouping-results); returns `Group(key, hits)`s |
+| `discover(target=None, context=(), k=10, ...)` | [discovery](/docs/searching/#discovery); targets and `(positive, negative)` examples are ids or vectors |
+| `query(prefetch, k=10, filter=, fusion="rrf", rrf_k=60, rescore=None, ...)` | [hybrid search](/docs/searching/#hybrid-search); `fusion` is `"rrf"`, `"relative_score"` or `"dbsf"`, `rescore=Rescore(vector, using=None)`; returns `ScoredResult`s |
+| `scroll(cursor=None, limit=100, with_vectors=False, filter=None, order_by=None)` | one `ScrollPage`, in id order or [by a field](/docs/listing-points/#filtering-and-ordering) (`"year"` or `OrderBy("year", "desc")`) |
+| `iter_points(page_size=500, with_vectors=False, filter=None, order_by=None)` | every (matching) point, following the cursors |
 | `count(filter=None)` | how many points (match) |
+| `facet(field, filter=None, limit=10)` | the most common values of a field, as `FacetValue(value, count)`s |
 | `update_metadata(metadata, ids=, filter=, mode="merge")` | change metadata; see [data operations](/docs/data-operations/) |
 | `delete(ids)` / `delete_where(filter)` | delete; returns how many existed |
 | `info()` / `len(collection)` | configuration and count |

@@ -91,13 +91,16 @@ With keys configured, a call with no key may only use `Health`; any other RPC an
 | `Upsert` | write | an empty `id` gets a generated UUID; points carry `vectors` (name → `DenseVector`) and `sparse_vectors` (name → `SparseVector`); returns `upserted` and `ids` |
 | `GetPoints` | read | `ids`, `with_vectors`; missing ids are skipped |
 | `DeletePoints` | write | `ids` or `filter_json`; `{}` is refused |
-| `Scroll` | read | `cursor`, `limit` (0 means 100), `with_vectors`; `next_cursor` unset at the end |
+| `Scroll` | read | `cursor`, `limit` (0 means 100), `filter_json`, `order_by` (`field`, `direction` `DIRECTION_ASC` or `DIRECTION_DESC`), `with_vectors`; `next_cursor` unset at the end |
 | `Count` | read | `filter_json`, empty counts all |
+| `Facet` | read | `field`, `filter_json`, `limit` (0 means 10, at most 1,000); returns `values`, each `value_json` and `count` |
 | `UpdateMetadata` | write | `ids` or `filter_json`, `metadata_json` (required; `null` allowed), `mode` |
-| `Search` | read | exactly one of `vector`, `id` and `sparse`; `using` (empty: the main vector; required with `sparse`), `k` (0 means 10), `filter_json`, `ef`, `max_distance`, `with_vectors`, `with_metadata` (unset means true) |
+| `Search` | read | exactly one of `vector`, `id` and `sparse`; `using` (empty: the main vector; required with `sparse`), `k` (0 means 10), `offset`, `filter_json`, `ef`, `max_distance`, `with_vectors`, `with_metadata` (unset means true) |
 | `SearchBatch` | read | up to 256 `SearchRequest`s, each naming its collection |
-| `Recommend` | read | `positive`, `negative`, `using`, and the search options |
-| `Query` | read | up to 16 `Prefetch`es (each `vector` or `sparse`, `using`, `limit` (0 means max(k, 50)), `weight` (unset means 1), `ef`, `max_distance`), `k`, `filter_json`, `rrf_k` (unset means 60), `with_vectors`, `with_metadata`; returns `ScoredHit`s, highest `score` first |
+| `SearchGroups` | read | the target fields of `Search`, `group_by`, `groups` (0 means 10), `group_size` (0 means 3), and the search options; returns `groups`, each `key_json` and `hits` |
+| `Recommend` | read | `positive`, `negative`, `using`, `offset`, and the search options |
+| `Discover` | read | `target` and up to 64 `context` pairs (`positive`, `negative`), each an `Example` (`id` or `vector`); `using`, `k`, `offset`, and the search options |
+| `Query` | read | up to 16 `Prefetch`es (each `vector` or `sparse`, `using`, `limit` (0 means max(k, 50)), `weight` (unset means 1), `ef`, `max_distance`), `k`, `offset`, `filter_json`, `fusion` (`FUSION_RRF`, `FUSION_RELATIVE_SCORE` or `FUSION_DBSF`), `rrf_k` (unset means 60), `rescore` (`vector`, `using`), `with_vectors`, `with_metadata`; returns `ScoredHit`s, highest `score` first |
 | `CreateSnapshot`, `DeleteSnapshot`, `RestoreSnapshot` | write | `RestoreSnapshot` takes `id`, `collection` (empty: the original) and `replace` |
 | `ListSnapshots` | read | `collection`, empty for all |
 | `GetSnapshot` | read | `id` |

@@ -107,20 +107,26 @@ no point `nope`
 | `get_point(collection, id)` | `GET …/points/{id}`; `Ok(None)` if the point is missing |
 | `get_points(collection, ids, with_vectors)` | `POST …/points/lookup`; missing ids are skipped |
 | `scroll(collection, cursor, limit, with_vectors)` | `GET …/points`; a `ScrollPage` |
+| `scroll_with(collection, &ScrollRequest)` | `POST …/points/scroll`, with a filter and an order |
 | `delete_points(collection, ids)`, `delete_where(collection, filter)` | `POST …/points/delete` |
 | `count(collection, filter)` | `POST …/points/count` |
+| `facet(collection, field, filter, limit)` | `POST …/points/facet`; `FacetCount`s, most common first |
 | `update_metadata(collection, selector, metadata, mode)` | `POST …/points/metadata` |
 | `search(collection, &SearchRequest)` | `POST …/search` |
 | `search_batch(collection, &[SearchRequest])` | `POST …/search/batch`; one result list per search |
+| `search_groups(collection, &GroupSearchRequest)` | `POST …/search/groups`; `HitGroup`s |
 | `recommend(collection, &RecommendRequest)` | `POST …/recommend` |
+| `discover(collection, &DiscoverRequest)` | `POST …/discover` |
 | `query(collection, &QueryRequest)` | `POST …/query`; `ScoredHit`s, best first |
 | `create_snapshot(collection)`, `list_snapshots(collection)`, `get_snapshot(id)` | `POST …/snapshots`, `GET /snapshots`, `GET /snapshots/{id}` |
 | `download_snapshot(id)`, `upload_snapshot(bytes)` | `GET /snapshots/{id}/download`, `POST /snapshots`; these two allow 30 minutes rather than 30 seconds |
 | `restore_snapshot(id, name, replace)`, `delete_snapshot(id)` | `POST /snapshots/{id}/restore`, `DELETE /snapshots/{id}` |
 
-`SearchRequest::new(vector, k)` and `SearchRequest::by_id(id, k)` return metadata and no vectors; their public fields (`filter`, `ef`, `max_distance`, `with_vectors`, `with_metadata`) change the rest. `SearchRequest::sparse(using, vector, k)` searches a sparse vector, and `.using(name)` a named dense one. `RecommendRequest::new(positive, k)` works the same way, with `negative` and `using` fields. A hybrid query is `QueryRequest::new(vec![Prefetch::dense(vector), Prefetch::sparse("text", sparse).weight(2.0)], k)`; `Prefetch` also has `.using(name)` and `.limit(n)`. Filters are `serde_json::Value`s in the [filter syntax](/docs/filtering/).
+`SearchRequest::new(vector, k)` and `SearchRequest::by_id(id, k)` return metadata and no vectors; their public fields (`filter`, `ef`, `max_distance`, `with_vectors`, `with_metadata`) change the rest. `SearchRequest::sparse(using, vector, k)` searches a sparse vector, and `.using(name)` a named dense one. `RecommendRequest::new(positive, k)` works the same way, with `negative` and `using` fields. A hybrid query is `QueryRequest::new(vec![Prefetch::dense(vector), Prefetch::sparse("text", sparse).weight(2.0)], k)`; `Prefetch` also has `.using(name)` and `.limit(n)`, and `QueryRequest` has `.fusion(Fusion::Dbsf)`, `.rescore(Rescore { vector, using })` and `.offset(n)`. Searches and recommendations take an `offset` field (`SearchRequest` also `.offset(n)`). Filters are `serde_json::Value`s in the [filter syntax](/docs/filtering/).
 
-The ids `.`, `..`, `lookup`, `delete`, `count` and `metadata` cannot be addressed with `GET …/points/{id}`, so `get_point` looks those up with `POST …/points/lookup` instead.
+`GroupSearchRequest::new(vector, group_by, groups, group_size)`, `::by_id(...)` and `::sparse(using, vector, ...)` take `.using(name)` and `.filter(value)`. `DiscoverRequest::new(target, context, k)` takes an optional `Example::Id(id)` or `Example::Vector(v)` target and `ContextPair { positive, negative }`s. `ScrollRequest::new(limit)` takes `.cursor(c)`, `.filter(value)`, `.order_by(OrderBy::desc("year"))` and `.with_vectors(true)`.
+
+The ids `.`, `..`, `lookup`, `delete`, `count`, `scroll`, `facet` and `metadata` cannot be addressed with `GET …/points/{id}`, so `get_point` looks those up with `POST …/points/lookup` instead.
 
 ## Errors
 

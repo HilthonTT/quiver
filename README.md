@@ -15,8 +15,9 @@ Documentation: **[hilthontt.github.io/quiver](https://hilthontt.github.io/quiver
 - **Indexes:** HNSW, exact flat search and a k-d tree, with cosine, Euclidean, dot, Manhattan and Hamming metrics.
 - **Multiple vectors per point:** named dense vectors, each with its own dimension, metric and index, plus sparse vectors
   searched exactly through an inverted index (optionally IDF-weighted, for BM25).
-- **Hybrid search:** one query fuses dense and keyword (sparse) searches with weighted reciprocal rank fusion.
-- **Filtered search:** MongoDB-style metadata filters (`$gte`, `$in`, `$or`, …) applied during the index traversal, with optional field indexes that make selective filters fast and exact.
+- **Hybrid search:** one query fuses dense and keyword (sparse) searches with weighted reciprocal rank fusion or score fusion, or re-ranks their candidates by another vector.
+- **Filtered search:** MongoDB-style metadata filters (`$gte`, `$in`, `$or`, `$text`, `$regex`, `$elemMatch`, `$geoRadius`, …) applied during the index traversal, with optional field indexes that make selective filters fast and exact.
+- **Query features:** results grouped by a field, discovery with context pairs, paging with `offset`, facet counts, and listing points filtered or ordered by a field.
 - **Data operations:** update metadata in place (merge or replace), count and delete by filter, search by an existing point, recommend from positive and negative examples, distance thresholds, and points that expire at a time in their metadata (optionally with a default time to live).
 - **Storage:** a checksummed WAL with checkpoints by default, RocksDB behind a feature flag, or in-memory; optional 8-bit scalar quantization stores vectors in about a quarter of the memory, binary quantization searches one bit per component and re-ranks by the exact vectors, and vectors can live on disk instead of in memory (quantized codes in memory, exact vectors on disk for re-ranking).
 - **Live changes:** change a collection's index, quantization or on-disk storage in place, rename collections, and point aliases at them for zero-downtime swaps.

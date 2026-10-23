@@ -92,16 +92,20 @@ The server sweeps expired points away; embedded, call `collection.purge_expired(
 | `get(id)`, `get_many(&ids)` | fetch points |
 | `delete(&ids)`, `delete_where(&filter)` | delete; return how many existed |
 | `count(Option<&Filter>)` | count points |
+| `facet(field, Option<&Filter>, limit)` | the most common values of a field, as `FacetCount`s |
 | `update_metadata(&PointSelector, value, MetadataMode)` | merge or replace metadata |
 | `scroll(cursor, limit)` | a `ScrollPage` in id order |
+| `scroll_with(&ScrollOptions)` | with a filter, or ordered by a field |
 | `search(&vector, k)` | nearest neighbours, with metadata |
 | `search_with(&vector, k, &SearchOptions)` | with a filter, `ef`, `max_distance`, vectors |
 | `search_by_id(id, k, &opts)`, `recommend(&pos, &neg, k, &opts)` | by a stored point; by examples |
 | `search_sparse(name, &SparseVector, k, &opts)` | [sparse search](/docs/searching/#sparse-search) |
+| `search_groups(&SearchTarget, &GroupBy, &opts)` | [grouped search](/docs/searching/#grouping-results); `HitGroup`s |
+| `discover(Option<&Example>, &[ContextPair], k, &opts)` | [discovery](/docs/searching/#discovery) |
 | `query(&HybridQuery, k)` | [hybrid search](/docs/searching/#hybrid-search); `ScoredHit`s |
 | `info()`, `len()`, `flush()`, `compact()`, `create_snapshot()` | housekeeping |
 
-`SearchOptions::default()` includes metadata and leaves vectors out; chain `.using(name)` for a named vector, `.filter(f)`, `.ef(n)`, `.max_distance(d)`, `.include_vectors(true)` and `.include_metadata(false)`. Points carry named vectors with `Point::with_vector(name, v)` and sparse ones with `.with_sparse_vector(name, SparseVector::new(indices, values))`. A `HybridQuery::new(vec![Prefetch::new(QueryVector::Dense { vector, using: None }, 50), …])` fuses several searches; set its `filter`, `fusion` and `include_*` fields as needed. Filters are built with `Filter::parse(&json)`, from the [filter syntax](/docs/filtering/).
+`SearchOptions::default()` includes metadata and leaves vectors out; chain `.using(name)` for a named vector, `.filter(f)`, `.ef(n)`, `.max_distance(d)`, `.include_vectors(true)`, `.include_metadata(false)` and `.offset(n)`. Points carry named vectors with `Point::with_vector(name, v)` and sparse ones with `.with_sparse_vector(name, SparseVector::new(indices, values))`. A `HybridQuery::new(vec![Prefetch::new(QueryVector::Dense { vector, using: None }, 50), …])` fuses several searches; set its `filter`, `fusion` (`Fusion::Rrf { k }`, `Fusion::RelativeScore` or `Fusion::Dbsf`), `rescore`, `offset` and `include_*` fields as needed. `ScrollOptions::new(limit)` chains `.cursor(c)`, `.filter(f)` and `.order_by(OrderBy::desc("year"))`. Filters are built with `Filter::parse(&json)`, from the [filter syntax](/docs/filtering/).
 
 ```rust
 use quiver_db::{CollectionConfig, Database, IndexConfig, MetadataMode, Metric, Point, PointSelector, SearchOptions};

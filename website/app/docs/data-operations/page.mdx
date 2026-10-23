@@ -2,7 +2,7 @@ export const metadata = { title: "Data operations" };
 
 # Data operations
 
-Beyond upsert and search, Quiver can change metadata without resending vectors, and count and delete points by id or by filter. The examples use a small collection:
+Beyond upsert and search, Quiver can change metadata without resending vectors, count points and the values of a field, and delete points by id or by filter. The examples use a small collection:
 
 ```bash
 curl -X POST localhost:6900/collections -H 'content-type: application/json' \
@@ -73,6 +73,41 @@ curl -X POST localhost:6900/collections/movies/points/count -H 'content-type: ap
 {"count":2}
 ```
 
+## Facets
+
+`POST /collections/{name}/points/facet` counts how many points hold each value of a metadata field, most common first. On the films collection from [filtering](/docs/filtering/#a-collection-to-filter):
+
+```bash
+curl -X POST localhost:6900/collections/films/points/facet -H 'content-type: application/json' \
+  -d '{"field": "tags"}'
+curl -X POST localhost:6900/collections/films/points/facet -H 'content-type: application/json' \
+  -d '{"field": "genre", "filter": {"year": {"$gt": 1990}}, "limit": 2}'
+```
+
+```text
+{"values":[{"count":2,"value":"classic"},{"count":1,"value":"drama"},{"count":1,"value":"horror"}]}
+{"values":[{"count":1,"value":"crime"},{"count":1,"value":"romance"}]}
+```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `field` | | the metadata field, a dotted path |
+| `filter` | none | only count points matching this |
+| `limit` | 10 | how many values, 1 to 1,000 |
+
+Values are strings, numbers and booleans; `1` and `1.0` count as one value. A field holding an array counts each distinct element once per point, and `null`, objects and missing fields are not counted. Ties are ordered by value: booleans, then numbers, then strings. Facets read every matching point, like a count.
+
+```python
+films = Client("http://localhost:6900").collection("films")
+print([(f.value, f.count) for f in films.facet("tags")])
+print([(f.value, f.count) for f in films.facet("genre", filter={"year": {"$gt": 1990}}, limit=2)])
+```
+
+```text
+[('classic', 2), ('drama', 1), ('horror', 1)]
+[('crime', 1), ('romance', 1)]
+```
+
 ## Deleting
 
 `POST /collections/{name}/points/delete` deletes by `ids` (at most 10,000) or by `filter`, and answers how many points existed:
@@ -133,7 +168,7 @@ print(movies.delete_where({"genre": "classic"}), movies.delete(["alien"]), movie
 
 | Status | Code | When |
 | --- | --- | --- |
-| 400 | `invalid_argument` | both or neither of `ids` and `filter`, more than 10,000 ids, an empty delete filter, metadata nested too deep |
+| 400 | `invalid_argument` | both or neither of `ids` and `filter`, more than 10,000 ids, an empty delete filter, metadata nested too deep, a facet `limit` outside 1–1,000 or an invalid facet `field` |
 | 400 | `invalid_filter` | the filter does not parse |
 | 400 | `invalid_body` | malformed JSON, an unknown field, a missing `metadata`, an unknown `mode` |
 | 404 | `not_found` | no such collection |

@@ -58,12 +58,14 @@ An alias works in place of a collection name on every `/collections/{name}/…` 
 | `GET /collections/{name}/points` | read | `?cursor=&limit=100&with_vectors=false` | `{"points", "next_cursor"}` |
 | `GET /collections/{name}/points/{id}` | read | `?with_vectors=true` | a point |
 | `POST /collections/{name}/points/lookup` | read | `{"ids", "with_vectors"?: true}` | `{"points"}`: the ids that exist, in request order |
+| `POST /collections/{name}/points/scroll` | read | `{"cursor"?, "limit"?: 100, "filter"?, "order_by"?: {"field", "direction"?: "asc"}, "with_vectors"?: false}` | `{"points", "next_cursor"}` |
 | `POST /collections/{name}/points/count` | read | `{"filter"?}` | `{"count"}` |
+| `POST /collections/{name}/points/facet` | read | `{"field", "filter"?, "limit"?: 10}` | `{"values": [{"value", "count"}]}` |
 | `POST /collections/{name}/points/metadata` | write | `{"ids"` or `"filter", "metadata", "mode"?: "merge"}` | `{"updated"}` |
 | `POST /collections/{name}/points/delete` | write | `{"ids"` or `"filter"}` | `{"deleted"}` |
 | `DELETE /collections/{name}/points/{id}` | write | | `204`, or `404 point_not_found` |
 
-A **point** is `{"id", "vector", "vectors"?, "sparse_vectors"?, "metadata"}`; `vectors` maps names to dense vectors and `sparse_vectors` names to `{"indices", "values"}`. `metadata` is left out when the point has none, and the vectors when `with_vectors` is false. Lookups and deletes take at most 10,000 ids, and `limit` is at most 10,000. See [data operations](/docs/data-operations/) and [listing points](/docs/listing-points/).
+Points whose id is `lookup`, `count`, `scroll`, `facet`, `metadata` or `delete` cannot be read with `GET /points/{id}`, which those routes shadow; use `points/lookup`. A **point** is `{"id", "vector", "vectors"?, "sparse_vectors"?, "metadata"}`; `vectors` maps names to dense vectors and `sparse_vectors` names to `{"indices", "values"}`. `metadata` is left out when the point has none, and the vectors when `with_vectors` is false. Lookups and deletes take at most 10,000 ids, and `limit` is at most 10,000. See [data operations](/docs/data-operations/) and [listing points](/docs/listing-points/).
 
 ```bash
 curl -X POST localhost:6900/collections -H 'content-type: application/json' \
@@ -83,10 +85,12 @@ curl -X POST localhost:6900/collections/places/points/lookup -H 'content-type: a
 
 | Method and route | Role | Body | Answers |
 | --- | --- | --- | --- |
-| `POST /collections/{name}/search` | read | `{"vector"`, `"id"` or `"sparse", "using"?, "k"?: 10, "filter"?, "ef"?, "max_distance"?, "with_vectors"?: false, "with_metadata"?: true}` | `{"results": [hit]}` |
+| `POST /collections/{name}/search` | read | `{"vector"`, `"id"` or `"sparse", "using"?, "k"?: 10, "offset"?: 0, "filter"?, "ef"?, "max_distance"?, "with_vectors"?: false, "with_metadata"?: true}` | `{"results": [hit]}` |
 | `POST /collections/{name}/search/batch` | read | `{"searches": [search body]}`, at most 256 | `{"results": [[hit]]}` |
-| `POST /collections/{name}/recommend` | read | `{"positive", "negative"?, "using"?, "k"?, "filter"?, "ef"?, "max_distance"?, "with_vectors"?, "with_metadata"?}` | `{"results": [hit]}` |
-| `POST /collections/{name}/query` | read | `{"prefetch": [{"vector"` or `"sparse", "using"?, "limit"?, "weight"?, "ef"?, "max_distance"?}], "fusion"?: {"type": "rrf", "k": 60}, "k"?, "filter"?, "with_vectors"?, "with_metadata"?}` | `{"results": [scored hit]}` |
+| `POST /collections/{name}/search/groups` | read | `{"vector"`, `"id"` or `"sparse", "group_by", "groups"?: 10, "group_size"?: 3, "using"?, "filter"?, "ef"?, "max_distance"?, "with_vectors"?, "with_metadata"?}` | `{"groups": [{"key", "hits": [hit]}]}` |
+| `POST /collections/{name}/recommend` | read | `{"positive", "negative"?, "using"?, "k"?, "offset"?, "filter"?, "ef"?, "max_distance"?, "with_vectors"?, "with_metadata"?}` | `{"results": [hit]}` |
+| `POST /collections/{name}/discover` | read | `{"target"?, "context"?: [{"positive", "negative"}], "using"?, "k"?, "offset"?, "filter"?, "ef"?, "max_distance"?, "with_vectors"?, "with_metadata"?}`; examples are ids or vectors | `{"results": [hit]}` |
+| `POST /collections/{name}/query` | read | `{"prefetch": [{"vector"` or `"sparse", "using"?, "limit"?, "weight"?, "ef"?, "max_distance"?}], "fusion"?: {"type": "rrf", "k": 60}` or `{"type": "relative_score"}` or `{"type": "dbsf"}`, `"rescore"?: {"vector", "using"?}, "k"?, "offset"?, "filter"?, "with_vectors"?, "with_metadata"?}` | `{"results": [scored hit]}` |
 
 A **hit** is `{"id", "distance", "metadata"?, "vector"?, "vectors"?, "sparse_vectors"?}`, closest first; for a sparse search, `distance` is the negated score. A **scored hit** has a `score` instead, highest first. `using` names a named vector; `sparse` needs it. See [searching](/docs/searching/).
 
@@ -160,7 +164,10 @@ curl -X POST localhost:6900/collections/places/search -H 'content-type: applicat
 | --- | --- |
 | JSON request body | 64 MiB, `--max-body-mb` |
 | Snapshot upload | 16 GiB |
-| `k` | 1–10,000 |
+| `k` | 1–10,000, and `k + offset` at most 10,000 |
+| `groups × group_size` | 10,000 |
+| Context pairs per discovery | 64 |
+| Values per facet | 1,000 |
 | Searches per batch | 256 |
 | Searches fused per query | 16 |
 | Non-zero values per sparse vector | 65,536 |

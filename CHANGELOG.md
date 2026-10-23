@@ -8,6 +8,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Grouped search**: `POST /collections/{name}/search/groups` (gRPC `SearchGroups`, `Collection::search_groups`) returns the
+  best `groups` values of a metadata field `group_by`, each with up to `group_size` hits, for a vector, an id or a sparse
+  query. Points with an array there join each element's group.
+- **Discovery**: `POST /collections/{name}/discover` (gRPC `Discover`, `Collection::discover`) ranks a target's neighbours by
+  how many context pairs (`positive`, `negative`; ids or vectors) they are on the right side of, or without a target scores
+  every point by its context penalty.
+- **Facets**: `POST /collections/{name}/points/facet` (gRPC `Facet`, `Collection::facet`) counts the values of a field,
+  optionally over a filter.
+- **Filtered and ordered scrolls**: `POST /collections/{name}/points/scroll` (gRPC `Scroll.filter_json`/`order_by`,
+  `Collection::scroll_with`) takes a `filter` and `order_by: {"field", "direction"}`; ordered pages use an opaque cursor.
+- **`offset`** on searches, batch entries, recommendations, discovery and hybrid queries (`k + offset` at most 10,000).
+- **Score fusion and rescoring** in `POST /query`: `fusion` `{"type": "relative_score"}` (min-max) and `{"type": "dbsf"}`
+  (distribution-based), and `rescore: {"vector", "using"?}` to re-rank the prefetched candidates by exact distance. gRPC
+  `Fusion` and `Rescore`.
+- **Filter operators**: `$text` (all words, case-insensitive), `$prefix`, `$regex`, `$all`, `$size`, `$elemMatch`,
+  `$geoRadius` and `$geoBox`. Field indexes answer `$text` (they now keep each string's words), `$prefix` and `$all`.
+- The Rust and Python clients cover all of the above. Point ids `scroll` and `facet` are read through `points/lookup`, as
+  the new routes shadow `GET points/{id}`.
+
 - **Binary quantization** (`"quantization": "binary"`, per vector, at creation or through `PATCH`): searches score one bit per
   component plus a 4-byte scale per vector, fetch 20×k candidates and re-rank them by the exact vectors, which are kept, so
   results carry exact distances and vectors. With `on_disk`, only the bits stay in memory, about 1/32 of the vectors. HNSW

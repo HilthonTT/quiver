@@ -48,6 +48,7 @@ curl -X POST localhost:6900/collections/books/search -H 'content-type: applicati
 | `sparse` | | a [sparse query](#sparse-search), `{"indices": [...], "values": [...]}` |
 | `using` | the main vector | the [named vector](#named-vectors) to search; required with `sparse` |
 | `k` | 10 | how many results, 1 to 10,000 |
+| `offset` | 0 | skip this many of the best results first; `k + offset` is at most 10,000 |
 | `filter` | none | a [filter](/docs/filtering/) on metadata |
 | `ef` | the collection's `ef_search` | HNSW beam width for this query; ignored by exact indexes |
 | `max_distance` | none | drop results farther than this |
@@ -88,7 +89,84 @@ curl -X POST localhost:6900/collections/books/recommend -H 'content-type: applic
 {"results":[{"distance":0.598021388053894,"id":"emma","metadata":{"genre":"romance","year":1815}},{"distance":1.1261796951293945,"id":"foundation","metadata":{"genre":"sci-fi","year":1951}}]}
 ```
 
-It takes the same `k`, `filter`, `ef`, `max_distance`, `with_vectors` and `with_metadata` as a search. At least one positive is required, the examples together may number at most 10,000, and every example must exist (`404 point_not_found` names the first missing one).
+It takes the same `k`, `offset`, `filter`, `ef`, `max_distance`, `with_vectors` and `with_metadata` as a search. At least one positive is required, the examples together may number at most 10,000, and every example must exist (`404 point_not_found` names the first missing one).
+
+## Discovery
+
+`POST /collections/{name}/discover` steers a search with **context pairs**: each pair has a `positive` and a `negative` example, and a point is on the right side of a pair when it is closer to the positive one. Examples are point ids or vectors; examples given by id never appear in the results.
+
+With a `target`, Quiver takes the target's nearest neighbours (10 × (`k` + `offset`), at least 100) and ranks them first by how many pairs they are on the right side of, then by distance to the target. `distance` is the distance to the target, so results are not always in distance order:
+
+```bash
+curl -X POST localhost:6900/collections/books/discover -H 'content-type: application/json' -d '{
+  "target": [1.0, 0.0, 0.0],
+  "context": [{"positive": "hobbit", "negative": "foundation"}],
+  "k": 2, "with_metadata": false
+}'
+```
+
+```json
+{"results":[{"distance":1.0,"id":"emma"},{"distance":0.006116271018981934,"id":"dune"}]}
+```
+
+Without a target, it is a **context search**: every point that passes the filter is scored by how far it is on the wrong side of the pairs, and `distance` is that penalty, `0` for a point on the right side of every pair. This scans the whole collection (or what a [field index](/docs/filtering/#field-indexes) narrows it to), so filter it on large collections:
+
+```bash
+curl -X POST localhost:6900/collections/books/discover -H 'content-type: application/json' -d '{
+  "context": [{"positive": [0.0, 1.0, 0.0], "negative": [1.0, 0.0, 0.0]}],
+  "k": 3, "with_metadata": false
+}'
+```
+
+```json
+{"results":[{"distance":0.0,"id":"hobbit"},{"distance":0.0,"id":"emma"},{"distance":0.7223151326179504,"id":"foundation"}]}
+```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `target` | none | an id or a vector |
+| `context` | `[]` | up to 64 `{"positive": ..., "negative": ...}` pairs, each side an id or a vector |
+| `using`, `k`, `offset`, `filter`, `ef`, `max_distance`, `with_vectors`, `with_metadata` | | as for a search |
+
+Give a `target`, at least one pair, or both. `max_distance` applies to the target distance, or to the penalty without a target.
+
+## Paging results
+
+`offset` skips the best results, so `k` 10 with `offset` 20 returns results 21 to 30. The search still finds `k + offset` points and drops the first `offset`, so deep pages cost as much as one big search, and `k + offset` is capped at 10,000:
+
+```bash
+curl -X POST localhost:6900/collections/books/search -H 'content-type: application/json' \
+  -d '{"vector": [1.0, 0.0, 0.0], "k": 2, "offset": 2, "with_metadata": false}'
+```
+
+```json
+{"results":[{"distance":0.8921672105789185,"id":"hobbit"},{"distance":1.0,"id":"emma"}]}
+```
+
+Searches by id, sparse searches, batch entries, recommendations, discovery and hybrid queries take `offset` too. With HNSW, pages come from separate approximate searches, so a point near a page boundary can occasionally show up on two pages or none; raise `ef` if that matters. To read a whole collection page by page, [scroll](/docs/listing-points/) it instead.
+
+## Grouping results
+
+`POST /collections/{name}/search/groups` returns the best `groups` values of a metadata field, each with up to `group_size` of its nearest points. Use it to get one result per document when a collection stores several chunks of each:
+
+```bash
+curl -X POST localhost:6900/collections/books/search/groups -H 'content-type: application/json' -d '{
+  "vector": [1.0, 0.0, 0.0], "group_by": "genre", "groups": 2, "group_size": 2, "with_metadata": false
+}'
+```
+
+```json
+{"groups":[{"hits":[{"distance":0.006116271018981934,"id":"dune"},{"distance":0.036913156509399414,"id":"foundation"}],"key":"sci-fi"},{"hits":[{"distance":0.8921672105789185,"id":"hobbit"}],"key":"fantasy"}]}
+```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `group_by` | | the metadata field (a dotted path) to group by |
+| `groups` | 10 | how many groups |
+| `group_size` | 3 | at most this many hits per group |
+| `vector`, `id`, `sparse`, `using`, `filter`, `ef`, `max_distance`, `with_vectors`, `with_metadata` | | as for a search |
+
+Groups are ordered by their best hit, and hits within a group by distance. Group keys are strings, numbers and booleans; `1` and `1.0` are one group. A point whose field holds an array joins the group of each element, and points without the field, or with an object or `null` there, are left out. Quiver searches for `groups × group_size × 2` points and widens the search until the groups are full or the collection runs out, so a group that stays short has no more points. `groups × group_size` is at most 10,000.
 
 ## Distance thresholds
 
@@ -131,7 +209,7 @@ To keep "lower is closer" everywhere, a sparse hit's `distance` is its **negated
 
 ## Hybrid search
 
-`POST /collections/{name}/query` runs several searches, typically one dense and one sparse, and fuses their rankings with reciprocal rank fusion: a point at rank `r` (from 1) of a search scores `weight / (k + r)` there, and its scores add up across searches. Rank fusion needs no calibration between distances and keyword scores.
+`POST /collections/{name}/query` runs several searches, typically one dense and one sparse, and fuses their rankings. By default it uses reciprocal rank fusion: a point at rank `r` (from 1) of a search scores `weight / (k + r)` there, and its scores add up across searches. Rank fusion needs no calibration between distances and keyword scores.
 
 ```bash
 curl -X POST localhost:6900/collections/papers/query -H 'content-type: application/json' -d '{
@@ -156,12 +234,51 @@ curl -X POST localhost:6900/collections/papers/query -H 'content-type: applicati
 | `prefetch[].limit` | `max(k, 50)` | how many of its best hits take part |
 | `prefetch[].weight` | 1 | multiplies its contribution; 0 ignores it |
 | `prefetch[].ef`, `prefetch[].max_distance` | | as for a search |
-| `fusion` | `{"type": "rrf", "k": 60}` | the fusion method and its constant |
+| `fusion` | `{"type": "rrf", "k": 60}` | `rrf` (with its constant `k`), `relative_score` or `dbsf` |
+| `rescore` | none | `{"vector": [...], "using": ...}`: re-rank the candidates by this dense vector instead of fusing |
 | `k` | 10 | how many results |
+| `offset` | 0 | skip this many of the best results |
 | `filter` | none | applies to every search |
 | `with_vectors`, `with_metadata` | `false`, `true` | as for a search |
 
 Results carry a `score` instead of a `distance`: **higher is better**.
+
+### Score fusion
+
+Rank fusion ignores how much better one hit is than the next. The two score fusions keep that: they turn each search's distances into scores (negated distances), scale them to a common range, multiply by the weight and add them up across searches.
+
+- `relative_score` scales each search's scores to 0–1, its best hit to 1 and its worst to 0. A search with a single hit gives it 1.
+- `dbsf` (distribution-based score fusion) scales each search's scores so that its mean minus three standard deviations maps to 0 and its mean plus three to 1. One outlier skews it less than `relative_score`. A search whose hits all score the same gives them 0.5.
+
+```bash
+curl -X POST localhost:6900/collections/books/query -H 'content-type: application/json' -d '{
+  "prefetch": [{"vector": [1.0, 0.0, 0.0]}, {"vector": [0.0, 1.0, 0.0]}],
+  "fusion": {"type": "relative_score"},
+  "k": 3, "with_metadata": false
+}'
+```
+
+```json
+{"results":[{"id":"foundation","score":1.1205607652664185},{"id":"hobbit","score":1.1084964275360107},{"id":"dune","score":1.0}]}
+```
+
+### Rescoring
+
+With `rescore`, the prefetches only gather candidates: every point any of them found is scored by its exact distance to the `rescore` vector, and the best `k` come back with the **negated distance** as their `score`. `fusion` and the weights then play no part (a weight of 0 still contributes candidates). Use it for two-stage search: a cheap first pass, such as a small [named vector](#named-vectors) or a binary-quantized one, then exact re-ranking by a larger one.
+
+```bash
+curl -X POST localhost:6900/collections/books/query -H 'content-type: application/json' -d '{
+  "prefetch": [{"vector": [1.0, 0.0, 0.0], "limit": 3}],
+  "rescore": {"vector": [0.0, 0.0, 1.0]},
+  "k": 2, "with_metadata": false
+}'
+```
+
+```json
+{"results":[{"id":"hobbit","score":-0.7843344211578369},{"id":"foundation","score":-0.8796141147613525}]}
+```
+
+The prefetch found dune, foundation and hobbit; emma is closest to the rescore vector but was never a candidate. `using` names the dense vector to rescore against, the main one if absent.
 
 ## Quantized vectors on disk
 
@@ -224,13 +341,39 @@ papers.query(
 [['hobbit'], ['emma']]
 ```
 
+Paging, groups, discovery, score fusion and rescoring:
+
+```python
+from quiver import Rescore
+
+print([h.id for h in books.search([1.0, 0.0, 0.0], k=2, offset=2)])
+for group in books.search_groups([1.0, 0.0, 0.0], group_by="genre", groups=2, group_size=2):
+    print(group.key, [h.id for h in group.hits])
+print([h.id for h in books.discover([1.0, 0.0, 0.0], [("hobbit", "foundation")], k=2)])
+print([h.id for h in books.query(
+    [Prefetch(vector=[1.0, 0.0, 0.0]), Prefetch(vector=[0.0, 1.0, 0.0])], k=3, fusion="dbsf")])
+print([h.id for h in books.query(
+    [Prefetch(vector=[1.0, 0.0, 0.0], limit=3)], k=2, rescore=Rescore([0.0, 0.0, 1.0]))])
+```
+
+```text
+['hobbit', 'emma']
+sci-fi ['dune', 'foundation']
+fantasy ['hobbit']
+['emma', 'dune']
+['hobbit', 'foundation', 'dune']
+['hobbit', 'foundation']
+```
+
+`search_groups` takes `id=` or `sparse=` (with `using=`) instead of a vector. In `discover`, the target and each side of a pair is an id or a vector.
+
 `search_batch` sends the same `k`, filter and `ef` with every vector. The [Rust client](/docs/rust-client/) has `SearchRequest::new(vector, k)`, `SearchRequest::by_id(id, k)`, `SearchRequest::sparse(using, vector, k)` and `.using(name)`, and `QueryRequest` for hybrid queries.
 
 ## Errors
 
 | Status | Code | When |
 | --- | --- | --- |
-| 400 | `invalid_argument` | `k` outside 1–10,000, not exactly one of `vector`, `id` and `sparse`, `sparse` without `using`, an unknown or wrong-kind `using`, an invalid sparse vector, more than 256 searches in a batch or 16 prefetches in a query, a negative weight, no positive example |
+| 400 | `invalid_argument` | `k` outside 1–10,000 or `k + offset` above it, not exactly one of `vector`, `id` and `sparse`, `sparse` without `using`, an unknown or wrong-kind `using`, an invalid sparse vector, more than 256 searches in a batch or 16 prefetches in a query, a negative weight, no positive example, `groups` or `group_size` of 0 or a product above 10,000, a discovery with neither target nor context, or more than 64 context pairs |
 | 400 | `dimension_mismatch` | the query vector has the wrong length |
 | 400 | `invalid_filter` | the filter does not parse |
 | 400 | `invalid_body` | malformed JSON or an unknown field |

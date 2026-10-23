@@ -40,6 +40,35 @@ Byte-wise order means `"10"` comes before `"9"`, and uppercase before lowercase.
 Paging used to be by offset. That changed in an unreleased breaking change: `offset` and `next_offset` are now `cursor` and `next_cursor`, and an `offset` parameter is rejected with `400 invalid_argument`.
 </Callout>
 
+## Filtering and ordering
+
+`POST /collections/{name}/points/scroll` takes the same parameters in a JSON body, plus a `filter` and an `order_by`:
+
+```bash
+curl -X POST localhost:6900/collections/books/points/scroll -H 'content-type: application/json' \
+  -d '{"limit": 2, "order_by": {"field": "year", "direction": "desc"}}'
+curl -X POST localhost:6900/collections/books/points/scroll -H 'content-type: application/json' \
+  -d '{"limit": 2, "order_by": {"field": "year", "direction": "desc"}, "cursor": "[1951,\"foundation\"]"}'
+curl -X POST localhost:6900/collections/books/points/scroll -H 'content-type: application/json' \
+  -d '{"filter": {"genre": "sci-fi"}}'
+```
+
+```text
+{"next_cursor":"[1951,\"foundation\"]","points":[{"id":"dune","metadata":{"genre":"sci-fi","year":1965}},{"id":"foundation","metadata":{"genre":"sci-fi","year":1951}}]}
+{"next_cursor":null,"points":[{"id":"hobbit","metadata":{"genre":"fantasy","year":1937}},{"id":"emma","metadata":{"genre":"romance","year":1815}}]}
+{"next_cursor":null,"points":[{"id":"dune","metadata":{"genre":"sci-fi","year":1965}},{"id":"foundation","metadata":{"genre":"sci-fi","year":1951}}]}
+```
+
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `cursor`, `limit`, `with_vectors` | | as above |
+| `filter` | none | only list points matching this [filter](/docs/filtering/) |
+| `order_by` | id order | `{"field": "year", "direction": "asc"}`; `direction` is `asc` (the default) or `desc` |
+
+With `order_by`, points come in the order of the field's value, ties broken by id. Numbers sort before strings, and points where the field is missing or holds anything other than a number or a string are left out. The cursor is then an opaque string (it holds the last value and id); pass it back unchanged, together with the same `order_by` and `filter`. As with id order, writes between pages never make a page skip or repeat a point.
+
+An ordered scroll sorts the matching points on every page, which takes longer as the collection grows: a filter that a [field index](/docs/filtering/#field-indexes) answers keeps it fast.
+
 ## From the clients
 
 The Python client returns one `ScrollPage` per call, or follows the cursors for you with `iter_points`:
@@ -63,4 +92,20 @@ print([p.id for p in letters.iter_points(page_size=2)])
 ['a', 'b', 'c', 'd', 'e']
 ```
 
-The Rust client has `client.scroll(collection, cursor, limit, with_vectors)`, the embedded crate `collection.scroll(cursor, limit)`, and gRPC the `Scroll` RPC, whose `next_cursor` is unset after the last page and whose `limit` of 0 means 100.
+`filter=` and `order_by=` (a field name, ascending, or `OrderBy(field, "desc")`) switch both to the `POST` endpoint:
+
+```python
+from quiver import OrderBy
+
+books = Client("http://localhost:6900").collection("books")
+page = books.scroll(limit=2, order_by=OrderBy("year", "desc"))
+print([p.id for p in page.points], page.next_cursor)
+print([p.id for p in books.iter_points(page_size=2, filter={"genre": "sci-fi"}, order_by="year")])
+```
+
+```text
+['dune', 'foundation'] [1951,"foundation"]
+['foundation', 'dune']
+```
+
+The Rust client has `client.scroll(collection, cursor, limit, with_vectors)` and `client.scroll_with(collection, &ScrollRequest)`, the embedded crate `collection.scroll(cursor, limit)` and `collection.scroll_with(&ScrollOptions)`, and gRPC the `Scroll` RPC (with `filter_json` and `order_by`), whose `next_cursor` is unset after the last page and whose `limit` of 0 means 100.
