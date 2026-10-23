@@ -427,7 +427,7 @@ message Prefetch {
   // The named vector to search: empty means the main one for `vector`;
   // required for `sparse`.
   string using = 3;
-  // How many of its best hits take part; 0 means max(k, 50).
+  // How many of its best hits take part; 0 means max(k + offset, 50).
   uint32 limit = 4;
   // Multiplies its contribution to the fused score; defaults to 1.
   optional float weight = 5;

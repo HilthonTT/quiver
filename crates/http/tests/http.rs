@@ -1656,6 +1656,33 @@ async fn score_fusion_rescore_and_query_offset() {
 }
 
 #[tokio::test]
+async fn query_offsets_reach_past_the_default_prefetch_depth() {
+    let app = TestApp::new();
+    let (status, body) = app
+        .post(
+            "/collections",
+            json!({"name": "deep", "dimension": 1, "metric": "euclidean", "index": {"type": "flat"}}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    let points: Vec<Value> = (0..60)
+        .map(|i| json!({"id": format!("p{i:02}"), "vector": [f64::from(i)]}))
+        .collect();
+    let (status, body) = app
+        .post("/collections/deep/points", json!({ "points": points }))
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let (status, body) = app
+        .post(
+            "/collections/deep/query",
+            json!({"prefetch": [{"vector": [0.0]}], "k": 5, "offset": 50}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(hit_ids(&body), ["p50", "p51", "p52", "p53", "p54"]);
+}
+
+#[tokio::test]
 async fn read_only_keys_can_use_the_new_queries() {
     let mut app = TestApp::with_options(HttpOptions {
         keys: keys(),

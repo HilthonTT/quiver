@@ -231,7 +231,7 @@ curl -X POST localhost:6900/collections/papers/query -H 'content-type: applicati
 | --- | --- | --- |
 | `prefetch` | | 1 to 16 searches, each with exactly one of `vector` and `sparse` |
 | `prefetch[].using` | the main vector | the named vector to search; required with `sparse` |
-| `prefetch[].limit` | `max(k, 50)` | how many of its best hits take part |
+| `prefetch[].limit` | `max(k + offset, 50)` | how many of its best hits take part |
 | `prefetch[].weight` | 1 | multiplies its contribution; 0 ignores it |
 | `prefetch[].ef`, `prefetch[].max_distance` | | as for a search |
 | `fusion` | `{"type": "rrf", "k": 60}` | `rrf` (with its constant `k`), `relative_score` or `dbsf` |

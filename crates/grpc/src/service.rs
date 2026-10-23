@@ -636,7 +636,7 @@ impl pb::quiver_server::Quiver for QuiverService {
             prefetch: req
                 .prefetch
                 .into_iter()
-                .map(|p| prefetch_from_pb(p, k))
+                .map(|p| prefetch_from_pb(p, k + req.offset as usize))
                 .collect::<Result<_, _>>()?,
             fusion: fusion_from_pb(req.fusion, req.rrf_k)?,
             filter: filter_from_pb(&req.filter_json)?,

@@ -946,7 +946,7 @@ pub struct PrefetchRequest {
     /// required for `sparse`.
     #[serde(default)]
     using: Option<String>,
-    /// How many of this search's best hits take part (default: `max(k, 50)`).
+    /// How many of this search's best hits take part (default: `max(k + offset, 50)`).
     #[serde(default)]
     limit: Option<usize>,
     #[serde(default = "default_weight")]
@@ -1009,11 +1009,12 @@ pub async fn query(
         )));
     }
     let k = req.k;
+    let depth = k + req.offset;
     let query = HybridQuery {
         prefetch: req
             .prefetch
             .into_iter()
-            .map(|p| p.prepare(k))
+            .map(|p| p.prepare(depth))
             .collect::<ApiResult<_>>()?,
         fusion: req.fusion,
         filter: parse_filter(req.filter.as_ref())?,

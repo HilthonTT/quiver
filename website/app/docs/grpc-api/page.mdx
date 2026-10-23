@@ -100,7 +100,7 @@ With keys configured, a call with no key may only use `Health`; any other RPC an
 | `SearchGroups` | read | the target fields of `Search`, `group_by`, `groups` (0 means 10), `group_size` (0 means 3), and the search options; returns `groups`, each `key_json` and `hits` |
 | `Recommend` | read | `positive`, `negative`, `using`, `offset`, and the search options |
 | `Discover` | read | `target` and up to 64 `context` pairs (`positive`, `negative`), each an `Example` (`id` or `vector`); `using`, `k`, `offset`, and the search options |
-| `Query` | read | up to 16 `Prefetch`es (each `vector` or `sparse`, `using`, `limit` (0 means max(k, 50)), `weight` (unset means 1), `ef`, `max_distance`), `k`, `offset`, `filter_json`, `fusion` (`FUSION_RRF`, `FUSION_RELATIVE_SCORE` or `FUSION_DBSF`), `rrf_k` (unset means 60), `rescore` (`vector`, `using`), `with_vectors`, `with_metadata`; returns `ScoredHit`s, highest `score` first |
+| `Query` | read | up to 16 `Prefetch`es (each `vector` or `sparse`, `using`, `limit` (0 means max(k + offset, 50)), `weight` (unset means 1), `ef`, `max_distance`), `k`, `offset`, `filter_json`, `fusion` (`FUSION_RRF`, `FUSION_RELATIVE_SCORE` or `FUSION_DBSF`), `rrf_k` (unset means 60), `rescore` (`vector`, `using`), `with_vectors`, `with_metadata`; returns `ScoredHit`s, highest `score` first |
 | `CreateSnapshot`, `DeleteSnapshot`, `RestoreSnapshot` | write | `RestoreSnapshot` takes `id`, `collection` (empty: the original) and `replace` |
 | `ListSnapshots` | read | `collection`, empty for all |
 | `GetSnapshot` | read | `id` |

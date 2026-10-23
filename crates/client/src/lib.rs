@@ -435,7 +435,7 @@ pub struct Prefetch {
     /// The named vector to search; required for `sparse`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub using: Option<String>,
-    /// How many of its best hits take part (the server's default: `max(k, 50)`).
+    /// How many of its best hits take part (the server's default: `max(k + offset, 50)`).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub limit: Option<usize>,
     pub weight: f32,

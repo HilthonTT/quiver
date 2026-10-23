@@ -329,7 +329,7 @@ class Prefetch:
         vector: A dense query vector.
         sparse: A sparse query vector; ``using`` must then name the sparse vector.
         using: The named vector to search (the main one if ``None``, for dense).
-        limit: How many of its best hits take part (server default: ``max(k, 50)``).
+        limit: How many of its best hits take part (server default: ``max(k + offset, 50)``).
         weight: Multiplies its contribution to the fused score.
         ef: HNSW beam width.
         max_distance: Hits farther than this take no part.
