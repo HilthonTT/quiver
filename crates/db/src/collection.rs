@@ -13,15 +13,17 @@ use quiver_storage::{
     VectorStore, open_engine, state,
 };
 use quiver_types::{
-    CollectionConfig, CollectionInfo, CollectionUpdate, Error, Filter, Fusion, HybridQuery, IndexConfig,
-    MAX_ID_LEN, MAX_METADATA_DEPTH, MetadataMode, Metric, Point, PointSelector, Quantization, QueryVector,
-    Result, ScoredHit, SearchHit, SearchOptions, SparseVector, VectorConfig, merge_patch,
+    CollectionConfig, CollectionInfo, CollectionUpdate, ContextPair, Direction, Error, Example, FacetCount,
+    Filter, Fusion, GroupBy, HitGroup, HybridQuery, IndexConfig, MAX_ID_LEN, MAX_METADATA_DEPTH,
+    MetadataMode, Metric, Point, PointSelector, Quantization, QueryVector, Result, ScoredHit, ScrollOptions,
+    SearchHit, SearchOptions, SearchTarget, SparseVector, VectorConfig, merge_patch, validate_field_path,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
 use crate::expiry;
 use crate::fields::FieldIndexes;
+use crate::grouping::{self, Facets, Key};
 use crate::indexes::Indexes;
 
 /// Compact once at least this many slots are tombstoned...
@@ -39,6 +41,10 @@ const EXACT_SCAN_MAX_CANDIDATES: usize = 20_000;
 const RESCORE_OVERSAMPLING: usize = 4;
 /// The same for binary codes, which are far coarser.
 const BINARY_RESCORE_OVERSAMPLING: usize = 20;
+const GROUP_OVERSAMPLING: usize = 2;
+const GROUP_GROWTH: usize = 4;
+const DISCOVER_OVERSAMPLING: usize = 10;
+const DISCOVER_MIN_CANDIDATES: usize = 100;
 
 static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(0);
 
@@ -773,23 +779,76 @@ impl Collection {
     /// position means deletes and updates between pages never cause points
     /// to be skipped or repeated.
     pub fn scroll(&self, cursor: Option<&str>, limit: usize) -> ScrollPage {
+        let mut opts = ScrollOptions::new(limit);
+        opts.cursor = cursor.map(str::to_owned);
+        self.scroll_with(&opts).expect("id-ordered scrolls cannot fail")
+    }
+
+    pub fn scroll_with(&self, opts: &ScrollOptions) -> Result<ScrollPage> {
         let inner = self.inner.read();
         let now = expiry::now();
-        let mut live = inner
-            .store
-            .live_after(cursor)
-            .filter(|&(_, slot)| !inner.expired(slot, now));
-        let points: Vec<Point> = live
-            .by_ref()
-            .take(limit)
-            .map(|(_, slot)| inner.store.point(slot))
-            .collect();
-        // Only hand out a cursor if it leads to at least one more point.
-        let next_cursor = match (points.last(), live.next()) {
-            (Some(last), Some(_)) => Some(last.id.clone()),
-            _ => None,
+        let store = &inner.store;
+        let Some(order) = &opts.order_by else {
+            let mut live = store.live_after(opts.cursor.as_deref()).filter(|&(_, slot)| {
+                !inner.expired(slot, now)
+                    && opts
+                        .filter
+                        .as_ref()
+                        .is_none_or(|f| f.matches(store.metadata(slot)))
+            });
+            let points: Vec<Point> = live
+                .by_ref()
+                .take(opts.limit)
+                .map(|(_, slot)| store.point(slot))
+                .collect();
+            // Only hand out a cursor if it leads to at least one more point.
+            let next_cursor = match (points.last(), live.next()) {
+                (Some(last), Some(_)) => Some(last.id.clone()),
+                _ => None,
+            };
+            return Ok(ScrollPage { points, next_cursor });
         };
-        ScrollPage { points, next_cursor }
+
+        validate_field_path(&order.field)?;
+        let path = grouping::split_path(&order.field);
+        let after = opts.cursor.as_deref().map(parse_order_cursor).transpose()?;
+        let cmp = |a: &(&Value, &str, u32), b: &(&Value, &str, u32)| {
+            let by_value = grouping::value_order(a.0, b.0);
+            let by_value = match order.direction {
+                Direction::Asc => by_value,
+                Direction::Desc => by_value.reverse(),
+            };
+            by_value.then_with(|| a.1.cmp(b.1))
+        };
+        let slots: Box<dyn Iterator<Item = u32> + '_> = match &opts.filter {
+            Some(f) => live_matching(&inner, f),
+            None => Box::new(store.live_slots()),
+        };
+        let mut rows: Vec<(&Value, &str, u32)> = slots
+            .filter(|&slot| !inner.expired(slot, now))
+            .filter_map(|slot| {
+                let v = grouping::lookup(store.metadata(slot), &path)?;
+                (v.is_number() || v.is_string()).then(|| (v, store.id(slot), slot))
+            })
+            .filter(|row| {
+                after
+                    .as_ref()
+                    .is_none_or(|(v, id)| cmp(row, &(v, id.as_str(), 0)) == std::cmp::Ordering::Greater)
+            })
+            .collect();
+        if rows.len() > opts.limit {
+            rows.select_nth_unstable_by(opts.limit, cmp);
+            rows.truncate(opts.limit + 1);
+        }
+        rows.sort_by(cmp);
+        let more = rows.len() > opts.limit;
+        rows.truncate(opts.limit);
+        let next_cursor = rows
+            .last()
+            .filter(|_| more)
+            .map(|(v, id, _)| serde_json::json!([v, id]).to_string());
+        let points = rows.into_iter().map(|(_, _, slot)| store.point(slot)).collect();
+        Ok(ScrollPage { points, next_cursor })
     }
 
     pub fn search(&self, vector: &[f32], k: usize) -> Result<Vec<SearchHit>> {
@@ -845,6 +904,188 @@ impl Collection {
         Ok(hits(&inner.store, found, opts))
     }
 
+    pub fn search_groups(
+        &self,
+        target: &SearchTarget,
+        group: &GroupBy,
+        opts: &SearchOptions,
+    ) -> Result<Vec<HitGroup>> {
+        validate_field_path(&group.field)?;
+        if group.groups == 0 || group.group_size == 0 {
+            return Err(Error::invalid("`groups` and `group_size` must be at least 1"));
+        }
+        let inner = self.inner.read();
+        let opts = SearchOptions {
+            offset: 0,
+            ..opts.clone()
+        };
+        let using = opts.using.as_deref();
+        let (state, settings) = (&*inner, &opts);
+        let search: Box<dyn Fn(usize) -> Vec<Neighbor> + '_> = match target {
+            SearchTarget::Vector(v) => {
+                let mut query = v.clone();
+                validate_vector(&inner.config.dense(using)?, &mut query)?;
+                Box::new(move |k| search_dense(state, using, &query, k, settings, &[]))
+            }
+            SearchTarget::Id(id) => {
+                let config = inner.config.dense(using)?;
+                let slot = inner
+                    .visible_slot(id, expiry::now())
+                    .ok_or_else(|| Error::PointNotFound(id.clone()))?;
+                let column = inner
+                    .store
+                    .column(using)
+                    .expect("store has the configured vectors");
+                let mut query = column.vector(slot).to_vec();
+                validate_vector(&config, &mut query)?;
+                Box::new(move |k| search_dense(state, using, &query, k, settings, &[slot]))
+            }
+            SearchTarget::Sparse { vector, using } => {
+                inner.config.sparse(using)?;
+                let mut query = vector.clone();
+                query.normalize()?;
+                Box::new(move |k| search_sparse(state, using, &query, k, settings))
+            }
+        };
+
+        let path = grouping::split_path(&group.field);
+        let total = inner.store.live().max(1);
+        let mut k = group
+            .groups
+            .saturating_mul(group.group_size)
+            .saturating_mul(GROUP_OVERSAMPLING)
+            .min(total);
+        loop {
+            let found = search(k);
+            let exhausted = found.len() < k || k >= total;
+            let mut groups = group_neighbours(&inner.store, found, &path, group.group_size);
+            let full = groups.len() >= group.groups
+                && groups[..group.groups]
+                    .iter()
+                    .all(|(_, hits)| hits.len() >= group.group_size);
+            if full || exhausted {
+                groups.truncate(group.groups);
+                return Ok(groups
+                    .into_iter()
+                    .map(|(key, found)| HitGroup {
+                        key,
+                        hits: hits(&inner.store, found, &opts),
+                    })
+                    .collect());
+            }
+            k = k.saturating_mul(GROUP_GROWTH).min(total);
+        }
+    }
+
+    pub fn facet(&self, field: &str, filter: Option<&Filter>, limit: usize) -> Result<Vec<FacetCount>> {
+        validate_field_path(field)?;
+        let inner = self.inner.read();
+        let now = expiry::now();
+        let path = grouping::split_path(field);
+        let mut facets = Facets::default();
+        let slots: Box<dyn Iterator<Item = u32> + '_> = match filter {
+            Some(f) => Box::new(matching(&inner, f, now)),
+            None => Box::new(inner.store.live_slots().filter(|&slot| !inner.expired(slot, now))),
+        };
+        for slot in slots {
+            facets.add(inner.store.metadata(slot), &path);
+        }
+        Ok(facets.top(limit))
+    }
+
+    pub fn discover(
+        &self,
+        target: Option<&Example>,
+        context: &[ContextPair],
+        k: usize,
+        opts: &SearchOptions,
+    ) -> Result<Vec<SearchHit>> {
+        if target.is_none() && context.is_empty() {
+            return Err(Error::invalid("discover needs a target, context pairs or both"));
+        }
+        let inner = self.inner.read();
+        let using = opts.using.as_deref();
+        let config = inner.config.dense(using)?;
+        let store = &inner.store;
+        let column = store.column(using).expect("store has the configured vectors");
+        let now = expiry::now();
+        let mut exclude = Vec::new();
+        let mut resolve = |e: &Example| -> Result<Vec<f32>> {
+            let mut v = match e {
+                Example::Id(id) => {
+                    let slot = inner
+                        .visible_slot(id, now)
+                        .ok_or_else(|| Error::PointNotFound(id.clone()))?;
+                    exclude.push(slot);
+                    column.vector(slot).to_vec()
+                }
+                Example::Vector(v) => v.clone(),
+            };
+            validate_vector(&config, &mut v)?;
+            Ok(v)
+        };
+        let target = target.map(&mut resolve).transpose()?;
+        let pairs = context
+            .iter()
+            .map(|p| Ok((resolve(&p.positive)?, resolve(&p.negative)?)))
+            .collect::<Result<Vec<_>>>()?;
+        exclude.sort_unstable();
+        exclude.dedup();
+
+        let metric = config.metric;
+        let wanted = k.saturating_add(opts.offset);
+        let distance = |q: &[f32], slot: u32| column.exact_distance(metric, q, slot);
+        let mut found = match &target {
+            Some(t) => {
+                let pool = wanted
+                    .saturating_mul(DISCOVER_OVERSAMPLING)
+                    .max(DISCOVER_MIN_CANDIDATES);
+                let candidates_opts = SearchOptions {
+                    offset: 0,
+                    ..opts.clone()
+                };
+                let mut ranked: Vec<(usize, Neighbor)> =
+                    search_dense(&inner, using, t, pool, &candidates_opts, &exclude)
+                        .into_iter()
+                        .map(|n| {
+                            let rank = pairs
+                                .iter()
+                                .filter(|(p, q)| distance(p, n.slot) < distance(q, n.slot))
+                                .count();
+                            (rank, n)
+                        })
+                        .collect();
+                ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+                ranked.into_iter().map(|(_, n)| n).collect::<Vec<_>>()
+            }
+            None => {
+                let candidates = opts.filter.as_ref().and_then(|f| inner.fields.candidates(f));
+                let accept = acceptor(&inner, opts.filter.as_ref(), candidates.as_deref(), &exclude);
+                let slots: Box<dyn Iterator<Item = u32>> = match &candidates {
+                    Some(c) => Box::new(c.clone().into_iter()),
+                    None => Box::new(0..store.slots() as u32),
+                };
+                let mut top = TopK::new(wanted.min(store.live()).max(1));
+                for slot in slots.filter(|&slot| accept(slot)) {
+                    let loss: f32 = pairs
+                        .iter()
+                        .map(|(p, q)| (distance(q, slot) - distance(p, slot)).min(0.0))
+                        .sum();
+                    top.push(Neighbor {
+                        slot,
+                        dist: 0.0 - loss,
+                    });
+                }
+                let mut found = top.into_sorted();
+                found.retain(|n| opts.max_distance.is_none_or(|max| n.dist <= max));
+                found
+            }
+        };
+        found.truncate(wanted);
+        found.drain(..opts.offset.min(found.len()));
+        Ok(hits(store, found, opts))
+    }
+
     /// Runs several searches, dense and sparse, and fuses their rankings.
     /// Returns the `k` best points by fused score.
     pub fn query(&self, query: &HybridQuery, k: usize) -> Result<Vec<ScoredHit>> {
@@ -857,7 +1098,7 @@ impl Collection {
             if !p.weight.is_finite() || p.weight < 0.0 {
                 return Err(Error::invalid("search weights must be finite and not negative"));
             }
-            if p.weight == 0.0 {
+            if p.weight == 0.0 && query.rescore.is_none() {
                 // It would add nothing to any score.
                 continue;
             }
@@ -868,6 +1109,7 @@ impl Collection {
                 include_vectors: false,
                 include_metadata: false,
                 max_distance: p.max_distance,
+                offset: 0,
             };
             let found = match &p.query {
                 QueryVector::Dense { vector, using } => {
@@ -886,17 +1128,32 @@ impl Collection {
             ranked.push((p.weight, found));
         }
 
-        let Fusion::Rrf { k: rrf_k } = query.fusion;
-        let mut scores: HashMap<u32, f64> = HashMap::new();
-        for (weight, found) in &ranked {
-            for (rank, n) in found.iter().enumerate() {
-                *scores.entry(n.slot).or_default() +=
-                    f64::from(*weight) / (f64::from(rrf_k) + rank as f64 + 1.0);
+        let mut fused: Vec<(u32, f64)> = match &query.rescore {
+            Some(r) => {
+                let using = r.using.as_deref();
+                let config = inner.config.dense(using)?;
+                let mut v = r.vector.clone();
+                validate_vector(&config, &mut v)?;
+                let column = inner
+                    .store
+                    .column(using)
+                    .expect("store has the configured vectors");
+                let mut slots: Vec<u32> = ranked
+                    .iter()
+                    .flat_map(|(_, found)| found.iter().map(|n| n.slot))
+                    .collect();
+                slots.sort_unstable();
+                slots.dedup();
+                slots
+                    .into_iter()
+                    .map(|slot| (slot, -f64::from(column.exact_distance(config.metric, &v, slot))))
+                    .collect()
             }
-        }
-        let mut fused: Vec<(u32, f64)> = scores.into_iter().collect();
+            None => fuse(query.fusion, &ranked),
+        };
         fused.sort_unstable_by(|a, b| b.1.total_cmp(&a.1).then(a.0.cmp(&b.0)));
-        fused.truncate(k);
+        fused.truncate(k.saturating_add(query.offset));
+        fused.drain(..query.offset.min(fused.len()));
 
         let store = &inner.store;
         Ok(fused
@@ -1148,6 +1405,7 @@ fn search_dense(
     opts: &SearchOptions,
     exclude: &[u32],
 ) -> Vec<Neighbor> {
+    let k = k.saturating_add(opts.offset);
     let store = &inner.store;
     let metric = inner.config.dense(using).expect("checked by the caller").metric;
     let (index, column) = inner.indexes.dense(store, using);
@@ -1186,6 +1444,7 @@ fn search_dense(
         _ => index.search(query, k, opts.ef, column, &accept),
     };
     neighbours.retain(|n| opts.max_distance.is_none_or(|max| n.dist <= max));
+    neighbours.drain(..opts.offset.min(neighbours.len()));
     neighbours
 }
 
@@ -1197,12 +1456,87 @@ fn search_sparse(
     k: usize,
     opts: &SearchOptions,
 ) -> Vec<Neighbor> {
+    let k = k.saturating_add(opts.offset);
     let modifier = inner.config.sparse(name).expect("checked by the caller").modifier;
     let candidates = opts.filter.as_ref().and_then(|f| inner.fields.candidates(f));
     let accept = acceptor(inner, opts.filter.as_ref(), candidates.as_deref(), &[]);
     let mut found = inner.indexes.sparse[name].search(query, k, modifier, &accept);
     found.retain(|n| opts.max_distance.is_none_or(|max| n.dist <= max));
+    found.drain(..opts.offset.min(found.len()));
     found
+}
+
+fn fuse(fusion: Fusion, ranked: &[(f32, Vec<Neighbor>)]) -> Vec<(u32, f64)> {
+    let mut scores: HashMap<u32, f64> = HashMap::new();
+    for (weight, found) in ranked {
+        let scores_of = || found.iter().map(|n| -f64::from(n.dist));
+        let normalized: Vec<f64> = match fusion {
+            Fusion::Rrf { k } => (0..found.len())
+                .map(|rank| 1.0 / (f64::from(k) + rank as f64 + 1.0))
+                .collect(),
+            Fusion::RelativeScore => {
+                let lo = scores_of().fold(f64::INFINITY, f64::min);
+                let hi = scores_of().fold(f64::NEG_INFINITY, f64::max);
+                scores_of()
+                    .map(|x| if hi > lo { (x - lo) / (hi - lo) } else { 1.0 })
+                    .collect()
+            }
+            Fusion::Dbsf => {
+                let n = found.len().max(1) as f64;
+                let mean = scores_of().sum::<f64>() / n;
+                let std = (scores_of().map(|x| (x - mean).powi(2)).sum::<f64>() / n).sqrt();
+                let (lo, hi) = (mean - 3.0 * std, mean + 3.0 * std);
+                scores_of()
+                    .map(|x| if hi > lo { (x - lo) / (hi - lo) } else { 0.5 })
+                    .collect()
+            }
+        };
+        for (n, x) in found.iter().zip(normalized) {
+            *scores.entry(n.slot).or_default() += f64::from(*weight) * x;
+        }
+    }
+    scores.into_iter().collect()
+}
+
+fn group_neighbours(
+    store: &VectorStore,
+    found: Vec<Neighbor>,
+    path: &[String],
+    group_size: usize,
+) -> Vec<(Value, Vec<Neighbor>)> {
+    let mut index: HashMap<Key, usize> = HashMap::new();
+    let mut groups: Vec<(Value, Vec<Neighbor>)> = Vec::new();
+    for n in found {
+        for (key, value) in grouping::keys(store.metadata(n.slot), path) {
+            let i = *index.entry(key).or_insert_with(|| {
+                groups.push((value.clone(), Vec::new()));
+                groups.len() - 1
+            });
+            if groups[i].1.len() < group_size {
+                groups[i].1.push(n);
+            }
+        }
+    }
+    groups
+}
+
+fn parse_order_cursor(cursor: &str) -> Result<(Value, String)> {
+    let invalid = || Error::invalid("invalid cursor for an ordered scroll");
+    let value: Value = serde_json::from_str(cursor).map_err(|_| invalid())?;
+    match value {
+        Value::Array(mut parts) if parts.len() == 2 => {
+            let id = parts
+                .pop()
+                .and_then(|id| id.as_str().map(str::to_owned))
+                .ok_or_else(invalid)?;
+            let key = parts
+                .pop()
+                .filter(|k| k.is_number() || k.is_string())
+                .ok_or_else(invalid)?;
+            Ok((key, id))
+        }
+        _ => Err(invalid()),
+    }
 }
 
 /// Whether a slot may appear in results: alive, not expired, not excluded,

@@ -560,6 +560,7 @@ impl Settings<'_> {
             include_vectors: self.with_vectors,
             include_metadata: self.with_metadata,
             max_distance: self.max_distance,
+            offset: 0,
         })
     }
 }
@@ -814,6 +815,8 @@ pub async fn query(
         filter: parse_filter(req.filter.as_ref())?,
         include_vectors: req.with_vectors,
         include_metadata: req.with_metadata,
+        rescore: None,
+        offset: 0,
     };
     let c = collection(&db, &name)?;
     let results = blocking(move || c.query(&query, k)).await?;

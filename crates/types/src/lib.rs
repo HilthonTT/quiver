@@ -16,7 +16,8 @@ pub use distance::Metric;
 pub use error::{Error, Result};
 pub use filter::Filter;
 pub use point::{
-    CollectionInfo, Fusion, HybridQuery, MAX_SPARSE_NNZ, MetadataMode, NamedVectors, Point, PointInput,
-    PointSelector, Prefetch, QueryVector, ScoredHit, SearchHit, SearchOptions, SparseVector, SparseVectors,
-    merge_patch, new_id,
+    CollectionInfo, ContextPair, Direction, Example, FacetCount, Fusion, GroupBy, HitGroup, HybridQuery,
+    MAX_SPARSE_NNZ, MetadataMode, NamedVectors, OrderBy, Point, PointInput, PointSelector, Prefetch,
+    QueryVector, Rescore, ScoredHit, ScrollOptions, SearchHit, SearchOptions, SearchTarget, SparseVector,
+    SparseVectors, merge_patch, new_id,
 };

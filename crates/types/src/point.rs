@@ -199,6 +199,7 @@ pub struct SearchOptions {
     /// Drop hits farther than this distance. Results are still capped at
     /// `k`; with HNSW the threshold applies to the approximate top `k`.
     pub max_distance: Option<f32>,
+    pub offset: usize,
 }
 
 impl Default for SearchOptions {
@@ -210,6 +211,7 @@ impl Default for SearchOptions {
             include_vectors: false,
             include_metadata: true,
             max_distance: None,
+            offset: 0,
         }
     }
 }
@@ -251,6 +253,131 @@ impl SearchOptions {
         self.max_distance = Some(max);
         self
     }
+
+    #[must_use]
+    pub fn offset(mut self, offset: usize) -> Self {
+        self.offset = offset;
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum SearchTarget {
+    Vector(Vec<f32>),
+    Id(String),
+    Sparse { vector: SparseVector, using: String },
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct GroupBy {
+    pub field: String,
+    pub groups: usize,
+    pub group_size: usize,
+}
+
+impl GroupBy {
+    pub fn new(field: impl Into<String>, groups: usize, group_size: usize) -> Self {
+        Self {
+            field: field.into(),
+            groups,
+            group_size,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct HitGroup {
+    pub key: Value,
+    pub hits: Vec<SearchHit>,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FacetCount {
+    pub value: Value,
+    pub count: usize,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Direction {
+    #[default]
+    Asc,
+    Desc,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct OrderBy {
+    pub field: String,
+    #[serde(default)]
+    pub direction: Direction,
+}
+
+impl OrderBy {
+    pub fn asc(field: impl Into<String>) -> Self {
+        Self {
+            field: field.into(),
+            direction: Direction::Asc,
+        }
+    }
+
+    pub fn desc(field: impl Into<String>) -> Self {
+        Self {
+            field: field.into(),
+            direction: Direction::Desc,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ScrollOptions {
+    pub cursor: Option<String>,
+    pub limit: usize,
+    pub filter: Option<Filter>,
+    pub order_by: Option<OrderBy>,
+}
+
+impl ScrollOptions {
+    pub fn new(limit: usize) -> Self {
+        Self {
+            cursor: None,
+            limit,
+            filter: None,
+            order_by: None,
+        }
+    }
+
+    #[must_use]
+    pub fn cursor(mut self, cursor: impl Into<String>) -> Self {
+        self.cursor = Some(cursor.into());
+        self
+    }
+
+    #[must_use]
+    pub fn filter(mut self, filter: Filter) -> Self {
+        self.filter = Some(filter);
+        self
+    }
+
+    #[must_use]
+    pub fn order_by(mut self, order_by: OrderBy) -> Self {
+        self.order_by = Some(order_by);
+        self
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum Example {
+    Id(String),
+    Vector(Vec<f32>),
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ContextPair {
+    pub positive: Example,
+    pub negative: Example,
 }
 
 /// Which points an operation applies to.
@@ -360,6 +487,8 @@ pub enum Fusion {
         #[serde(default = "default_rrf_k")]
         k: u32,
     },
+    RelativeScore,
+    Dbsf,
 }
 
 fn default_rrf_k() -> u32 {
@@ -381,6 +510,8 @@ pub struct HybridQuery {
     pub filter: Option<Filter>,
     pub include_vectors: bool,
     pub include_metadata: bool,
+    pub rescore: Option<Rescore>,
+    pub offset: usize,
 }
 
 impl HybridQuery {
@@ -391,8 +522,18 @@ impl HybridQuery {
             filter: None,
             include_vectors: false,
             include_metadata: true,
+            rescore: None,
+            offset: 0,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Rescore {
+    pub vector: Vec<f32>,
+    #[serde(default)]
+    pub using: Option<String>,
 }
 
 /// A result of a [`HybridQuery`].

@@ -119,6 +119,7 @@ impl Settings<'_> {
                 include_vectors: self.with_vectors,
                 include_metadata: self.with_metadata.unwrap_or(true),
                 max_distance: self.max_distance,
+                offset: 0,
             },
         ))
     }
@@ -559,6 +560,8 @@ impl pb::quiver_server::Quiver for QuiverService {
             filter: filter_from_pb(&req.filter_json)?,
             include_vectors: req.with_vectors,
             include_metadata: req.with_metadata.unwrap_or(true),
+            rescore: None,
+            offset: 0,
         };
         let collection = req.collection;
         let hits = self
