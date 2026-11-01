@@ -15,6 +15,7 @@ from ._client import DEFAULT_TIMEOUT, DEFAULT_URL, _decode, _headers, _verify
 from ._errors import ConflictError, NotFoundError, QuiverConnectionError
 from ._models import (
     CollectionInfo,
+    Datatype,
     Example,
     Expiry,
     FacetValue,
@@ -143,6 +144,7 @@ class AsyncClient:
         vectors: Mapping[str, VectorParams] | None = None,
         sparse_vectors: Mapping[str, SparseVectorParams] | Sequence[str] | None = None,
         expiry: Expiry | None = None,
+        datatype: Datatype = "float32",
     ) -> AsyncCollection:
         """Creates a collection. Raises :class:`ConflictError` if it exists.
 
@@ -151,7 +153,9 @@ class AsyncClient:
         stores vectors in about a quarter of the memory; vectors read back are
         then close to, but not exactly, what was written; ``quantization="binary"``
         searches 1-bit codes and re-ranks with the exact vectors. ``on_disk=True``
-        keeps the vectors in a file instead of memory.
+        keeps the vectors in a file instead of memory. ``datatype="float16"`` or
+        ``"uint8"`` stores components in half or a quarter of the memory (see
+        :data:`Datatype`).
 
         ``expiry`` lets points expire at the time in a metadata field (see
         :class:`Expiry`).
@@ -172,6 +176,7 @@ class AsyncClient:
                 vectors,
                 sparse_vectors,
                 expiry,
+                datatype,
             )
         )
         return AsyncCollection(self, name)
@@ -194,6 +199,7 @@ class AsyncClient:
         vectors: Mapping[str, VectorParams] | None = None,
         sparse_vectors: Mapping[str, SparseVectorParams] | Sequence[str] | None = None,
         expiry: Expiry | None = None,
+        datatype: Datatype = "float32",
     ) -> AsyncCollection:
         """Returns the collection, creating it first if it does not exist."""
         try:
@@ -212,6 +218,7 @@ class AsyncClient:
                 vectors=vectors,
                 sparse_vectors=sparse_vectors,
                 expiry=expiry,
+                datatype=datatype,
             )
         except ConflictError:
             return AsyncCollection(self, name)

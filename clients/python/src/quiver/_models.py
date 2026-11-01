@@ -35,6 +35,16 @@ Quantization = Literal["none", "scalar", "binary"]
   memory); for high-dimensional embeddings
 """
 
+Datatype = Literal["float32", "float16", "uint8"]
+"""How vectors' components are stored (queries are always floats):
+
+* ``float32`` → exactly as written
+* ``float16`` → half the memory; components are rounded to half precision
+  (about three significant digits, at most 65504 in magnitude)
+* ``uint8`` → a quarter of the memory; components must be whole numbers from
+  0 to 255, stored exactly; not with the cosine metric
+"""
+
 SparseModifier = Literal["none", "idf"]
 """How sparse query weights are adjusted before scoring:
 
@@ -124,6 +134,7 @@ class VectorParams:
         quantization: ``"scalar"`` keeps 8-bit codes, about a quarter of the memory;
             ``"binary"`` searches 1-bit codes and re-ranks with the exact vectors.
         on_disk: Keep the vectors in a file instead of memory (durable storage only).
+        datatype: How components are stored (see :data:`Datatype`); fixed at creation.
     """
 
     dimension: int
@@ -131,6 +142,7 @@ class VectorParams:
     index: Index | None = None
     quantization: Quantization = "none"
     on_disk: bool = False
+    datatype: Datatype = "float32"
 
     def to_dict(self) -> dict[str, Any]:
         body: dict[str, Any] = {
@@ -142,6 +154,8 @@ class VectorParams:
             body["quantization"] = self.quantization
         if self.on_disk:
             body["on_disk"] = True
+        if self.datatype != "float32":
+            body["datatype"] = self.datatype
         return body
 
 
@@ -433,6 +447,8 @@ class CollectionInfo:
     field_indexes: list[str] = field(default_factory=list)
     quantization: str = "none"
     on_disk: bool = False
+    datatype: str = "float32"
+    """How the main vectors' components are stored."""
     vectors: dict[str, dict[str, Any]] = field(default_factory=dict)
     """Named dense vectors' settings, by name."""
     sparse_vectors: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -452,6 +468,7 @@ class CollectionInfo:
             field_indexes=list(data.get("field_indexes", [])),
             quantization=data.get("quantization", "none"),
             on_disk=data.get("on_disk", False),
+            datatype=data.get("datatype", "float32"),
             vectors=dict(data.get("vectors", {})),
             sparse_vectors=dict(data.get("sparse_vectors", {})),
             expiry=Expiry.from_dict(data["expiry"]) if data.get("expiry") else None,
@@ -474,6 +491,7 @@ class SnapshotInfo:
     quiver_version: str = ""
     quantization: str = "none"
     field_indexes: list[str] = field(default_factory=list)
+    datatype: str = "float32"
 
     @property
     def created_at(self) -> datetime:
@@ -496,6 +514,7 @@ class SnapshotInfo:
             quiver_version=data.get("quiver_version", ""),
             quantization=config.get("quantization", "none"),
             field_indexes=list(data.get("field_indexes", [])),
+            datatype=config.get("datatype", "float32"),
         )
 
 

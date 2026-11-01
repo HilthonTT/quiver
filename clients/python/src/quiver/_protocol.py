@@ -16,6 +16,7 @@ from ._errors import error_for_status
 from ._models import (
     HNSW,
     CollectionInfo,
+    Datatype,
     Example,
     Expiry,
     FacetValue,
@@ -129,6 +130,7 @@ def create_collection(
     vectors: Mapping[str, VectorParams] | None = None,
     sparse_vectors: SparseParamsLike | None = None,
     expiry: Expiry | None = None,
+    datatype: Datatype = "float32",
 ) -> Call[CollectionInfo]:
     body: dict[str, Any] = {
         "name": name,
@@ -142,6 +144,8 @@ def create_collection(
         body["quantization"] = quantization
     if on_disk:
         body["on_disk"] = True
+    if datatype != "float32":
+        body["datatype"] = datatype
     if vectors:
         body["vectors"] = {n: v.to_dict() for n, v in vectors.items()}
     if sparse_vectors:

@@ -25,6 +25,7 @@ from ._errors import (
 from ._models import (
     HNSW,
     CollectionInfo,
+    Datatype,
     Direction,
     Example,
     Expiry,
@@ -62,6 +63,7 @@ __all__ = [
     "Collection",
     "CollectionInfo",
     "ConflictError",
+    "Datatype",
     "Direction",
     "Example",
     "Expiry",

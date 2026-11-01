@@ -39,6 +39,9 @@ pub struct CollectionConfig {
     /// Keep the main vectors in a file instead of memory.
     #[serde(default, skip_serializing_if = "is_false")]
     pub on_disk: bool,
+    /// How the main vectors' components are stored; fixed at creation.
+    #[serde(default, skip_serializing_if = "Datatype::is_float32")]
+    pub datatype: Datatype,
     /// Further dense vectors every point carries, by name, each with its
     /// own dimension, metric and index.
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
@@ -63,6 +66,7 @@ impl CollectionConfig {
             index: IndexConfig::default(),
             quantization: Quantization::None,
             on_disk: false,
+            datatype: Datatype::Float32,
             vectors: BTreeMap::new(),
             sparse_vectors: BTreeMap::new(),
             expiry: None,
@@ -99,6 +103,12 @@ impl CollectionConfig {
         self
     }
 
+    #[must_use]
+    pub fn datatype(mut self, datatype: Datatype) -> Self {
+        self.datatype = datatype;
+        self
+    }
+
     /// Adds a named dense vector.
     #[must_use]
     pub fn with_vector(mut self, name: impl Into<String>, config: VectorConfig) -> Self {
@@ -121,6 +131,7 @@ impl CollectionConfig {
             index: self.index,
             quantization: self.quantization,
             on_disk: self.on_disk,
+            datatype: self.datatype,
         }
     }
 
@@ -263,6 +274,9 @@ pub struct VectorConfig {
     /// and the exact vectors on disk re-rank the results.
     #[serde(default, skip_serializing_if = "is_false")]
     pub on_disk: bool,
+    /// How the components are stored; fixed at creation.
+    #[serde(default, skip_serializing_if = "Datatype::is_float32")]
+    pub datatype: Datatype,
 }
 
 impl VectorConfig {
@@ -273,7 +287,14 @@ impl VectorConfig {
             index: IndexConfig::default(),
             quantization: Quantization::None,
             on_disk: false,
+            datatype: Datatype::Float32,
         }
+    }
+
+    #[must_use]
+    pub fn datatype(mut self, datatype: Datatype) -> Self {
+        self.datatype = datatype;
+        self
     }
 
     #[must_use]
@@ -333,6 +354,24 @@ impl VectorConfig {
                     "{kind} quantization needs an hnsw or flat index"
                 )));
             }
+        }
+
+        match self.datatype {
+            Datatype::Float32 => {}
+            Datatype::Float16 | Datatype::Uint8 if self.quantization == Quantization::Scalar => {
+                return Err(Error::invalid(format!(
+                    "scalar quantization needs the float32 datatype ({} vectors are already compact; \
+                     binary quantization works with them)",
+                    self.datatype.as_str()
+                )));
+            }
+            Datatype::Uint8 if self.metric == Metric::Cosine => {
+                return Err(Error::invalid(
+                    "the uint8 datatype does not support cosine: cosine vectors are normalised, \
+                     which leaves fractions; use dot_product, euclidean, manhattan or hamming",
+                ));
+            }
+            Datatype::Float16 | Datatype::Uint8 => {}
         }
 
         Ok(())
@@ -492,6 +531,83 @@ impl CollectionUpdate {
         }
         out.validate()?;
         Ok(out)
+    }
+}
+
+/// How a vector's components are stored, in memory and in on-disk vector
+/// files. Queries are always 32-bit floats.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Datatype {
+    /// 32-bit floats, exactly as written.
+    #[default]
+    #[serde(alias = "f32")]
+    Float32,
+    /// 16-bit floats (IEEE 754 half precision): half the memory. Written
+    /// components are rounded to the nearest half (about three significant
+    /// digits, at most 65504 in magnitude); stored and returned vectors are
+    /// the rounded values.
+    #[serde(alias = "f16")]
+    Float16,
+    /// Unsigned bytes: a quarter of the memory. Written components must be
+    /// whole numbers from 0 to 255, and are stored exactly. Not with cosine.
+    #[serde(alias = "u8")]
+    Uint8,
+}
+
+/// Largest finite `f16`.
+const F16_MAX: f32 = 65504.0;
+
+impl Datatype {
+    pub fn is_float32(&self) -> bool {
+        *self == Datatype::Float32
+    }
+
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Datatype::Float32 => "float32",
+            Datatype::Float16 => "float16",
+            Datatype::Uint8 => "uint8",
+        }
+    }
+
+    /// Bytes per component.
+    pub fn width(self) -> usize {
+        match self {
+            Datatype::Float32 => 4,
+            Datatype::Float16 => 2,
+            Datatype::Uint8 => 1,
+        }
+    }
+
+    /// Makes `v` hold exactly what this datatype stores: rounds to halves,
+    /// or checks for whole bytes. Fails for components out of range.
+    pub fn store(self, v: &mut [f32]) -> Result<()> {
+        match self {
+            Datatype::Float32 => {}
+            Datatype::Float16 => {
+                for x in v.iter_mut() {
+                    if x.abs() > F16_MAX {
+                        return Err(Error::invalid(format!(
+                            "float16 vectors cannot hold {x}: components must be between -{F16_MAX} and {F16_MAX}"
+                        )));
+                    }
+                    *x = half::f16::from_f32(*x).to_f32();
+                }
+            }
+            Datatype::Uint8 => {
+                if let Some(x) = v.iter().find(|x| !Self::is_byte(**x)) {
+                    return Err(Error::invalid(format!(
+                        "uint8 vectors cannot hold {x}: components must be whole numbers from 0 to 255"
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn is_byte(x: f32) -> bool {
+        (0.0..=255.0).contains(&x) && x.fract() == 0.0
     }
 }
 

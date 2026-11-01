@@ -1,9 +1,9 @@
 use std::collections::{BTreeMap, HashMap};
 
 use quiver_db::{
-    CollectionConfig, CollectionInfo, Error, ExpiryConfig, HnswParams, IndexConfig, KdTreeParams, Metric,
-    NamedVectors, Point, Quantization, ScoredHit, SearchHit, SnapshotInfo, SparseModifier, SparseVector,
-    SparseVectorConfig, SparseVectors, VectorConfig, new_id,
+    CollectionConfig, CollectionInfo, Datatype, Error, ExpiryConfig, HnswParams, IndexConfig, KdTreeParams,
+    Metric, NamedVectors, Point, Quantization, ScoredHit, SearchHit, SnapshotInfo, SparseModifier,
+    SparseVector, SparseVectorConfig, SparseVectors, VectorConfig, new_id,
 };
 use serde_json::Value;
 use tonic::Status;
@@ -96,6 +96,7 @@ pub(crate) fn config_from_pb(req: &pb::CreateCollectionRequest) -> Result<Collec
         index: index_from_pb(req.index),
         quantization: quantization_from_pb(req.quantization)?,
         on_disk: req.on_disk,
+        datatype: datatype_from_pb(req.datatype)?,
         vectors: req
             .vectors
             .iter()
@@ -131,6 +132,7 @@ fn vector_params_from_pb(v: &pb::VectorParams) -> Result<VectorConfig, Status> {
         index: index_from_pb(v.index),
         quantization: quantization_from_pb(v.quantization)?,
         on_disk: v.on_disk,
+        datatype: datatype_from_pb(v.datatype)?,
     })
 }
 
@@ -141,6 +143,7 @@ fn vector_params_to_pb(v: &VectorConfig) -> pb::VectorParams {
         index: Some(index_to_pb(&v.index)),
         quantization: quantization_to_pb(v.quantization),
         on_disk: v.on_disk,
+        datatype: datatype_to_pb(v.datatype),
     }
 }
 
@@ -213,6 +216,25 @@ pub(crate) fn quantization_from_pb(q: i32) -> Result<Quantization, Status> {
     }
 }
 
+pub(crate) fn datatype_from_pb(d: i32) -> Result<Datatype, Status> {
+    Ok(
+        match pb::Datatype::try_from(d).map_err(|_| Status::invalid_argument("unknown datatype"))? {
+            pb::Datatype::Float32 => Datatype::Float32,
+            pb::Datatype::Float16 => Datatype::Float16,
+            pb::Datatype::Uint8 => Datatype::Uint8,
+        },
+    )
+}
+
+pub(crate) fn datatype_to_pb(d: Datatype) -> i32 {
+    match d {
+        Datatype::Float32 => pb::Datatype::Float32,
+        Datatype::Float16 => pb::Datatype::Float16,
+        Datatype::Uint8 => pb::Datatype::Uint8,
+    }
+    .into()
+}
+
 pub(crate) fn quantization_to_pb(q: Quantization) -> i32 {
     match q {
         Quantization::None => pb::Quantization::None,
@@ -237,6 +259,7 @@ pub(crate) fn info_to_pb(info: CollectionInfo) -> pb::CollectionInfo {
         tombstones: info.tombstones as u64,
         field_indexes: info.field_indexes,
         quantization: quantization_to_pb(info.config.quantization),
+        datatype: datatype_to_pb(info.config.datatype),
     }
 }
 
@@ -333,6 +356,7 @@ pub(crate) fn snapshot_to_pb(s: SnapshotInfo) -> pb::SnapshotInfo {
         archive_bytes: s.archive_bytes,
         field_indexes: m.field_indexes,
         quantization: quantization_to_pb(m.config.quantization),
+        datatype: datatype_to_pb(m.config.datatype),
     }
 }
 
@@ -383,6 +407,7 @@ mod tests {
             index: info.index,
             quantization: info.quantization,
             on_disk: info.on_disk,
+            datatype: info.datatype,
             vectors: info.vectors,
             sparse_vectors: info.sparse_vectors,
             expiry: info.expiry,

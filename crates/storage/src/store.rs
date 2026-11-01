@@ -37,6 +37,7 @@ impl StoreSpec {
             dim: v.dimension,
             quantization: v.quantization,
             on_disk: v.on_disk,
+            datatype: v.datatype,
         };
         Self {
             main: column(&config.main_vector()),
@@ -67,7 +68,10 @@ impl StoreSpec {
     pub fn staging(mut self) -> Self {
         for c in std::iter::once(&mut self.main).chain(self.named.iter_mut().map(|(_, c)| c)) {
             if c.on_disk {
-                *c = ColumnSpec::new(c.dim);
+                *c = ColumnSpec {
+                    datatype: c.datatype,
+                    ..ColumnSpec::new(c.dim)
+                };
             }
         }
         self.dir = None;

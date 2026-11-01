@@ -1989,3 +1989,54 @@ async fn scoped_keys_cannot_upload_snapshots_of_other_collections() {
     );
     assert_eq!(app.raw(upload("rw-secret")).await.status(), StatusCode::CREATED);
 }
+
+#[tokio::test]
+async fn compact_datatypes_over_http() {
+    let app = TestApp::new();
+    let (status, body) = app
+        .post(
+            "/collections",
+            json!({"name": "b", "dimension": 2, "metric": "euclidean", "datatype": "uint8"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(body["datatype"], "uint8");
+    let (status, body) = app
+        .post(
+            "/collections/b/points",
+            json!({"points": [{"id": "a", "vector": [1.5, 2.0]}]}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+    assert_eq!(body["error"]["code"], "invalid_argument");
+
+    let (status, body) = app
+        .post(
+            "/collections",
+            json!({"name": "h", "dimension": 2, "metric": "euclidean", "datatype": "float16"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    app.post(
+        "/collections/h/points",
+        json!({"points": [{"id": "a", "vector": [0.1, 2.0]}]}),
+    )
+    .await;
+    let (_, body) = app.get("/collections/h/points/a").await;
+    assert_eq!(body["vector"], json!([0.0999755859375, 2.0]));
+
+    let (status, body) = app
+        .post(
+            "/collections",
+            json!({"name": "c", "dimension": 2, "datatype": "uint8"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST, "uint8 refuses cosine: {body}");
+    let (status, _) = app
+        .post(
+            "/collections",
+            json!({"name": "d", "dimension": 2, "datatype": "int4"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+}

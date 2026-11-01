@@ -1663,7 +1663,7 @@ fn validate_point(config: &CollectionConfig, p: &mut Point) -> Result<()> {
     let id = p.id.clone();
     let invalid = |what: String| Error::invalid(format!("point `{id}`: {what}"));
     p.metadata = checked_metadata(&p.id, p.metadata.take())?;
-    validate_vector(&config.main_vector(), &mut p.vector).map_err(|e| invalid(e.to_string()))?;
+    validate_stored_vector(&config.main_vector(), &mut p.vector).map_err(|e| invalid(e.to_string()))?;
     if let Some(name) = p.vectors.keys().find(|n| !config.vectors.contains_key(*n)) {
         return Err(invalid(format!("the collection has no vector named `{name}`")));
     }
@@ -1672,7 +1672,7 @@ fn validate_point(config: &CollectionConfig, p: &mut Point) -> Result<()> {
             .vectors
             .get_mut(name)
             .ok_or_else(|| invalid(format!("vector `{name}` is missing")))?;
-        validate_vector(v, vector).map_err(|e| invalid(format!("vector `{name}`: {e}")))?;
+        validate_stored_vector(v, vector).map_err(|e| invalid(format!("vector `{name}`: {e}")))?;
     }
     for (name, v) in &mut p.sparse_vectors {
         if !config.sparse_vectors.contains_key(name) {
@@ -1712,6 +1712,13 @@ fn validate_vector(config: &VectorConfig, v: &mut [f32]) -> Result<()> {
     Ok(())
 }
 
+/// Checks a vector to be stored, then makes it hold exactly what its
+/// datatype stores (queries stay 32-bit floats).
+fn validate_stored_vector(config: &VectorConfig, v: &mut [f32]) -> Result<()> {
+    validate_vector(config, v)?;
+    config.datatype.store(v)
+}
+
 /// Validates a point's metadata and normalises `null` to `None`: the two
 /// are stored the same way, so a point reads back identically however it
 /// was recovered.
@@ -1745,6 +1752,8 @@ fn check_restored_points(config: &CollectionConfig, store: &VectorStore) -> Resu
             if v.iter().any(|x| !x.is_finite()) {
                 return Err(corrupt(slot, "has a NaN or infinite component"));
             }
+            // Columns round what they load to their datatype; a float16
+            // component out of range becomes infinite and is caught above.
             let squared_norm: f64 = v.iter().map(|&x| f64::from(x) * f64::from(x)).sum();
             if squared_norm > f64::from(f32::MAX) / 4.0 {
                 return Err(corrupt(slot, "has too large a magnitude"));

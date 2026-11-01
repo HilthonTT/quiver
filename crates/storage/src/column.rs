@@ -5,7 +5,7 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use quiver_types::distance::dot;
-use quiver_types::{Error, Metric, Quantization, Result};
+use quiver_types::{Datatype, Error, Metric, Quantization, Result};
 
 /// How one column of vectors is held.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -15,6 +15,8 @@ pub struct ColumnSpec {
     pub quantization: Quantization,
     /// The exact vectors in a file rather than in memory.
     pub on_disk: bool,
+    /// How the exact vectors' components are stored.
+    pub datatype: Datatype,
 }
 
 impl ColumnSpec {
@@ -23,6 +25,7 @@ impl ColumnSpec {
             dim,
             quantization: Quantization::None,
             on_disk: false,
+            datatype: Datatype::Float32,
         }
     }
 }
@@ -30,7 +33,92 @@ impl ColumnSpec {
 /// File names of on-disk columns start with this; anything else in the
 /// directory is left alone when stale columns are cleaned up.
 pub const DISK_FILE_PREFIX: &str = "vectors-";
-const DISK_FILE_SUFFIX: &str = ".f32";
+
+/// The extension of an on-disk column's file, after its datatype.
+fn disk_file_suffix(datatype: Datatype) -> &'static str {
+    match datatype {
+        Datatype::Float32 => ".f32",
+        Datatype::Float16 => ".f16",
+        Datatype::Uint8 => ".u8",
+    }
+}
+
+/// Exact vectors in memory, one `dim`-long run of components per slot.
+#[derive(Debug, Clone)]
+enum Elems {
+    F32(Vec<f32>),
+    /// `f16` bits.
+    F16(Vec<u16>),
+    U8(Vec<u8>),
+}
+
+impl Elems {
+    fn new(datatype: Datatype) -> Self {
+        match datatype {
+            Datatype::Float32 => Elems::F32(Vec::new()),
+            Datatype::Float16 => Elems::F16(Vec::new()),
+            Datatype::Uint8 => Elems::U8(Vec::new()),
+        }
+    }
+
+    fn datatype(&self) -> Datatype {
+        match self {
+            Elems::F32(_) => Datatype::Float32,
+            Elems::F16(_) => Datatype::Float16,
+            Elems::U8(_) => Datatype::Uint8,
+        }
+    }
+
+    fn bytes(&self) -> usize {
+        match self {
+            Elems::F32(d) => d.len() * 4,
+            Elems::F16(d) => d.len() * 2,
+            Elems::U8(d) => d.len(),
+        }
+    }
+
+    /// Appends `v`, which already holds what the datatype stores (see
+    /// [`Datatype::store`]); anything else is rounded or clamped.
+    fn push(&mut self, v: &[f32]) {
+        match self {
+            Elems::F32(d) => d.extend_from_slice(v),
+            Elems::F16(d) => d.extend(v.iter().map(|&x| f16_bits(x))),
+            Elems::U8(d) => d.extend(v.iter().map(|&x| to_byte(x))),
+        }
+    }
+
+    fn vector(&self, dim: usize, slot: u32) -> Cow<'_, [f32]> {
+        let range = slot as usize * dim..(slot as usize + 1) * dim;
+        match self {
+            Elems::F32(d) => Cow::Borrowed(&d[range]),
+            Elems::F16(d) => Cow::Owned(d[range].iter().map(|&h| f16_value(h)).collect()),
+            Elems::U8(d) => Cow::Owned(d[range].iter().map(|&b| f32::from(b)).collect()),
+        }
+    }
+
+    #[inline]
+    fn distance(&self, metric: Metric, query: &[f32], slot: u32) -> f32 {
+        let dim = query.len();
+        let range = slot as usize * dim..(slot as usize + 1) * dim;
+        match self {
+            Elems::F32(d) => metric.distance(query, &d[range]),
+            Elems::F16(d) => metric.distance_f16(query, &d[range]),
+            Elems::U8(d) => metric.distance_u8(query, &d[range]),
+        }
+    }
+}
+
+fn f16_bits(x: f32) -> u16 {
+    half::f16::from_f32(x).to_bits()
+}
+
+fn f16_value(bits: u16) -> f32 {
+    half::f16::from_bits(bits).to_f32()
+}
+
+fn to_byte(x: f32) -> u8 {
+    x.round().clamp(0.0, 255.0) as u8
+}
 
 /// Scalar-quantized vectors: one code byte per component, decoded as
 /// `min + code * step` with `[min, step]` stored per vector.
@@ -213,20 +301,21 @@ impl Codes {
     }
 }
 
-/// Exact vectors in a file, slot `s` at byte `s * dim * 4`, optionally with
-/// quantized codes in memory to search with.
+/// Exact vectors in a file, slot `s` at byte `s * dim * datatype.width()`,
+/// optionally with quantized codes in memory to search with.
 #[derive(Debug)]
 struct Disk {
     file: File,
     path: PathBuf,
+    datatype: Datatype,
     codes: Option<Codes>,
 }
 
 #[derive(Debug)]
 enum Data {
     /// Exact vectors in memory, with binary codes to search with if `bits`.
-    F32 {
-        data: Vec<f32>,
+    Mem {
+        data: Elems,
         bits: Option<Bits>,
     },
     /// Scalar codes in memory, in place of the vectors.
@@ -260,8 +349,8 @@ impl VectorColumn {
         Self {
             dim,
             slots: 0,
-            data: Data::F32 {
-                data: Vec::new(),
+            data: Data::Mem {
+                data: Elems::F32(Vec::new()),
                 bits: None,
             },
         }
@@ -275,7 +364,7 @@ impl VectorColumn {
             let dir = dir.ok_or_else(|| {
                 Error::invalid("vectors can only be kept on disk with a durable storage engine")
             })?;
-            let path = dir.join(new_file_name(name));
+            let path = dir.join(new_file_name(name, spec.datatype));
             let file = OpenOptions::new()
                 .read(true)
                 .write(true)
@@ -284,19 +373,24 @@ impl VectorColumn {
             column.data = Data::Disk(Disk {
                 file,
                 path,
+                datatype: spec.datatype,
                 codes: Codes::new(spec.quantization),
             });
         } else {
-            match spec.quantization {
-                Quantization::None => {}
-                Quantization::Scalar => column.data = Data::Sq8(Sq8::default()),
-                Quantization::Binary => {
-                    column.data = Data::F32 {
-                        data: Vec::new(),
-                        bits: Some(Bits::default()),
-                    }
+            let data = Elems::new(spec.datatype);
+            column.data = match spec.quantization {
+                Quantization::None => Data::Mem { data, bits: None },
+                // Scalar codes replace float32 vectors; other datatypes are
+                // refused with them by `VectorConfig::validate`.
+                Quantization::Scalar if spec.datatype.is_float32() => Data::Sq8(Sq8::default()),
+                Quantization::Scalar => {
+                    return Err(Error::invalid("scalar quantization needs the float32 datatype"));
                 }
-            }
+                Quantization::Binary => Data::Mem {
+                    data,
+                    bits: Some(Bits::default()),
+                },
+            };
         }
         Ok(column)
     }
@@ -306,7 +400,7 @@ impl VectorColumn {
     pub fn adopt(spec: ColumnSpec, path: &Path, slots: usize) -> Result<Self> {
         let file = OpenOptions::new().read(true).write(true).open(path)?;
         let want = (slots as u64)
-            .checked_mul(spec.dim as u64 * 4)
+            .checked_mul((spec.dim * spec.datatype.width()) as u64)
             .ok_or_else(|| Error::Corrupt("vector file size overflows".into()))?;
         let have = file.metadata()?.len();
         if have < want {
@@ -324,6 +418,7 @@ impl VectorColumn {
             data: Data::Disk(Disk {
                 file,
                 path: path.to_path_buf(),
+                datatype: spec.datatype,
                 codes: None,
             }),
         };
@@ -352,6 +447,16 @@ impl VectorColumn {
             dim: self.dim,
             quantization: self.quantization(),
             on_disk: self.is_on_disk(),
+            datatype: self.datatype(),
+        }
+    }
+
+    /// How the exact vectors' components are stored.
+    pub fn datatype(&self) -> Datatype {
+        match &self.data {
+            Data::Mem { data, .. } => data.datatype(),
+            Data::Sq8(_) => Datatype::Float32,
+            Data::Disk(d) => d.datatype,
         }
     }
 
@@ -368,8 +473,8 @@ impl VectorColumn {
     /// How the codes searches score are quantized, if they are.
     pub fn quantization(&self) -> Quantization {
         match &self.data {
-            Data::F32 { bits: None, .. } => Quantization::None,
-            Data::F32 { bits: Some(_), .. } => Quantization::Binary,
+            Data::Mem { bits: None, .. } => Quantization::None,
+            Data::Mem { bits: Some(_), .. } => Quantization::Binary,
             Data::Sq8(_) => Quantization::Scalar,
             Data::Disk(d) => d.codes.as_ref().map_or(Quantization::None, Codes::quantization),
         }
@@ -396,7 +501,7 @@ impl VectorColumn {
     /// on disk or (for binary codes) in memory.
     pub fn rescores(&self) -> bool {
         match &self.data {
-            Data::F32 { bits, .. } => bits.is_some(),
+            Data::Mem { bits, .. } => bits.is_some(),
             Data::Sq8(_) => false,
             Data::Disk(d) => d.codes.is_some(),
         }
@@ -405,7 +510,7 @@ impl VectorColumn {
     /// Bytes of memory the vectors take, tombstones included.
     pub fn vector_bytes(&self) -> usize {
         match &self.data {
-            Data::F32 { data, bits } => data.len() * 4 + bits.as_ref().map_or(0, Bits::bytes),
+            Data::Mem { data, bits } => data.bytes() + bits.as_ref().map_or(0, Bits::bytes),
             Data::Sq8(codes) => codes.bytes(),
             Data::Disk(d) => d.codes.as_ref().map_or(0, Codes::bytes),
         }
@@ -426,7 +531,10 @@ impl VectorColumn {
             for slot in 0..self.slots as u32 {
                 data.extend_from_slice(&self.vector(slot));
             }
-            self.data = Data::F32 { data, bits: None };
+            self.data = Data::Mem {
+                data: Elems::F32(data),
+                bits: None,
+            };
         }
         let codes = Codes::new(quantization).map(|mut codes| {
             for slot in 0..self.slots as u32 {
@@ -435,13 +543,16 @@ impl VectorColumn {
             codes
         });
         match codes {
-            Some(Codes::Scalar(sq8)) if !self.is_on_disk() => self.data = Data::Sq8(sq8),
+            // Scalar codes replace only float32 vectors in memory.
+            Some(Codes::Scalar(sq8)) if !self.is_on_disk() && self.datatype().is_float32() => {
+                self.data = Data::Sq8(sq8);
+            }
             codes => match &mut self.data {
                 Data::Disk(d) => d.codes = codes,
-                Data::F32 { bits, .. } => {
+                Data::Mem { bits, .. } => {
                     *bits = codes.map(|c| match c {
                         Codes::Binary(b) => b,
-                        Codes::Scalar(_) => unreachable!("scalar codes replace the vectors"),
+                        Codes::Scalar(_) => unreachable!("scalar codes need float32 vectors"),
                     });
                 }
                 Data::Sq8(_) => unreachable!("decoded above"),
@@ -455,10 +566,7 @@ impl VectorColumn {
     #[inline]
     pub fn vector(&self, slot: u32) -> Cow<'_, [f32]> {
         match &self.data {
-            Data::F32 { data, .. } => {
-                let start = slot as usize * self.dim;
-                Cow::Borrowed(&data[start..start + self.dim])
-            }
+            Data::Mem { data, .. } => data.vector(self.dim, slot),
             Data::Sq8(codes) => {
                 let mut out = Vec::with_capacity(self.dim);
                 codes.decode_into(self.dim, slot, &mut out);
@@ -477,14 +585,11 @@ impl VectorColumn {
     #[inline]
     pub fn distance(&self, metric: Metric, query: &[f32], slot: u32) -> f32 {
         match &self.data {
-            Data::F32 {
+            Data::Mem {
                 data: _,
                 bits: Some(bits),
             } => bits.distance(metric, query, slot),
-            Data::F32 { data, bits: None } => {
-                let start = slot as usize * self.dim;
-                metric.distance(query, &data[start..start + self.dim])
-            }
+            Data::Mem { data, bits: None } => data.distance(metric, query, slot),
             Data::Sq8(codes) => codes.distance(metric, query, slot),
             Data::Disk(Disk {
                 codes: Some(codes), ..
@@ -498,10 +603,7 @@ impl VectorColumn {
     pub fn exact_distance(&self, metric: Metric, query: &[f32], slot: u32) -> f32 {
         match &self.data {
             Data::Disk(d) => self.exact_from_disk(d, metric, query, slot),
-            Data::F32 { data, .. } => {
-                let start = slot as usize * self.dim;
-                metric.distance(query, &data[start..start + self.dim])
-            }
+            Data::Mem { data, .. } => data.distance(metric, query, slot),
             Data::Sq8(_) => self.distance(metric, query, slot),
         }
     }
@@ -526,13 +628,25 @@ impl VectorColumn {
 
     fn read_into(&self, d: &Disk, slot: u32, out: &mut Vec<f32>) {
         debug_assert!((slot as usize) < self.slots);
-        let len = self.dim * 4;
+        let len = self.dim * d.datatype.width();
         BYTES.with_borrow_mut(|bytes| {
             bytes.resize(len, 0);
             read_exact_at(&d.file, bytes, slot as u64 * len as u64)
                 .unwrap_or_else(|e| panic!("cannot read vector {slot} from {}: {e}", d.path.display()));
             out.clear();
-            out.extend(bytes.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)));
+            match d.datatype {
+                Datatype::Float32 => {
+                    out.extend(bytes.as_chunks::<4>().0.iter().map(|c| f32::from_le_bytes(*c)))
+                }
+                Datatype::Float16 => out.extend(
+                    bytes
+                        .as_chunks::<2>()
+                        .0
+                        .iter()
+                        .map(|c| f16_value(u16::from_le_bytes(*c))),
+                ),
+                Datatype::Uint8 => out.extend(bytes.iter().map(|&b| f32::from(b))),
+            }
         });
     }
 
@@ -540,15 +654,19 @@ impl VectorColumn {
     pub fn push(&mut self, v: &[f32]) {
         debug_assert_eq!(v.len(), self.dim);
         match &mut self.data {
-            Data::F32 { data, bits } => {
-                data.extend_from_slice(v);
+            Data::Mem { data, bits } => {
+                data.push(v);
                 if let Some(bits) = bits {
                     bits.push(v);
                 }
             }
             Data::Sq8(codes) => codes.push(v),
             Data::Disk(d) => {
-                let bytes: Vec<u8> = v.iter().flat_map(|x| x.to_le_bytes()).collect();
+                let bytes: Vec<u8> = match d.datatype {
+                    Datatype::Float32 => v.iter().flat_map(|x| x.to_le_bytes()).collect(),
+                    Datatype::Float16 => v.iter().flat_map(|&x| f16_bits(x).to_le_bytes()).collect(),
+                    Datatype::Uint8 => v.iter().map(|&x| to_byte(x)).collect(),
+                };
                 let offset = self.slots as u64 * bytes.len() as u64;
                 write_all_at(&d.file, &bytes, offset)
                     .unwrap_or_else(|e| panic!("cannot write to {}: {e}", d.path.display()));
@@ -569,20 +687,24 @@ impl VectorColumn {
     }
 }
 
-fn new_file_name(name: &str) -> String {
+fn new_file_name(name: &str, datatype: Datatype) -> String {
     let millis = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map_or(0, |d| d.as_millis());
     let n = NEXT_FILE.fetch_add(1, Ordering::Relaxed);
     format!(
-        "{DISK_FILE_PREFIX}{name}-{millis:x}-{:x}-{n:x}{DISK_FILE_SUFFIX}",
-        std::process::id()
+        "{DISK_FILE_PREFIX}{name}-{millis:x}-{:x}-{n:x}{}",
+        std::process::id(),
+        disk_file_suffix(datatype)
     )
 }
 
 /// Whether `name` is the file name of an on-disk column.
 pub fn is_disk_file(name: &str) -> bool {
-    name.starts_with(DISK_FILE_PREFIX) && name.ends_with(DISK_FILE_SUFFIX)
+    name.starts_with(DISK_FILE_PREFIX)
+        && [Datatype::Float32, Datatype::Float16, Datatype::Uint8]
+            .into_iter()
+            .any(|d| name.ends_with(disk_file_suffix(d)))
 }
 
 /// Deletes on-disk column files in `dir` other than `keep`.
@@ -906,7 +1028,7 @@ mod tests {
         for (slot, v) in vectors.iter().enumerate() {
             let slot = slot as u32;
             assert_eq!(*c.vector(slot), **v, "returned vectors are exact");
-            let Data::F32 { bits: Some(bits), .. } = &c.data else {
+            let Data::Mem { bits: Some(bits), .. } = &c.data else {
                 panic!()
             };
             let mut decoded = Vec::new();
@@ -951,6 +1073,7 @@ mod tests {
             dim: 64,
             quantization: Quantization::Binary,
             on_disk: true,
+            datatype: Datatype::Float32,
         };
         let c = filled(spec, Some(dir.path()), &vectors);
         assert!(c.rescores());

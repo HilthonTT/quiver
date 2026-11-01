@@ -156,6 +156,8 @@ Every vector, stored or used as a query, must:
 - not be all zeros, with the cosine metric (each named vector has its own metric);
 - have a squared length of at most `f32::MAX / 4` (about 8.5 × 10³⁷), so that every distance between two valid vectors stays finite. Larger vectors fail with `vector magnitude too large`.
 
+Stored vectors must also fit their [datatype](/docs/indexes/#datatypes): whole numbers from 0 to 255 for `uint8`, and at most 65504 in magnitude for `float16` (which rounds them). Queries need not.
+
 With the **cosine** metric, vectors are normalised to unit length when they are stored, and queries are normalised too. A point you read back has the normalised vector:
 
 ```bash

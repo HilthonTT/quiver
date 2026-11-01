@@ -12,7 +12,7 @@ use tokio::io::AsyncWriteExt;
 use std::collections::BTreeMap;
 
 use quiver_db::{
-    Collection, CollectionConfig, CollectionInfo, CollectionUpdate, ContextPair, Database, Example,
+    Collection, CollectionConfig, CollectionInfo, CollectionUpdate, ContextPair, Database, Datatype, Example,
     ExpiryConfig, Filter, Fusion, GroupBy, HybridQuery, IndexConfig, MetadataMode, Metric, OrderBy, Point,
     PointInput, PointSelector, Prefetch, Quantization, QueryVector, Rescore, RestoreOptions, ScrollOptions,
     SearchHit, SearchOptions, SearchTarget, SnapshotInfo, SparseVector, SparseVectorConfig, VectorConfig,
@@ -137,6 +137,8 @@ pub struct CreateCollection {
     #[serde(default)]
     on_disk: bool,
     #[serde(default)]
+    datatype: Datatype,
+    #[serde(default)]
     vectors: BTreeMap<String, VectorConfig>,
     #[serde(default)]
     sparse_vectors: BTreeMap<String, SparseVectorConfig>,
@@ -164,6 +166,7 @@ pub async fn create_collection(
         index: req.index,
         quantization: req.quantization,
         on_disk: req.on_disk,
+        datatype: req.datatype,
         vectors: req.vectors,
         sparse_vectors: req.sparse_vectors,
         expiry: req.expiry,

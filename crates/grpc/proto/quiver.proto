@@ -66,6 +66,15 @@ service Quiver {
   rpc UploadSnapshot(stream SnapshotChunk) returns (SnapshotInfo);
 }
 
+// How a vector's components are stored. Queries are always 32-bit floats.
+enum Datatype {
+  DATATYPE_FLOAT32 = 0;
+  // Half precision: half the memory; components are rounded to it.
+  DATATYPE_FLOAT16 = 1;
+  // Whole numbers from 0 to 255: a quarter of the memory. Not with cosine.
+  DATATYPE_UINT8 = 2;
+}
+
 enum Quantization {
   QUANTIZATION_NONE = 0;
   // 8-bit scalar quantization: about a quarter of the memory, lossy.
@@ -123,6 +132,8 @@ message VectorParams {
   Quantization quantization = 4;
   // Keep the vectors in a file rather than memory (durable engines only).
   bool on_disk = 5;
+  // Fixed at creation.
+  Datatype datatype = 6;
 }
 
 enum SparseModifier {
@@ -165,6 +176,8 @@ message CollectionInfo {
   map<string, SparseVectorParams> sparse_vectors = 11;
   // Unset when points do not expire.
   ExpiryConfig expiry = 12;
+  // The main vector's datatype.
+  Datatype datatype = 13;
 }
 
 message Point {
@@ -206,6 +219,7 @@ message SnapshotInfo {
   map<string, VectorParams> vectors = 15;
   map<string, SparseVectorParams> sparse_vectors = 16;
   ExpiryConfig expiry = 17;
+  Datatype datatype = 18;
 }
 
 message HealthRequest {}
@@ -243,6 +257,8 @@ message CreateCollectionRequest {
   map<string, SparseVectorParams> sparse_vectors = 9;
   // Unset: points never expire.
   ExpiryConfig expiry = 10;
+  // The main vector's datatype; fixed at creation.
+  Datatype datatype = 11;
 }
 
 message UpdateCollectionRequest {

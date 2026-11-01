@@ -14,7 +14,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   listings show only what is in scope; snapshots are judged by the collection they were taken of; `/metrics` refuses scoped
   keys. Out-of-scope requests answer `403 forbidden` / `PERMISSION_DENIED`, also for names that do not exist.
   `ApiKey::new`/`with_collections`/`access`, `Access` and `Scope` in `quiver_db::auth`; `Database::authorize` and friends.
-- **SIMD distance kernels**: AVX2 + FMA on x86-64, chosen at run time, with the portable kernels as
+- **Vector datatypes**: `"datatype": "float16"` (half the memory; components rounded to half precision) or `"uint8"`
+  (a quarter; whole numbers 0-255, stored exactly; not with cosine), per vector, at creation. On-disk vector files use the
+  datatype's width. Queries stay 32-bit floats. Works with binary quantization, not scalar. gRPC `Datatype`; Python
+  `datatype=` and `VectorParams(datatype=...)`; `Datatype` in the embedded crate.
+- **SIMD distance kernels**: AVX2 + FMA (and F16C for `float16`) on x86-64, chosen at run time, with the portable kernels as
   the fallback. About 25-35% more HNSW queries per second and 20% faster builds at 768 dimensions.
 
 ### Changed

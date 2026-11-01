@@ -18,10 +18,10 @@ pub use quiver_storage as storage;
 pub use quiver_storage::StorageKind;
 pub use quiver_types as types;
 pub use quiver_types::{
-    CollectionConfig, CollectionInfo, CollectionUpdate, ContextPair, Direction, Error, Example, ExpiryConfig,
-    FacetCount, Filter, Fusion, GroupBy, HitGroup, HnswParams, HybridQuery, IndexConfig, KdTreeParams,
-    MAX_DIMENSION, MAX_ID_LEN, MAX_NAME_LEN, MetadataMode, Metric, NamedVectors, OrderBy, Point, PointInput,
-    PointSelector, Prefetch, Quantization, QueryVector, Rescore, Result, ScoredHit, ScrollOptions, SearchHit,
-    SearchOptions, SearchTarget, SparseModifier, SparseVector, SparseVectorConfig, SparseVectors,
-    VectorConfig, VectorUpdate, auth, distance, filter, merge_patch, new_id, validate_name,
+    CollectionConfig, CollectionInfo, CollectionUpdate, ContextPair, Datatype, Direction, Error, Example,
+    ExpiryConfig, FacetCount, Filter, Fusion, GroupBy, HitGroup, HnswParams, HybridQuery, IndexConfig,
+    KdTreeParams, MAX_DIMENSION, MAX_ID_LEN, MAX_NAME_LEN, MetadataMode, Metric, NamedVectors, OrderBy,
+    Point, PointInput, PointSelector, Prefetch, Quantization, QueryVector, Rescore, Result, ScoredHit,
+    ScrollOptions, SearchHit, SearchOptions, SearchTarget, SparseModifier, SparseVector, SparseVectorConfig,
+    SparseVectors, VectorConfig, VectorUpdate, auth, distance, filter, merge_patch, new_id, validate_name,
 };

@@ -133,9 +133,35 @@ Signs alone are a coarse summary of a vector, so searches fetch 20 × `k` candid
 
 The same rules as for scalar quantization apply: HNSW and flat indexes only, no `hamming`, and it can be switched on, off or to `scalar` [later](/docs/collections/#changing-settings).
 
+## Datatypes
+
+`"datatype"` sets how a vector's components are stored, in memory and in [on-disk](/docs/storage/#vectors-on-disk) vector files. It is set per vector when the collection is created and cannot change later:
+
+| `datatype` | Bytes per component | Written components | Metrics |
+| --- | --- | --- | --- |
+| `float32` (default) | 4 | stored as written | all |
+| `float16` | 2 | rounded to half precision: about three significant digits, at most 65504 in magnitude (larger ones are refused) | all |
+| `uint8` | 1 | must be whole numbers from 0 to 255 (anything else is refused), stored exactly | all but `cosine` |
+
+```bash
+curl -X POST localhost:6900/collections -H 'content-type: application/json' \
+  -d '{"name": "docs", "dimension": 1024, "datatype": "float16"}'
+curl -X POST localhost:6900/collections -H 'content-type: application/json' \
+  -d '{"name": "codes", "dimension": 1024, "metric": "dot_product", "datatype": "uint8"}'
+```
+
+```python
+client.create_collection("docs", 1024, datatype="float16")
+client.create_collection("codes", 1024, metric="dot_product", datatype="uint8")
+```
+
+Points read back carry the stored values, so a `float16` vector reads back rounded (after [cosine normalisation](/docs/collections/#vector-rules)). Searches compute exact distances to the stored values. Queries are always 32-bit floats, in every datatype, so a `uint8` collection can be searched with any vector. Unlike quantization, a datatype loses nothing more than its rounding, so there is nothing to re-rank: `float16` suits embeddings, whose components rarely need more than three digits, and `uint8` suits models that output byte embeddings. Cosine vectors are normalised to fractions, which bytes cannot hold, so `uint8` needs another metric (`dot_product` for byte embeddings meant for cosine similarity).
+
+Datatypes work with every index and with [binary quantization](#binary-quantization), which then keeps its exact vectors in the smaller datatype. Scalar quantization needs `float32`. The write-ahead log, checkpoints and snapshots hold 32-bit floats, as with quantization, so the file formats are unchanged.
+
 ## Distance kernels
 
-On x86-64 CPUs with AVX2 and FMA (Intel since Haswell, AMD since Excavator), distances are computed with 256-bit SIMD instructions. The CPU is checked at run time, so the same binary runs everywhere: on other CPUs it uses portable code, which compilers vectorize for the baseline instruction set (SSE2, or NEON on ARM). The two add in a different order, so distances may differ in their last bits between machines, never within one process.
+On x86-64 CPUs with AVX2 and FMA (Intel since Haswell, AMD since Excavator), distances are computed with 256-bit SIMD instructions, and `float16` vectors are widened in hardware (F16C). The CPU is checked at run time, so the same binary runs everywhere: on other CPUs it uses portable code, which compilers vectorize for the baseline instruction set (SSE2, or NEON on ARM). The two add in a different order, so distances may differ in their last bits between machines, never within one process.
 
 ## Persistence
 
