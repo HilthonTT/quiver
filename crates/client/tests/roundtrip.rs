@@ -244,6 +244,7 @@ async fn api_keys_are_sent() {
         name: "admin".into(),
         role: Role::ReadWrite,
         key: "s3cret".into(),
+        collections: None,
     }])
     .unwrap();
     let server = start(keys).await;

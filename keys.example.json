@@ -1,4 +1,10 @@
 [
   { "name": "admin", "role": "readwrite", "key": "replace-with-a-long-random-secret" },
-  { "name": "dashboard", "role": "readonly", "key": "replace-with-another-secret" }
+  { "name": "dashboard", "role": "readonly", "key": "replace-with-another-secret" },
+  {
+    "name": "tenant-a",
+    "role": "readwrite",
+    "key": "replace-with-a-third-secret",
+    "collections": ["tenant-a-*", "shared-catalog"]
+  }
 ]

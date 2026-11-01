@@ -6,6 +6,7 @@ use std::sync::Arc;
 use parking_lot::RwLock;
 use quiver_snapshot::{SnapshotInfo, SnapshotRegistry};
 use quiver_storage::{StorageKind, StorageOptions, state};
+use quiver_types::auth::Access;
 use quiver_types::{CollectionConfig, CollectionInfo, CollectionUpdate, Error, Result, validate_name};
 
 use crate::collection::{Collection, Env, META_FILE, with_expiry_field};
@@ -340,6 +341,83 @@ impl Database {
     /// Every alias, with the collection it points to.
     pub fn aliases(&self) -> BTreeMap<String, String> {
         self.catalog.read().aliases.clone()
+    }
+
+    /// Fails with [`Error::Forbidden`] unless `access` may use the collection
+    /// `name` names. An alias is judged by the collection it points to, so a
+    /// key scoped to `books` may also use an alias of `books`. Names that do
+    /// not exist are judged as they are, so that a scoped key cannot learn
+    /// whether a collection outside its scope exists.
+    pub fn authorize(&self, access: &Access, name: &str) -> Result<()> {
+        if !access.is_scoped() {
+            return Ok(());
+        }
+        let catalog = self.catalog.read();
+        let effective = match (catalog.collections.contains_key(name), catalog.aliases.get(name)) {
+            (false, Some(target)) => target.as_str(),
+            _ => name,
+        };
+        if access.covers(effective) {
+            Ok(())
+        } else {
+            Err(Error::Forbidden(name.to_owned()))
+        }
+    }
+
+    /// Fails unless `access` may create or claim the name `name` (a new
+    /// collection, a rename target, a restore target or an alias). Aliases
+    /// are not resolved: the name itself must be in scope.
+    pub fn authorize_name(&self, access: &Access, name: &str) -> Result<()> {
+        if access.covers(name) {
+            Ok(())
+        } else {
+            Err(Error::Forbidden(name.to_owned()))
+        }
+    }
+
+    /// Fails unless `access` may change or remove the alias `alias`: the
+    /// alias's own name and the collection it points to now (if it exists)
+    /// must both be in scope.
+    pub fn authorize_alias(&self, access: &Access, alias: &str) -> Result<()> {
+        if !access.is_scoped() {
+            return Ok(());
+        }
+        self.authorize_name(access, alias)?;
+        if let Some(target) = self.catalog.read().aliases.get(alias)
+            && !access.covers(target)
+        {
+            return Err(Error::Forbidden(alias.to_owned()));
+        }
+        Ok(())
+    }
+
+    /// The collections `access` may see.
+    pub fn list_collections_for(&self, access: &Access) -> Vec<CollectionInfo> {
+        self.catalog
+            .read()
+            .collections
+            .iter()
+            .filter(|(name, _)| access.covers(name))
+            .map(|(_, c)| c.info())
+            .collect()
+    }
+
+    /// The aliases `access` may see: those whose name and collection are both
+    /// in scope.
+    pub fn aliases_for(&self, access: &Access) -> BTreeMap<String, String> {
+        let mut aliases = self.aliases();
+        aliases.retain(|alias, target| access.covers(alias) && access.covers(target));
+        aliases
+    }
+
+    /// Fails unless `access` may use the snapshot `id`, which is judged by
+    /// the name of the collection it was taken of.
+    pub fn authorize_snapshot(&self, access: &Access, id: &str) -> Result<()> {
+        if !access.is_scoped() {
+            return Ok(());
+        }
+        let info = self.snapshots()?.get(id)?;
+        self.authorize_name(access, &info.manifest.collection)
     }
 
     /// Points `alias` at `collection` (by its own name), creating the alias

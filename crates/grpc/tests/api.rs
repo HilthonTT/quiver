@@ -66,6 +66,7 @@ fn keys() -> KeyStore {
         name: name.into(),
         role,
         key: key.into(),
+        collections: None,
     };
     KeyStore::new(vec![
         key("admin", Role::ReadWrite, "rw-secret"),
@@ -1381,4 +1382,91 @@ async fn new_read_rpcs_accept_read_only_keys() {
         .await
         .unwrap_err();
     assert_eq!(err.code(), Code::Unauthenticated);
+}
+
+#[tokio::test]
+async fn scoped_keys_only_reach_their_collections() {
+    let db = Arc::new(Database::in_memory());
+    for name in ["t-docs", "other"] {
+        db.create_collection(name, CollectionConfig::new(2).index(IndexConfig::Flat))
+            .unwrap()
+            .upsert([Point::new("a", vec![1.0, 0.0])])
+            .unwrap();
+    }
+    db.set_alias("t-sneaky", "other").unwrap();
+    let keys = KeyStore::new(vec![
+        ApiKey::new("tenant", Role::ReadWrite, "tenant-secret").with_collections(["t-*"]),
+    ])
+    .unwrap();
+    let mut client = start(db, keys).await;
+    fn auth<T>(msg: T) -> Request<T> {
+        with_auth(msg, "x-api-key", "tenant-secret")
+    }
+    let search = |collection: &str| pb::SearchRequest {
+        collection: collection.into(),
+        vector: vec![1.0, 0.0],
+        k: 1,
+        ..Default::default()
+    };
+
+    let listed = client
+        .list_collections(auth(pb::ListCollectionsRequest {}))
+        .await
+        .unwrap();
+    let names: Vec<_> = listed
+        .get_ref()
+        .collections
+        .iter()
+        .map(|c| c.name.as_str())
+        .collect();
+    assert_eq!(names, ["t-docs"]);
+    let aliases = client
+        .list_aliases(auth(pb::ListAliasesRequest {}))
+        .await
+        .unwrap();
+    assert!(aliases.get_ref().aliases.is_empty());
+    let info = client.info(auth(pb::InfoRequest {})).await.unwrap();
+    assert_eq!(info.get_ref().collections, 1);
+
+    client.search(auth(search("t-docs"))).await.unwrap();
+    for name in ["other", "t-sneaky", "missing"] {
+        let err = client.search(auth(search(name))).await.unwrap_err();
+        assert_eq!(err.code(), Code::PermissionDenied, "{name}");
+    }
+
+    // Each entry of a batch is checked.
+    let err = client
+        .search_batch(auth(pb::SearchBatchRequest {
+            searches: vec![search("t-docs"), search("other")],
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::PermissionDenied);
+
+    let err = client.create_collection(auth(create("x"))).await.unwrap_err();
+    assert_eq!(err.code(), Code::PermissionDenied);
+    client.create_collection(auth(create("t-new"))).await.unwrap();
+    let err = client
+        .rename_collection(auth(pb::RenameCollectionRequest {
+            name: "t-new".into(),
+            new_name: "escaped".into(),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::PermissionDenied);
+    let err = client
+        .set_alias(auth(pb::SetAliasRequest {
+            alias: "t-a".into(),
+            collection: "other".into(),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::PermissionDenied);
+    let err = client
+        .delete_alias(auth(pb::DeleteAliasRequest {
+            alias: "t-sneaky".into(),
+        }))
+        .await
+        .unwrap_err();
+    assert_eq!(err.code(), Code::PermissionDenied);
 }

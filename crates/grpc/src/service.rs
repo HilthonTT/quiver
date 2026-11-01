@@ -3,7 +3,7 @@
 use std::pin::Pin;
 use std::sync::Arc;
 
-use quiver_db::auth::Role;
+use quiver_db::auth::{Access, Role};
 use quiver_db::{
     Collection, CollectionUpdate, ContextPair, Database, Direction, Example, Filter, Fusion, GroupBy,
     HybridQuery, MetadataMode, OrderBy, Point, PointSelector, Prefetch, QueryVector, Rescore, RestoreOptions,
@@ -61,6 +61,20 @@ impl QuiverService {
             .await
             .map_err(|e| Status::internal(format!("task failed: {e}")))?
             .map_err(status)
+    }
+
+    /// Fails unless `access` may use the collection (or alias) `name`.
+    fn allow(&self, access: &Access, name: &str) -> Result<(), Status> {
+        self.db.authorize(access, name).map_err(status)
+    }
+
+    /// Fails unless `access` may use the snapshot `id`.
+    async fn allow_snapshot(&self, access: &Access, id: &str) -> Result<(), Status> {
+        if !access.is_scoped() {
+            return Ok(());
+        }
+        let (access, id) = (access.clone(), id.to_owned());
+        self.blocking(move |db| db.authorize_snapshot(&access, &id)).await
     }
 }
 
@@ -286,11 +300,12 @@ impl pb::quiver_server::Quiver for QuiverService {
     }
 
     async fn info(&self, req: Request<pb::InfoRequest>) -> Rpc<pb::InfoResponse> {
-        require(&req, Role::ReadOnly)?;
+        let access = require(&req, Role::ReadOnly)?;
         let (collections, storage, snapshots_enabled) = self
-            .blocking(|db| {
+            .blocking(move |db| {
+                // A scoped key sees totals over its own collections only.
                 Ok((
-                    db.list_collections(),
+                    db.list_collections_for(&access),
                     db.options().storage.to_string(),
                     db.snapshots().is_ok(),
                 ))
@@ -309,9 +324,9 @@ impl pb::quiver_server::Quiver for QuiverService {
         &self,
         req: Request<pb::ListCollectionsRequest>,
     ) -> Rpc<pb::ListCollectionsResponse> {
-        require(&req, Role::ReadOnly)?;
+        let access = require(&req, Role::ReadOnly)?;
         let collections = self
-            .blocking(|db| Ok(db.list_collections()))
+            .blocking(move |db| Ok(db.list_collections_for(&access)))
             .await?
             .into_iter()
             .map(info_to_pb)
@@ -320,8 +335,9 @@ impl pb::quiver_server::Quiver for QuiverService {
     }
 
     async fn create_collection(&self, req: Request<pb::CreateCollectionRequest>) -> Rpc<pb::CollectionInfo> {
-        require(&req, Role::ReadWrite)?;
+        let access = require(&req, Role::ReadWrite)?;
         let req = req.into_inner();
+        self.db.authorize_name(&access, &req.name).map_err(status)?;
         let config = config_from_pb(&req)?;
         let info = self
             .blocking(move |db| {
@@ -334,8 +350,9 @@ impl pb::quiver_server::Quiver for QuiverService {
     }
 
     async fn get_collection(&self, req: Request<pb::GetCollectionRequest>) -> Rpc<pb::CollectionInfo> {
-        require(&req, Role::ReadOnly)?;
+        let access = require(&req, Role::ReadOnly)?;
         let name = req.into_inner().name;
+        self.allow(&access, &name)?;
         let info = self.blocking(move |db| Ok(db.collection(&name)?.info())).await?;
         Ok(Response::new(info_to_pb(info)))
     }
@@ -344,22 +361,25 @@ impl pb::quiver_server::Quiver for QuiverService {
         &self,
         req: Request<pb::DropCollectionRequest>,
     ) -> Rpc<pb::DropCollectionResponse> {
-        require(&req, Role::ReadWrite)?;
+        let access = require(&req, Role::ReadWrite)?;
         let name = req.into_inner().name;
+        self.allow(&access, &name)?;
         self.blocking(move |db| db.drop_collection(&name)).await?;
         Ok(Response::new(pb::DropCollectionResponse {}))
     }
 
     async fn flush(&self, req: Request<pb::FlushRequest>) -> Rpc<pb::FlushResponse> {
-        require(&req, Role::ReadWrite)?;
+        let access = require(&req, Role::ReadWrite)?;
         let name = req.into_inner().collection;
+        self.allow(&access, &name)?;
         self.blocking(move |db| db.collection(&name)?.flush()).await?;
         Ok(Response::new(pb::FlushResponse {}))
     }
 
     async fn compact(&self, req: Request<pb::CompactRequest>) -> Rpc<pb::CollectionInfo> {
-        require(&req, Role::ReadWrite)?;
+        let access = require(&req, Role::ReadWrite)?;
         let name = req.into_inner().collection;
+        self.allow(&access, &name)?;
         let info = self
             .blocking(move |db| {
                 let c = db.collection(&name)?;
@@ -371,8 +391,9 @@ impl pb::quiver_server::Quiver for QuiverService {
     }
 
     async fn create_field_index(&self, req: Request<pb::FieldIndexRequest>) -> Rpc<pb::CollectionInfo> {
-        require(&req, Role::ReadWrite)?;
+        let access = require(&req, Role::ReadWrite)?;
         let req = req.into_inner();
+        self.allow(&access, &req.collection)?;
         let info = self
             .blocking(move |db| {
                 let c = db.collection(&req.collection)?;
@@ -384,8 +405,9 @@ impl pb::quiver_server::Quiver for QuiverService {
     }
 
     async fn drop_field_index(&self, req: Request<pb::FieldIndexRequest>) -> Rpc<pb::CollectionInfo> {
-        require(&req, Role::ReadWrite)?;
+        let access = require(&req, Role::ReadWrite)?;
         let req = req.into_inner();
+        self.allow(&access, &req.collection)?;
         let (dropped, info) = self
             .blocking(move |db| {
                 let c = db.collection(&req.collection)?;
@@ -399,8 +421,9 @@ impl pb::quiver_server::Quiver for QuiverService {
     }
 
     async fn update_collection(&self, req: Request<pb::UpdateCollectionRequest>) -> Rpc<pb::CollectionInfo> {
-        require(&req, Role::ReadWrite)?;
+        let access = require(&req, Role::ReadWrite)?;
         let req = req.into_inner();
+        self.allow(&access, &req.name)?;
         let update: CollectionUpdate = serde_json::from_str(&req.update_json)
             .map_err(|e| Status::invalid_argument(format!("update_json is invalid: {e}")))?;
         let info = self
@@ -410,8 +433,10 @@ impl pb::quiver_server::Quiver for QuiverService {
     }
 
     async fn rename_collection(&self, req: Request<pb::RenameCollectionRequest>) -> Rpc<pb::CollectionInfo> {
-        require(&req, Role::ReadWrite)?;
+        let access = require(&req, Role::ReadWrite)?;
         let req = req.into_inner();
+        self.allow(&access, &req.name)?;
+        self.db.authorize_name(&access, &req.new_name).map_err(status)?;
         let info = self
             .blocking(move |db| Ok(db.rename_collection(&req.name, &req.new_name)?.info()))
             .await?;
@@ -419,10 +444,10 @@ impl pb::quiver_server::Quiver for QuiverService {
     }
 
     async fn list_aliases(&self, req: Request<pb::ListAliasesRequest>) -> Rpc<pb::ListAliasesResponse> {
-        require(&req, Role::ReadOnly)?;
+        let access = require(&req, Role::ReadOnly)?;
         let aliases = self
             .db
-            .aliases()
+            .aliases_for(&access)
             .into_iter()
             .map(|(alias, collection)| pb::Alias { alias, collection })
             .collect();
@@ -430,23 +455,27 @@ impl pb::quiver_server::Quiver for QuiverService {
     }
 
     async fn set_alias(&self, req: Request<pb::SetAliasRequest>) -> Rpc<pb::SetAliasResponse> {
-        require(&req, Role::ReadWrite)?;
+        let access = require(&req, Role::ReadWrite)?;
         let req = req.into_inner();
+        self.db.authorize_alias(&access, &req.alias).map_err(status)?;
+        self.db.authorize_name(&access, &req.collection).map_err(status)?;
         self.blocking(move |db| db.set_alias(&req.alias, &req.collection))
             .await?;
         Ok(Response::new(pb::SetAliasResponse {}))
     }
 
     async fn delete_alias(&self, req: Request<pb::DeleteAliasRequest>) -> Rpc<pb::DeleteAliasResponse> {
-        require(&req, Role::ReadWrite)?;
+        let access = require(&req, Role::ReadWrite)?;
         let alias = req.into_inner().alias;
+        self.db.authorize_alias(&access, &alias).map_err(status)?;
         self.blocking(move |db| db.delete_alias(&alias)).await?;
         Ok(Response::new(pb::DeleteAliasResponse {}))
     }
 
     async fn upsert(&self, req: Request<pb::UpsertRequest>) -> Rpc<pb::UpsertResponse> {
-        require(&req, Role::ReadWrite)?;
+        let access = require(&req, Role::ReadWrite)?;
         let req = req.into_inner();
+        self.allow(&access, &req.collection)?;
         let points: Vec<Point> = req
             .points
             .into_iter()
@@ -463,8 +492,9 @@ impl pb::quiver_server::Quiver for QuiverService {
     }
 
     async fn get_points(&self, req: Request<pb::GetPointsRequest>) -> Rpc<pb::GetPointsResponse> {
-        require(&req, Role::ReadOnly)?;
+        let access = require(&req, Role::ReadOnly)?;
         let req = req.into_inner();
+        self.allow(&access, &req.collection)?;
         check_ids(&req.ids)?;
         let with_vectors = req.with_vectors;
         let points = self
@@ -477,8 +507,9 @@ impl pb::quiver_server::Quiver for QuiverService {
     }
 
     async fn delete_points(&self, req: Request<pb::DeletePointsRequest>) -> Rpc<pb::DeletePointsResponse> {
-        require(&req, Role::ReadWrite)?;
+        let access = require(&req, Role::ReadWrite)?;
         let req = req.into_inner();
+        self.allow(&access, &req.collection)?;
         if json_from_pb(&req.filter_json, "filter_json")?
             .and_then(|f| f.as_object().map(serde_json::Map::is_empty))
             .unwrap_or(false)
@@ -503,8 +534,9 @@ impl pb::quiver_server::Quiver for QuiverService {
     }
 
     async fn scroll(&self, req: Request<pb::ScrollRequest>) -> Rpc<pb::ScrollResponse> {
-        require(&req, Role::ReadOnly)?;
+        let access = require(&req, Role::ReadOnly)?;
         let req = req.into_inner();
+        self.allow(&access, &req.collection)?;
         let limit = if req.limit == 0 { 100 } else { req.limit as usize };
         if limit > MAX_SCROLL {
             return Err(Status::invalid_argument(format!("limit must be <= {MAX_SCROLL}")));
@@ -544,8 +576,9 @@ impl pb::quiver_server::Quiver for QuiverService {
     }
 
     async fn count(&self, req: Request<pb::CountRequest>) -> Rpc<pb::CountResponse> {
-        require(&req, Role::ReadOnly)?;
+        let access = require(&req, Role::ReadOnly)?;
         let req = req.into_inner();
+        self.allow(&access, &req.collection)?;
         let filter = filter_from_pb(&req.filter_json)?;
         let count = self
             .blocking(move |db| Ok(db.collection(&req.collection)?.count(filter.as_ref())))
@@ -557,8 +590,9 @@ impl pb::quiver_server::Quiver for QuiverService {
         &self,
         req: Request<pb::UpdateMetadataRequest>,
     ) -> Rpc<pb::UpdateMetadataResponse> {
-        require(&req, Role::ReadWrite)?;
+        let access = require(&req, Role::ReadWrite)?;
         let req = req.into_inner();
+        self.allow(&access, &req.collection)?;
         let mode = match pb::MetadataMode::try_from(req.mode) {
             Ok(pb::MetadataMode::Merge) => MetadataMode::Merge,
             Ok(pb::MetadataMode::Replace) => MetadataMode::Replace,
@@ -584,8 +618,9 @@ impl pb::quiver_server::Quiver for QuiverService {
     }
 
     async fn recommend(&self, req: Request<pb::RecommendRequest>) -> Rpc<pb::SearchResponse> {
-        require(&req, Role::ReadOnly)?;
+        let access = require(&req, Role::ReadOnly)?;
         let req = req.into_inner();
+        self.allow(&access, &req.collection)?;
         if req.positive.len().saturating_add(req.negative.len()) > MAX_IDS {
             return Err(Status::invalid_argument(format!(
                 "at most {MAX_IDS} example ids per request"
@@ -614,8 +649,9 @@ impl pb::quiver_server::Quiver for QuiverService {
     }
 
     async fn query(&self, req: Request<pb::QueryRequest>) -> Rpc<pb::QueryResponse> {
-        require(&req, Role::ReadOnly)?;
+        let access = require(&req, Role::ReadOnly)?;
         let req = req.into_inner();
+        self.allow(&access, &req.collection)?;
         let k = if req.k == 0 { 10 } else { req.k as usize };
         if k > MAX_K {
             return Err(Status::invalid_argument(format!(
@@ -658,8 +694,9 @@ impl pb::quiver_server::Quiver for QuiverService {
     }
 
     async fn search_groups(&self, req: Request<pb::SearchGroupsRequest>) -> Rpc<pb::SearchGroupsResponse> {
-        require(&req, Role::ReadOnly)?;
+        let access = require(&req, Role::ReadOnly)?;
         let req = req.into_inner();
+        self.allow(&access, &req.collection)?;
         let groups = if req.groups == 0 { 10 } else { req.groups as usize };
         let group_size = if req.group_size == 0 {
             3
@@ -706,8 +743,9 @@ impl pb::quiver_server::Quiver for QuiverService {
     }
 
     async fn discover(&self, req: Request<pb::DiscoverRequest>) -> Rpc<pb::SearchResponse> {
-        require(&req, Role::ReadOnly)?;
+        let access = require(&req, Role::ReadOnly)?;
         let req = req.into_inner();
+        self.allow(&access, &req.collection)?;
         if req.context.len() > MAX_CONTEXT {
             return Err(Status::invalid_argument(format!(
                 "at most {MAX_CONTEXT} context pairs per request"
@@ -751,8 +789,9 @@ impl pb::quiver_server::Quiver for QuiverService {
     }
 
     async fn facet(&self, req: Request<pb::FacetRequest>) -> Rpc<pb::FacetResponse> {
-        require(&req, Role::ReadOnly)?;
+        let access = require(&req, Role::ReadOnly)?;
         let req = req.into_inner();
+        self.allow(&access, &req.collection)?;
         let limit = if req.limit == 0 { 10 } else { req.limit as usize };
         if limit > MAX_FACET {
             return Err(Status::invalid_argument(format!("limit must be <= {MAX_FACET}")));
@@ -776,8 +815,9 @@ impl pb::quiver_server::Quiver for QuiverService {
     }
 
     async fn search(&self, req: Request<pb::SearchRequest>) -> Rpc<pb::SearchResponse> {
-        require(&req, Role::ReadOnly)?;
+        let access = require(&req, Role::ReadOnly)?;
         let req = req.into_inner();
+        self.allow(&access, &req.collection)?;
         let (k, opts) = search_options(&req)?;
         let hits = self
             .blocking(move |db| run_search(&*db.collection(&req.collection)?, &req, k, &opts))
@@ -788,12 +828,15 @@ impl pb::quiver_server::Quiver for QuiverService {
     }
 
     async fn search_batch(&self, req: Request<pb::SearchBatchRequest>) -> Rpc<pb::SearchBatchResponse> {
-        require(&req, Role::ReadOnly)?;
+        let access = require(&req, Role::ReadOnly)?;
         let searches = req.into_inner().searches;
         if searches.len() > MAX_BATCH {
             return Err(Status::invalid_argument(format!(
                 "at most {MAX_BATCH} searches per batch"
             )));
+        }
+        for s in &searches {
+            self.allow(&access, &s.collection)?;
         }
         let prepared = searches
             .into_iter()
@@ -816,17 +859,25 @@ impl pb::quiver_server::Quiver for QuiverService {
     }
 
     async fn create_snapshot(&self, req: Request<pb::CreateSnapshotRequest>) -> Rpc<pb::SnapshotInfo> {
-        require(&req, Role::ReadWrite)?;
+        let access = require(&req, Role::ReadWrite)?;
         let name = req.into_inner().collection;
+        self.allow(&access, &name)?;
         let info = self.blocking(move |db| db.create_snapshot(&name)).await?;
         Ok(Response::new(snapshot_to_pb(info)))
     }
 
     async fn list_snapshots(&self, req: Request<pb::ListSnapshotsRequest>) -> Rpc<pb::ListSnapshotsResponse> {
-        require(&req, Role::ReadOnly)?;
+        let access = require(&req, Role::ReadOnly)?;
         let name = req.into_inner().collection;
+        if !name.is_empty() {
+            self.allow(&access, &name)?;
+        }
         let list = self
-            .blocking(move |db| db.list_snapshots(Some(name.as_str()).filter(|n| !n.is_empty())))
+            .blocking(move |db| {
+                let mut list = db.list_snapshots(Some(name.as_str()).filter(|n| !n.is_empty()))?;
+                list.retain(|s| access.covers(&s.manifest.collection));
+                Ok(list)
+            })
             .await?;
         Ok(Response::new(pb::ListSnapshotsResponse {
             snapshots: list.into_iter().map(snapshot_to_pb).collect(),
@@ -834,8 +885,9 @@ impl pb::quiver_server::Quiver for QuiverService {
     }
 
     async fn get_snapshot(&self, req: Request<pb::GetSnapshotRequest>) -> Rpc<pb::SnapshotInfo> {
-        require(&req, Role::ReadOnly)?;
+        let access = require(&req, Role::ReadOnly)?;
         let id = req.into_inner().id;
+        self.allow_snapshot(&access, &id).await?;
         let info = self.blocking(move |db| db.snapshots()?.get(&id)).await?;
         Ok(Response::new(snapshot_to_pb(info)))
     }
@@ -844,15 +896,20 @@ impl pb::quiver_server::Quiver for QuiverService {
         &self,
         req: Request<pb::DeleteSnapshotRequest>,
     ) -> Rpc<pb::DeleteSnapshotResponse> {
-        require(&req, Role::ReadWrite)?;
+        let access = require(&req, Role::ReadWrite)?;
         let id = req.into_inner().id;
+        self.allow_snapshot(&access, &id).await?;
         self.blocking(move |db| db.delete_snapshot(&id)).await?;
         Ok(Response::new(pb::DeleteSnapshotResponse {}))
     }
 
     async fn restore_snapshot(&self, req: Request<pb::RestoreSnapshotRequest>) -> Rpc<pb::CollectionInfo> {
-        require(&req, Role::ReadWrite)?;
+        let access = require(&req, Role::ReadWrite)?;
         let req = req.into_inner();
+        self.allow_snapshot(&access, &req.id).await?;
+        if !req.collection.is_empty() {
+            self.db.authorize_name(&access, &req.collection).map_err(status)?;
+        }
         let info = self
             .blocking(move |db| {
                 let opts = RestoreOptions {
@@ -869,8 +926,9 @@ impl pb::quiver_server::Quiver for QuiverService {
         &self,
         req: Request<pb::DownloadSnapshotRequest>,
     ) -> Rpc<Self::DownloadSnapshotStream> {
-        require(&req, Role::ReadOnly)?;
+        let access = require(&req, Role::ReadOnly)?;
         let id = req.into_inner().id;
+        self.allow_snapshot(&access, &id).await?;
         let path = self
             .blocking(move |db| {
                 let reg = db.snapshots()?;
@@ -891,7 +949,7 @@ impl pb::quiver_server::Quiver for QuiverService {
     }
 
     async fn upload_snapshot(&self, req: Request<Streaming<pb::SnapshotChunk>>) -> Rpc<pb::SnapshotInfo> {
-        require(&req, Role::ReadWrite)?;
+        let access = require(&req, Role::ReadWrite)?;
         let mut chunks = req.into_inner();
         let path = self.db.snapshots().map_err(status)?.staging_path();
         // Removed on every early return, and if the client goes away mid-upload.
@@ -929,6 +987,12 @@ impl pb::quiver_server::Quiver for QuiverService {
             }
             other => status(other),
         })?;
+        // The archive names its collection only once it has been read.
+        if !access.covers(&info.manifest.collection) {
+            let id = info.manifest.id.clone();
+            let _ = self.blocking(move |db| db.delete_snapshot(&id)).await;
+            return Err(status(quiver_db::Error::Forbidden(info.manifest.collection)));
+        }
         Ok(Response::new(snapshot_to_pb(info)))
     }
 }

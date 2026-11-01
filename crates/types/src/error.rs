@@ -26,6 +26,10 @@ pub enum Error {
     #[error("point `{0}` not found")]
     PointNotFound(String),
 
+    /// The API key may not use this collection (or alias).
+    #[error("this API key has no access to `{0}`")]
+    Forbidden(String),
+
     #[error("invalid argument: {0}")]
     InvalidArgument(String),
 

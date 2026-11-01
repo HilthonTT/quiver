@@ -18,7 +18,9 @@ Quiver is pre-1.0. Only the latest release and `main` receive security fixes.
 - **Set API keys before exposing the server.** With no keys configured, authentication is
   disabled and anyone who can reach the ports can read and write. The server logs a warning
   when it listens on a non-loopback address without keys. Use `--keys-file`, `--api-key` or
-  `--readonly-api-key`, and give read-only keys to anything that only queries.
+  `--readonly-api-key`, and give read-only keys to anything that only queries. Keys in a keys file
+  can also be limited to some collections (`"collections": ["tenant-a-*"]`); see the
+  [security docs](https://hilthontt.github.io/quiver/docs/security/#collection-scopes).
 - **Use TLS off localhost.** Without it the REST (`6900`) and gRPC (`6901`) APIs speak plain
   HTTP, so API keys cross the network in the clear. Start the server with `--tls-cert` and
   `--tls-key` (PEM files) to serve both APIs over TLS, add `--tls-client-ca` to require client

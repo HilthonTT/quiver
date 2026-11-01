@@ -8,6 +8,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Per-collection API keys**: a key in the keys file can carry `"collections": ["books", "tenant-a-*"]` (exact names, or
+  prefixes ending in `*`) to limit it to those collections, over REST and gRPC alike. Aliases are judged by the collection
+  they point to; new names (create, rename, restore under a name, aliases) must be in scope; listings, `/info` and snapshot
+  listings show only what is in scope; snapshots are judged by the collection they were taken of; `/metrics` refuses scoped
+  keys. Out-of-scope requests answer `403 forbidden` / `PERMISSION_DENIED`, also for names that do not exist.
+  `ApiKey::new`/`with_collections`/`access`, `Access` and `Scope` in `quiver_db::auth`; `Database::authorize` and friends.
+
+### Changed
+
+- The keys file refuses unknown fields, so that a misspelt `collections` cannot grant a key every collection.
+
 - **Grouped search**: `POST /collections/{name}/search/groups` (gRPC `SearchGroups`, `Collection::search_groups`) returns the
   best `groups` values of a metadata field `group_by`, each with up to `group_size` hits, for a vector, an id or a sparse
   query. Points with an array there join each element's group.

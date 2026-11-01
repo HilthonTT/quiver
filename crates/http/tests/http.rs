@@ -326,6 +326,7 @@ fn keys() -> Arc<KeyStore> {
         name: name.into(),
         role,
         key: key.into(),
+        collections: None,
     };
     Arc::new(
         KeyStore::new(vec![
@@ -1040,6 +1041,7 @@ async fn metrics_need_a_key_when_auth_is_on() {
         name: "viewer".into(),
         role: Role::ReadOnly,
         key: "ro".into(),
+        collections: None,
     }])
     .unwrap();
     let mut app = TestApp::with_options(HttpOptions {
@@ -1421,6 +1423,7 @@ async fn readonly_keys_cannot_change_settings_or_aliases() {
         name: "ro".into(),
         role: Role::ReadOnly,
         key: "ro".into(),
+        collections: None,
     }])
     .unwrap();
     let mut app = TestApp::with_options(HttpOptions {
@@ -1712,4 +1715,277 @@ async fn read_only_keys_can_use_the_new_queries() {
         let (status, res) = app.post(uri, body).await;
         assert_eq!(status, StatusCode::OK, "{uri}: {res}");
     }
+}
+
+fn scoped_keys() -> Arc<KeyStore> {
+    Arc::new(
+        KeyStore::new(vec![
+            ApiKey::new("admin", Role::ReadWrite, "rw-secret"),
+            ApiKey::new("tenant", Role::ReadWrite, "tenant-secret").with_collections(["t-*", "shared"]),
+            ApiKey::new("tenant-viewer", Role::ReadOnly, "tenant-ro").with_collections(["t-*"]),
+        ])
+        .unwrap(),
+    )
+}
+
+#[tokio::test]
+async fn scoped_keys_only_reach_their_collections() {
+    let mut app = TestApp::with_options(HttpOptions {
+        keys: scoped_keys(),
+        ..Default::default()
+    });
+    app.key = Some("rw-secret");
+    for name in ["t-docs", "shared", "other"] {
+        let (status, body) = app
+            .post("/collections", json!({"name": name, "dimension": 2}))
+            .await;
+        assert_eq!(status, StatusCode::CREATED, "{body}");
+        let (status, _) = app
+            .post(
+                &format!("/collections/{name}/points"),
+                json!({"points": [{"id": "p", "vector": [1.0, 0.0]}]}),
+            )
+            .await;
+        assert_eq!(status, StatusCode::OK);
+    }
+    // An admin-made alias into the tenant's scope, and one out of it.
+    assert_eq!(
+        app.call(
+            Method::PUT,
+            "/aliases/t-live",
+            Some(json!({"collection": "t-docs"}))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.call(
+            Method::PUT,
+            "/aliases/t-sneaky",
+            Some(json!({"collection": "other"}))
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let (status, snap) = app.post("/collections/other/snapshots", json!({})).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let other_snapshot = snap["id"].as_str().unwrap().to_owned();
+    let (status, snap) = app.post("/collections/t-docs/snapshots", json!({})).await;
+    assert_eq!(status, StatusCode::CREATED);
+    let own_snapshot = snap["id"].as_str().unwrap().to_owned();
+
+    app.key = Some("tenant-secret");
+    let search = json!({"vector": [1.0, 0.0], "k": 1});
+
+    // Listings only show what is in scope.
+    let (_, body) = app.get("/collections").await;
+    let mut names: Vec<_> = body["collections"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| c["name"].as_str().unwrap().to_owned())
+        .collect();
+    names.sort();
+    assert_eq!(names, ["shared", "t-docs"]);
+    let (_, body) = app.get("/aliases").await;
+    assert_eq!(
+        body["aliases"],
+        json!([{"alias": "t-live", "collection": "t-docs"}])
+    );
+    let (_, body) = app.get("/info").await;
+    assert_eq!(body["collections"], 2);
+    assert_eq!(body["points"], 2);
+    let (_, body) = app.get("/snapshots").await;
+    assert_eq!(body["snapshots"].as_array().unwrap().len(), 1);
+    assert_eq!(app.get("/metrics").await.0, StatusCode::FORBIDDEN);
+
+    // In scope: directly, and through an alias to an in-scope collection.
+    for name in ["t-docs", "shared", "t-live"] {
+        let (status, body) = app
+            .post(&format!("/collections/{name}/search"), search.clone())
+            .await;
+        assert_eq!(status, StatusCode::OK, "{name}: {body}");
+    }
+
+    // Out of scope: by name, through an in-scope-looking alias, and missing
+    // names (so that existence does not leak).
+    // Percent-encoded names are checked as decoded (`%6Fther` is `other`).
+    let (status, _) = app.post("/collections/%6Fther/search", search.clone()).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    for name in ["other", "t-sneaky", "nope"] {
+        let (status, body) = app
+            .post(&format!("/collections/{name}/search"), search.clone())
+            .await;
+        assert_eq!(status, StatusCode::FORBIDDEN, "{name}: {body}");
+        assert_eq!(body["error"]["code"], "forbidden");
+        assert_eq!(
+            app.get(&format!("/collections/{name}")).await.0,
+            StatusCode::FORBIDDEN
+        );
+        assert_eq!(
+            app.call(Method::DELETE, &format!("/collections/{name}/points/p"), None)
+                .await
+                .0,
+            StatusCode::FORBIDDEN
+        );
+    }
+    assert_eq!(
+        app.call(Method::DELETE, "/collections/other", None).await.0,
+        StatusCode::FORBIDDEN
+    );
+
+    // Names in bodies are checked too.
+    let (status, _) = app
+        .post("/collections", json!({"name": "mine", "dimension": 2}))
+        .await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let (status, body) = app
+        .post("/collections", json!({"name": "t-new", "dimension": 2}))
+        .await;
+    assert_eq!(status, StatusCode::CREATED, "{body}");
+    assert_eq!(
+        app.post("/collections/t-new/rename", json!({"name": "escaped"}))
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        app.post("/collections/t-new/rename", json!({"name": "t-renamed"}))
+            .await
+            .0,
+        StatusCode::OK
+    );
+
+    // Aliases: the alias name, its current target and its new target.
+    let put_alias = |alias: &'static str, target: &'static str| {
+        let app = &app;
+        async move {
+            app.call(
+                Method::PUT,
+                &format!("/aliases/{alias}"),
+                Some(json!({"collection": target})),
+            )
+            .await
+            .0
+        }
+    };
+    assert_eq!(put_alias("t-a", "other").await, StatusCode::FORBIDDEN);
+    assert_eq!(put_alias("x-a", "t-docs").await, StatusCode::FORBIDDEN);
+    assert_eq!(put_alias("t-sneaky", "t-docs").await, StatusCode::FORBIDDEN);
+    assert_eq!(put_alias("t-a", "t-docs").await, StatusCode::OK);
+    assert_eq!(
+        app.call(Method::DELETE, "/aliases/t-sneaky", None).await.0,
+        StatusCode::FORBIDDEN
+    );
+
+    // Snapshots are judged by the collection they were taken of.
+    for (method, suffix) in [
+        (Method::GET, ""),
+        (Method::GET, "/download"),
+        (Method::DELETE, ""),
+    ] {
+        let uri = format!("/snapshots/{other_snapshot}{suffix}");
+        assert_eq!(
+            app.call(method, &uri, None).await.0,
+            StatusCode::FORBIDDEN,
+            "{uri}"
+        );
+    }
+    assert_eq!(
+        app.post(
+            &format!("/snapshots/{other_snapshot}/restore"),
+            json!({"collection": "t-x"})
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        app.post(
+            &format!("/snapshots/{own_snapshot}/restore"),
+            json!({"collection": "x"})
+        )
+        .await
+        .0,
+        StatusCode::FORBIDDEN
+    );
+    let (status, body) = app
+        .post(
+            &format!("/snapshots/{own_snapshot}/restore"),
+            json!({"collection": "t-copy"}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(
+        app.get(&format!("/snapshots/{own_snapshot}")).await.0,
+        StatusCode::OK
+    );
+
+    // A read-only scoped key keeps both limits.
+    app.key = Some("tenant-ro");
+    assert_eq!(
+        app.post("/collections/t-docs/search", search.clone()).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(
+        app.post("/collections/shared/search", search.clone()).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(
+        app.call(Method::DELETE, "/collections/t-docs/points/p", None)
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+
+    // The admin key still sees everything.
+    app.key = Some("rw-secret");
+    let (_, body) = app.get("/collections").await;
+    assert_eq!(body["collections"].as_array().unwrap().len(), 5);
+}
+
+#[tokio::test]
+async fn scoped_keys_cannot_upload_snapshots_of_other_collections() {
+    let mut app = TestApp::with_options(HttpOptions {
+        keys: scoped_keys(),
+        ..Default::default()
+    });
+    app.key = Some("rw-secret");
+    app.post("/collections", json!({"name": "other", "dimension": 2}))
+        .await;
+    let (_, snap) = app.post("/collections/other/snapshots", json!({})).await;
+    let id = snap["id"].as_str().unwrap().to_owned();
+    let res = app
+        .raw(
+            Request::get(format!("/snapshots/{id}/download"))
+                .header("authorization", "Bearer rw-secret")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await;
+    let archive = res.into_body().collect().await.unwrap().to_bytes();
+    assert_eq!(
+        app.call(Method::DELETE, &format!("/snapshots/{id}"), None)
+            .await
+            .0,
+        StatusCode::NO_CONTENT
+    );
+
+    let upload = |key: &'static str| {
+        Request::post("/snapshots")
+            .header("authorization", format!("Bearer {key}"))
+            .body(Body::from(archive.clone()))
+            .unwrap()
+    };
+    let res = app.raw(upload("tenant-secret")).await;
+    assert_eq!(res.status(), StatusCode::FORBIDDEN);
+    let (_, body) = app.get("/snapshots").await;
+    assert_eq!(
+        body["snapshots"].as_array().unwrap().len(),
+        0,
+        "the refused upload is not kept"
+    );
+    assert_eq!(app.raw(upload("rw-secret")).await.status(), StatusCode::CREATED);
 }

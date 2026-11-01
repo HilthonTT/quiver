@@ -32,7 +32,34 @@ The keys file is a JSON array of named keys, like [`keys.example.json`](https://
 ]
 ```
 
-`role` is `readwrite` or `readonly` (`read_write`/`write` and `read_only`/`read` work too). The name only appears in the server's debug log. The server refuses to start if a key is empty or two keys are the same, across all three sources. Use long random secrets, for example `openssl rand -hex 32`. Keys are compared in constant time.
+`role` is `readwrite` or `readonly` (`read_write`/`write` and `read_only`/`read` work too). The name only appears in the server's debug log. The server refuses to start if a key is empty or two keys are the same, across all three sources, or if the file has a field it does not know (so that a misspelt `collections` cannot silently grant access to everything). Use long random secrets, for example `openssl rand -hex 32`. Keys are compared in constant time.
+
+## Collection scopes
+
+A key in the keys file can be limited to some collections with `collections`, a list of exact names and prefixes ending in `*`:
+
+```json
+[
+  { "name": "admin", "role": "readwrite", "key": "replace-with-a-long-random-secret" },
+  {
+    "name": "tenant-a",
+    "role": "readwrite",
+    "key": "replace-with-a-third-secret",
+    "collections": ["tenant-a-*", "shared-catalog"]
+  }
+]
+```
+
+Without `collections` a key may use every collection, as before; `["*"]` means the same but still counts as scoped for the server-wide endpoints below. A scoped key keeps its role, and:
+
+- **Collections and aliases.** Every request that names a collection must name one in scope, or answers `403 forbidden` (`PERMISSION_DENIED`). An alias is judged by the collection it points to, so an admin can point `tenant-a-live` at `tenant-a-v2` and the tenant can use it, but an alias into another tenant's collection is refused even if its own name matches. Names that do not exist are judged as they are, so a scoped key cannot find out whether a collection outside its scope exists.
+- **New names.** Creating a collection, renaming one, and restoring a snapshot under a new name need the new name in scope.
+- **Alias changes.** Setting or deleting an alias needs the alias's name, the collection it points to now, and the collection it is to point to, all in scope.
+- **Listings.** `GET /collections`, `/aliases` and `/snapshots` (and their gRPC calls) list only what is in scope; `/info` counts only those collections.
+- **Snapshots** are judged by the collection they were taken of. An uploaded archive of a collection out of scope is refused and removed.
+- **`/metrics`** names every collection, so it answers `403` to scoped keys. Give the metrics scraper an unscoped read-only key.
+
+Scopes are checked in the same way over REST and gRPC (where `SearchBatch` checks each search's collection).
 
 ## Sending a key
 

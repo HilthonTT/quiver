@@ -22,7 +22,7 @@ Documentation: **[hilthontt.github.io/quiver](https://hilthontt.github.io/quiver
 - **Storage:** a checksummed WAL with checkpoints by default, RocksDB behind a feature flag, or in-memory; optional 8-bit scalar quantization stores vectors in about a quarter of the memory, binary quantization searches one bit per component and re-ranks by the exact vectors, and vectors can live on disk instead of in memory (quantized codes in memory, exact vectors on disk for re-ranking).
 - **Live changes:** change a collection's index, quantization or on-disk storage in place, rename collections, and point aliases at them for zero-downtime swaps.
 - **Snapshots:** SHA-256-verified `.tar.gz` backups with retention and periodic scheduling.
-- **Access:** REST and gRPC, optionally over TLS (with client certificates), with read-only and read-write API keys, plus a Python client, a Rust client, a terminal UI, or the `quiver-db` crate embedded in-process.
+- **Access:** REST and gRPC, optionally over TLS (with client certificates), with read-only and read-write API keys that can be limited to some collections, plus a Python client, a Rust client, a terminal UI, or the `quiver-db` crate embedded in-process.
 - **Operations:** Prometheus metrics at `/metrics`, and `quiver --healthcheck` for container health checks.
 
 ## Quick start

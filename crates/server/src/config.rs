@@ -65,7 +65,9 @@ pub struct Config {
     #[arg(long, env = "QUIVER_FSYNC", value_parser = BoolishValueParser::new())]
     pub fsync: bool,
 
-    /// JSON file of API keys: `[{"name": "...", "role": "readwrite"|"readonly", "key": "..."}]`.
+    /// JSON file of API keys: `[{"name": "...", "role": "readwrite"|"readonly", "key": "...",
+    /// "collections": ["books", "tenant-a-*"]}]` (`collections` is optional; without it a key
+    /// may use every collection).
     #[arg(long, env = "QUIVER_KEYS_FILE")]
     pub keys_file: Option<PathBuf>,
 
@@ -217,12 +219,8 @@ impl Config {
         ];
         for (name, role, key) in extra {
             if let Some(key) = key {
-                keys.push(ApiKey {
-                    name: name.trim_start_matches('-').into(),
-                    role,
-                    key: key.clone(),
-                })
-                .map_err(|e| e.to_string())?;
+                keys.push(ApiKey::new(name.trim_start_matches('-'), role, key.clone()))
+                    .map_err(|e| e.to_string())?;
             }
         }
         Ok(keys)

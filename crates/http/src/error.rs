@@ -50,6 +50,16 @@ impl ApiError {
         Self::new(StatusCode::FORBIDDEN, "forbidden", "this API key is read-only")
     }
 
+    /// An endpoint that spans every collection, refused to a key limited
+    /// to some of them.
+    pub fn server_wide() -> Self {
+        Self::new(
+            StatusCode::FORBIDDEN,
+            "forbidden",
+            "this API key is limited to some collections and cannot use server-wide endpoints",
+        )
+    }
+
     pub fn payload_too_large(limit: usize) -> Self {
         Self::new(
             StatusCode::PAYLOAD_TOO_LARGE,
@@ -82,6 +92,7 @@ impl From<quiver_db::Error> for ApiError {
             E::InvalidArgument(_) => (StatusCode::BAD_REQUEST, "invalid_argument"),
             E::InvalidFilter(_) => (StatusCode::BAD_REQUEST, "invalid_filter"),
             E::Unsupported(_) => (StatusCode::NOT_IMPLEMENTED, "unsupported"),
+            E::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),
             _ => {
                 tracing::error!(error = %err, "internal error");
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal")

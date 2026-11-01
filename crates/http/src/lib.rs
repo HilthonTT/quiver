@@ -36,7 +36,14 @@ pub struct HttpOptions {
 pub fn router(db: Arc<Database>, options: HttpOptions) -> Router {
     use handlers::*;
 
-    let guard = |role| middleware::from_fn_with_state((Arc::clone(&options.keys), role), auth::require);
+    let guard = |role| {
+        let guard = auth::Guard {
+            keys: Arc::clone(&options.keys),
+            role,
+            db: Arc::clone(&db),
+        };
+        middleware::from_fn_with_state(guard, auth::require)
+    };
 
     let read = Router::new()
         .route("/info", get(info))

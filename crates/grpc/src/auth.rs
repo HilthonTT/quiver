@@ -1,15 +1,16 @@
 use std::sync::Arc;
 
-use quiver_db::auth::{KeyStore, Role};
+use quiver_db::auth::{Access, KeyStore, Role};
 use tonic::{Request, Status};
 
-/// Resolves the caller's API key and attaches its [`Role`] to the request.
+/// Resolves the caller's API key and attaches its [`Access`] (role and
+/// collection scope) to the request.
 ///
 /// Accepts `authorization: Bearer <key>` or `x-api-key: <key>` metadata.
 /// With no keys configured every caller gets [`Role::ReadWrite`]. A caller
 /// that presents no key gets no role, which only public RPCs (`Health`)
 /// accept; a wrong key is rejected outright. Each RPC then checks the role
-/// it needs.
+/// it needs and the collections it names.
 #[derive(Debug, Clone)]
 pub struct Authenticator {
     keys: Arc<KeyStore>,
@@ -24,8 +25,8 @@ impl Authenticator {
 
 impl tonic::service::Interceptor for Authenticator {
     fn call(&mut self, mut req: Request<()>) -> Result<Request<()>, Status> {
-        let role = if self.keys.is_empty() {
-            Role::ReadWrite
+        let access = if self.keys.is_empty() {
+            Access::full()
         } else {
             let md = req.metadata();
             let presented = md
@@ -39,10 +40,10 @@ impl tonic::service::Interceptor for Authenticator {
             };
             self.keys
                 .find(presented)
-                .map(|k| k.role)
+                .map(|k| k.access())
                 .ok_or_else(|| Status::unauthenticated("missing or invalid API key"))?
         };
-        req.extensions_mut().insert(role);
+        req.extensions_mut().insert(access);
         Ok(req)
     }
 }
@@ -55,10 +56,10 @@ fn bearer_token(value: &str) -> Option<&str> {
     (scheme.eq_ignore_ascii_case("bearer") && !token.is_empty()).then_some(token)
 }
 
-/// Fails unless the request's key grants `needed`.
-pub(crate) fn require<T>(req: &Request<T>, needed: Role) -> Result<(), Status> {
-    match req.extensions().get::<Role>() {
-        Some(role) if role.allows(needed) => Ok(()),
+/// Fails unless the request's key grants `needed`; returns its access.
+pub(crate) fn require<T>(req: &Request<T>, needed: Role) -> Result<Access, Status> {
+    match req.extensions().get::<Access>() {
+        Some(access) if access.role.allows(needed) => Ok(access.clone()),
         Some(_) => Err(Status::permission_denied("this API key is read-only")),
         None => Err(Status::unauthenticated("missing or invalid API key")),
     }

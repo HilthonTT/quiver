@@ -18,6 +18,8 @@ use quiver_db::{
     SearchHit, SearchOptions, SearchTarget, SnapshotInfo, SparseVector, SparseVectorConfig, VectorConfig,
 };
 
+use quiver_db::auth::Access;
+
 use crate::error::ApiError;
 
 /// Upper bound on `k` for a single search.
@@ -78,10 +80,14 @@ pub async fn health() -> Json<Value> {
 }
 
 /// Server-wide statistics.
-pub async fn info(State(db): State<AppState>) -> ApiResult<Json<Value>> {
+pub async fn info(
+    State(db): State<AppState>,
+    Extension(access): Extension<Access>,
+) -> ApiResult<Json<Value>> {
+    // A scoped key sees totals over its own collections only.
     let collections = {
         let db = Arc::clone(&db);
-        blocking(move || Ok(db.list_collections())).await?
+        blocking(move || Ok(db.list_collections_for(&access))).await?
     };
     let points: usize = collections.iter().map(|c| c.count).sum();
     Ok(Json(json!({
@@ -94,7 +100,14 @@ pub async fn info(State(db): State<AppState>) -> ApiResult<Json<Value>> {
 }
 
 /// Prometheus text-format metrics.
-pub async fn metrics(State(db): State<AppState>) -> ApiResult<Response> {
+pub async fn metrics(
+    State(db): State<AppState>,
+    Extension(access): Extension<Access>,
+) -> ApiResult<Response> {
+    // The metrics name every collection.
+    if access.is_scoped() {
+        return Err(ApiError::server_wide());
+    }
     let text = {
         let db = Arc::clone(&db);
         blocking(move || Ok(db.metrics().render(&db))).await?
@@ -131,15 +144,20 @@ pub struct CreateCollection {
     expiry: Option<ExpiryConfig>,
 }
 
-pub async fn list_collections(State(db): State<AppState>) -> ApiResult<Json<Value>> {
-    let collections = blocking(move || Ok(db.list_collections())).await?;
+pub async fn list_collections(
+    State(db): State<AppState>,
+    Extension(access): Extension<Access>,
+) -> ApiResult<Json<Value>> {
+    let collections = blocking(move || Ok(db.list_collections_for(&access))).await?;
     Ok(Json(json!({ "collections": collections })))
 }
 
 pub async fn create_collection(
     State(db): State<AppState>,
+    Extension(access): Extension<Access>,
     Json(req): Json<CreateCollection>,
 ) -> ApiResult<(StatusCode, Json<CollectionInfo>)> {
+    db.authorize_name(&access, &req.name)?;
     let config = CollectionConfig {
         dimension: req.dimension,
         metric: req.metric,
@@ -188,16 +206,18 @@ pub struct RenameRequest {
 
 pub async fn rename_collection(
     State(db): State<AppState>,
+    Extension(access): Extension<Access>,
     Path(name): Path<String>,
     Json(req): Json<RenameRequest>,
 ) -> ApiResult<Json<CollectionInfo>> {
+    db.authorize_name(&access, &req.name)?;
     let info = blocking(move || Ok(db.rename_collection(&name, &req.name)?.info())).await?;
     Ok(Json(info))
 }
 
-pub async fn list_aliases(State(db): State<AppState>) -> Json<Value> {
+pub async fn list_aliases(State(db): State<AppState>, Extension(access): Extension<Access>) -> Json<Value> {
     let aliases: Vec<Value> = db
-        .aliases()
+        .aliases_for(&access)
         .into_iter()
         .map(|(alias, collection)| json!({ "alias": alias, "collection": collection }))
         .collect();
@@ -213,9 +233,12 @@ pub struct AliasRequest {
 /// Creates the alias, or atomically points it at another collection.
 pub async fn set_alias(
     State(db): State<AppState>,
+    Extension(access): Extension<Access>,
     Path(alias): Path<String>,
     Json(req): Json<AliasRequest>,
 ) -> ApiResult<Json<Value>> {
+    // The alias itself was checked by the middleware.
+    db.authorize_name(&access, &req.collection)?;
     let response = json!({ "alias": alias, "collection": req.collection });
     blocking(move || db.set_alias(&alias, &req.collection)).await?;
     Ok(Json(response))
@@ -1064,12 +1087,21 @@ pub async fn list_collection_snapshots(
 
 pub async fn list_snapshots(
     State(db): State<AppState>,
+    Extension(access): Extension<Access>,
     query: Result<Query<SnapshotQuery>, axum::extract::rejection::QueryRejection>,
 ) -> ApiResult<Json<Value>> {
     let Query(q) = query?;
     // `?collection=` (empty) means no filter, as in the gRPC API.
     let collection = q.collection.filter(|c| !c.is_empty());
-    let snapshots = blocking(move || db.list_snapshots(collection.as_deref())).await?;
+    if let Some(name) = &collection {
+        db.authorize(&access, name)?;
+    }
+    let snapshots = blocking(move || {
+        let mut snapshots = db.list_snapshots(collection.as_deref())?;
+        snapshots.retain(|s| access.covers(&s.manifest.collection));
+        Ok(snapshots)
+    })
+    .await?;
     Ok(Json(json!({ "snapshots": snapshots })))
 }
 
@@ -1088,6 +1120,7 @@ pub async fn delete_snapshot(State(db): State<AppState>, Path(id): Path<String>)
 
 pub async fn restore_snapshot(
     State(db): State<AppState>,
+    Extension(access): Extension<Access>,
     Path(id): Path<String>,
     body: axum::body::Bytes,
 ) -> ApiResult<Json<CollectionInfo>> {
@@ -1098,6 +1131,10 @@ pub async fn restore_snapshot(
         serde_json::from_slice(&body)
             .map_err(|e| ApiError::new(StatusCode::BAD_REQUEST, "invalid_body", e.to_string()))?
     };
+    // The snapshot's own collection was checked by the middleware.
+    if let Some(name) = &req.collection {
+        db.authorize_name(&access, name)?;
+    }
     let info = blocking(move || {
         let opts = RestoreOptions {
             name: req.collection,
@@ -1142,6 +1179,7 @@ pub async fn download_snapshot(State(db): State<AppState>, Path(id): Path<String
 /// Accepts a raw archive body (as produced by `download`) and adds it to the registry.
 pub async fn upload_snapshot(
     State(db): State<AppState>,
+    Extension(access): Extension<Access>,
     Extension(UploadLimit(limit)): Extension<UploadLimit>,
     headers: HeaderMap,
     body: Body,
@@ -1182,9 +1220,12 @@ pub async fn upload_snapshot(
     written?;
     // `import_staged` removes the staging file itself from here on.
     staging.0 = None;
-    let imported = tokio::task::spawn_blocking(move || db.snapshots()?.import_staged(&path))
-        .await
-        .map_err(|e| ApiError::internal(format!("task failed: {e}")))?;
+    let imported = {
+        let db = Arc::clone(&db);
+        tokio::task::spawn_blocking(move || db.snapshots()?.import_staged(&path))
+    }
+    .await
+    .map_err(|e| ApiError::internal(format!("task failed: {e}")))?;
     // The archive came from the client: an unreadable one is its error.
     let info = imported.map_err(|e| match e {
         quiver_db::Error::Corrupt(_) | quiver_db::Error::Serde(_) | quiver_db::Error::Io(_) => {
@@ -1192,6 +1233,12 @@ pub async fn upload_snapshot(
         }
         other => ApiError::from(other),
     })?;
+    // The archive names its collection only once it has been read.
+    if !access.covers(&info.manifest.collection) {
+        let id = info.manifest.id.clone();
+        let _ = blocking(move || db.delete_snapshot(&id)).await;
+        return Err(quiver_db::Error::Forbidden(info.manifest.collection).into());
+    }
     Ok((StatusCode::CREATED, Json(info)))
 }
 
