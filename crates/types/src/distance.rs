@@ -1,5 +1,7 @@
 use serde::{Deserialize, Serialize};
 
+use crate::kernels;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Metric {
@@ -22,6 +24,31 @@ impl Metric {
             Metric::DotProduct => -dot(a, b),
             Metric::Manhattan => manhattan(a, b),
             Metric::Hamming => hamming(a, b),
+        }
+    }
+
+    /// [`distance`](Self::distance) to a vector of `f16` components, given
+    /// as their bits.
+    #[inline]
+    pub fn distance_f16(self, a: &[f32], b: &[u16]) -> f32 {
+        match self {
+            Metric::Cosine => 1.0 - kernels::dot_f16(a, b),
+            Metric::Euclidean => kernels::squared_euclidean_f16(a, b).sqrt(),
+            Metric::DotProduct => -kernels::dot_f16(a, b),
+            Metric::Manhattan => kernels::manhattan_f16(a, b),
+            Metric::Hamming => kernels::hamming_f16(a, b),
+        }
+    }
+
+    /// [`distance`](Self::distance) to a vector of `u8` components.
+    #[inline]
+    pub fn distance_u8(self, a: &[f32], b: &[u8]) -> f32 {
+        match self {
+            Metric::Cosine => 1.0 - kernels::dot_u8(a, b),
+            Metric::Euclidean => kernels::squared_euclidean_u8(a, b).sqrt(),
+            Metric::DotProduct => -kernels::dot_u8(a, b),
+            Metric::Manhattan => kernels::manhattan_u8(a, b),
+            Metric::Hamming => kernels::hamming_u8(a, b),
         }
     }
 
@@ -59,66 +86,24 @@ impl Metric {
     }
 }
 
-const LANES: usize = 8;
-
 #[inline]
 pub fn dot(a: &[f32], b: &[f32]) -> f32 {
-    debug_assert_eq!(a.len(), b.len());
-
-    let mut acc = [0.0f32; LANES];
-    let (ca, ra) = a.as_chunks::<LANES>();
-    let (cb, rb) = b.as_chunks::<LANES>();
-    for (x, y) in ca.iter().zip(cb) {
-        for i in 0..LANES {
-            acc[i] += x[i] * y[i];
-        }
-    }
-    let tail: f32 = ra.iter().zip(rb).map(|(x, y)| x * y).sum();
-    acc.iter().sum::<f32>() + tail
+    kernels::dot(a, b)
 }
 
 #[inline]
 pub fn squared_euclidean(a: &[f32], b: &[f32]) -> f32 {
-    debug_assert_eq!(a.len(), b.len());
-    let mut acc = [0.0f32; LANES];
-    let (ca, ra) = a.as_chunks::<LANES>();
-    let (cb, rb) = b.as_chunks::<LANES>();
-    for (x, y) in ca.iter().zip(cb) {
-        for i in 0..LANES {
-            let d = x[i] - y[i];
-            acc[i] += d * d;
-        }
-    }
-    let tail: f32 = ra
-        .iter()
-        .zip(rb)
-        .map(|(x, y)| {
-            let d = x - y;
-            d * d
-        })
-        .sum();
-    acc.iter().sum::<f32>() + tail
+    kernels::squared_euclidean(a, b)
 }
 
 #[inline]
 pub fn manhattan(a: &[f32], b: &[f32]) -> f32 {
-    debug_assert_eq!(a.len(), b.len());
-    let mut acc = [0.0f32; LANES];
-    let (ca, ra) = a.as_chunks::<LANES>();
-    let (cb, rb) = b.as_chunks::<LANES>();
-    for (x, y) in ca.iter().zip(cb) {
-        for i in 0..LANES {
-            acc[i] += (x[i] - y[i]).abs();
-        }
-    }
-    let tail: f32 = ra.iter().zip(rb).map(|(x, y)| (x - y).abs()).sum();
-    acc.iter().sum::<f32>() + tail
+    kernels::manhattan(a, b)
 }
 
 #[inline]
 pub fn hamming(a: &[f32], b: &[f32]) -> f32 {
-    debug_assert_eq!(a.len(), b.len());
-    a.iter().zip(b).filter(|(x, y)| x != y).count() as f32
+    kernels::hamming(a, b)
 }
 
 #[cfg(test)]

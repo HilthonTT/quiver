@@ -3,6 +3,7 @@ mod config;
 pub mod distance;
 mod error;
 pub mod filter;
+mod kernels;
 mod point;
 pub mod snapshot;
 

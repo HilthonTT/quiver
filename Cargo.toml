@@ -39,6 +39,7 @@ protox = "0.10"
 ratatui = "0.30"
 rcgen = { version = "0.14", default-features = false, features = ["crypto", "pem", "ring"] }
 rayon = "1.12"
+half = "2"
 regex = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 rocksdb = "0.25"

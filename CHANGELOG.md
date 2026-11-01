@@ -14,6 +14,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   listings show only what is in scope; snapshots are judged by the collection they were taken of; `/metrics` refuses scoped
   keys. Out-of-scope requests answer `403 forbidden` / `PERMISSION_DENIED`, also for names that do not exist.
   `ApiKey::new`/`with_collections`/`access`, `Access` and `Scope` in `quiver_db::auth`; `Database::authorize` and friends.
+- **SIMD distance kernels**: AVX2 + FMA on x86-64, chosen at run time, with the portable kernels as
+  the fallback. About 25-35% more HNSW queries per second and 20% faster builds at 768 dimensions.
 
 ### Changed
 

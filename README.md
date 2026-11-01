@@ -12,7 +12,7 @@ A fast, embeddable vector database written from scratch in Rust.
 
 Documentation: **[hilthontt.github.io/quiver](https://hilthontt.github.io/quiver/)**
 
-- **Indexes:** HNSW, exact flat search and a k-d tree, with cosine, Euclidean, dot, Manhattan and Hamming metrics.
+- **Indexes:** HNSW, exact flat search and a k-d tree, with cosine, Euclidean, dot, Manhattan and Hamming metrics, computed with AVX2/FMA SIMD kernels where the CPU has them.
 - **Multiple vectors per point:** named dense vectors, each with its own dimension, metric and index, plus sparse vectors
   searched exactly through an inverted index (optionally IDF-weighted, for BM25).
 - **Hybrid search:** one query fuses dense and keyword (sparse) searches with weighted reciprocal rank fusion or score fusion, or re-ranks their candidates by another vector.

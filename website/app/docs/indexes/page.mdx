@@ -133,6 +133,10 @@ Signs alone are a coarse summary of a vector, so searches fetch 20 × `k` candid
 
 The same rules as for scalar quantization apply: HNSW and flat indexes only, no `hamming`, and it can be switched on, off or to `scalar` [later](/docs/collections/#changing-settings).
 
+## Distance kernels
+
+On x86-64 CPUs with AVX2 and FMA (Intel since Haswell, AMD since Excavator), distances are computed with 256-bit SIMD instructions. The CPU is checked at run time, so the same binary runs everywhere: on other CPUs it uses portable code, which compilers vectorize for the baseline instruction set (SSE2, or NEON on ARM). The two add in a different order, so distances may differ in their last bits between machines, never within one process.
+
 ## Persistence
 
 The file engine saves the index with each checkpoint, so a restart loads the HNSW graph instead of rebuilding it. The RocksDB engine stores only the points and rebuilds the index when it opens a collection. Snapshots carry the index too. See [storage & durability](/docs/storage/).
