@@ -229,10 +229,6 @@ fn is_operator_object(obj: &Map<String, Value>) -> bool {
     !obj.is_empty() && obj.keys().all(|k| k.starts_with('$'))
 }
 
-fn is_logical(key: &str) -> bool {
-    matches!(key, "$and" | "$or" | "$not")
-}
-
 fn parse_elem_match(arg: &Value) -> Result<Filter> {
     let obj = arg
         .as_object()
@@ -240,23 +236,43 @@ fn parse_elem_match(arg: &Value) -> Result<Filter> {
     if obj.is_empty() {
         return Err(Error::InvalidFilter("`$elemMatch` must not be empty".into()));
     }
-    if is_operator_object(obj) && !obj.keys().any(|k| is_logical(k)) {
-        let mut parts = obj
-            .iter()
-            .map(|(op, a)| {
-                Ok(Filter::Field {
-                    path: Vec::new(),
-                    cond: parse_condition(op, a)?,
-                })
+    let mut parts = obj
+        .iter()
+        .map(|(key, val)| parse_elem_entry(key, val))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(if parts.len() == 1 {
+        parts.pop().expect("len checked")
+    } else {
+        Filter::And(parts)
+    })
+}
+
+/// One entry of an `$elemMatch` filter: operators apply to the element
+/// itself, field names to its fields, and `$and`/`$or`/`$not` combine
+/// either kind (so `{"$or": [{"$lt": 2}, {"$gt": 10}]}` works on scalars).
+fn parse_elem_entry(key: &str, val: &Value) -> Result<Filter> {
+    match key {
+        "$and" | "$or" => {
+            let arr = val
+                .as_array()
+                .ok_or_else(|| Error::InvalidFilter(format!("`{key}` expects an array")))?;
+            if arr.is_empty() {
+                return Err(Error::InvalidFilter(format!("`{key}` must not be empty")));
+            }
+            let subs = arr.iter().map(parse_elem_match).collect::<Result<Vec<_>>>()?;
+            Ok(if key == "$and" {
+                Filter::And(subs)
+            } else {
+                Filter::Or(subs)
             })
-            .collect::<Result<Vec<_>>>()?;
-        return Ok(if parts.len() == 1 {
-            parts.pop().expect("len checked")
-        } else {
-            Filter::And(parts)
-        });
+        }
+        "$not" => Ok(Filter::Not(Box::new(parse_elem_match(val)?))),
+        op if op.starts_with('$') => Ok(Filter::Field {
+            path: Vec::new(),
+            cond: parse_condition(op, val)?,
+        }),
+        field => parse_entry(field, val),
     }
-    Filter::parse(arg)
 }
 
 fn geo_point(op: &str, v: Option<&Value>, what: &str) -> Result<GeoPoint> {
@@ -552,7 +568,23 @@ mod tests {
                 .matches(Some(&md))
         );
         assert!(!filter(json!({"one": {"$elemMatch": {"$eq": "a"}}})).matches(Some(&md)));
+        // Logical operators over conditions on scalar elements.
+        assert!(
+            filter(json!({"scores": {"$elemMatch": {"$or": [{"$gt": 10}, {"$lt": 2}]}}})).matches(Some(&md))
+        );
+        assert!(
+            !filter(json!({"scores": {"$elemMatch": {"$or": [{"$gt": 12}, {"$lt": 3}]}}})).matches(Some(&md))
+        );
+        assert!(filter(json!({"scores": {"$elemMatch": {"$not": {"$gt": 4}}}})).matches(Some(&md)));
+        assert!(!filter(json!({"scores": {"$elemMatch": {"$not": {"$gt": 2}}}})).matches(Some(&md)));
+        assert!(
+            filter(json!({"scores": {"$elemMatch": {"$gte": 4, "$or": [{"$lt": 9}, {"$gt": 100}]}}}))
+                .matches(Some(&md))
+        );
         for bad in [
+            json!({"t": {"$elemMatch": {"$or": []}}}),
+            json!({"t": {"$elemMatch": {"$or": [{"$bogus": 1}]}}}),
+            json!({"t": {"$elemMatch": {"": 1}}}),
             json!({"t": {"$all": []}}),
             json!({"t": {"$size": -1}}),
             json!({"t": {"$size": 1.5}}),

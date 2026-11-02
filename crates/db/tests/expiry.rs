@@ -41,15 +41,15 @@ fn expired_points_disappear_from_every_read() {
     assert_eq!(c.info().field_indexes, ["exp"], "the expiry field is indexed");
     assert!(c.get("gone").is_none());
     assert_eq!(c.get_many(&["gone", "kept"]).len(), 1);
-    let page = c.scroll(None, 10);
+    let page = c.scroll(None, 10).unwrap();
     assert_eq!(
         page.points.iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
         ["forever", "kept"]
     );
-    let page = c.scroll(None, 1);
+    let page = c.scroll(None, 1).unwrap();
     assert_eq!(page.points[0].id, "forever");
     assert_eq!(page.next_cursor.as_deref(), Some("forever"));
-    assert_eq!(c.scroll(Some("forever"), 1).next_cursor, None);
+    assert_eq!(c.scroll(Some("forever"), 1).unwrap().next_cursor, None);
 
     let hits = |found: Vec<quiver_db::SearchHit>| ids(found.into_iter().map(|h| h.id).collect());
     assert_eq!(hits(c.search(&[1.0, 1.0], 10).unwrap()), ["forever", "kept"]);

@@ -117,7 +117,13 @@ fn parse_frames(buf: &[u8]) -> std::result::Result<(Vec<Mutation>, usize), usize
             return Err(pos);
         }
         if buf.len() - start < len {
-            break;
+            // A torn final append leaves part of one payload, never a whole
+            // frame after it; finding one means this length is corrupt and
+            // truncating here would discard acknowledged records.
+            if zero_from(start) || !has_frame_from(buf, start) {
+                break;
+            }
+            return Err(pos);
         }
         let end = start + len;
         let payload = &buf[start..end];
@@ -139,6 +145,20 @@ fn parse_frames(buf: &[u8]) -> std::result::Result<(Vec<Mutation>, usize), usize
     }
 
     Ok((entries, pos))
+}
+
+/// Whether a complete, non-empty, checksum-valid frame starts anywhere at or
+/// after `from`. Only used to tell a torn tail from a corrupt length.
+fn has_frame_from(buf: &[u8], from: usize) -> bool {
+    (from..buf.len().saturating_sub(8)).any(|p| {
+        let len = u32::from_le_bytes(buf[p..p + 4].try_into().expect("4 bytes")) as usize;
+        let crc = u32::from_le_bytes(buf[p + 4..p + 8].try_into().expect("4 bytes"));
+        let start = p + 8;
+        len > 0
+            && len <= MAX_FRAME
+            && buf.len() - start >= len
+            && crc32fast::hash(&buf[start..start + len]) == crc
+    })
 }
 
 #[cfg(test)]
@@ -232,6 +252,21 @@ mod tests {
             }
         }
         std::fs::read(path).unwrap()
+    }
+
+    #[test]
+    fn corrupt_length_overrunning_the_log_is_reported_and_kept() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("wal.log");
+        let mut bytes = three_frames(&path);
+        bytes[2] ^= 0x01; // first frame's length grows by 64 KiB, past the end
+        std::fs::write(&path, &bytes).unwrap();
+
+        assert!(
+            Wal::open(&path, false).is_err(),
+            "later records must not be dropped"
+        );
+        assert_eq!(std::fs::read(&path).unwrap(), bytes, "the log is left alone");
     }
 
     #[test]

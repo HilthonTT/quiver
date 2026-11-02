@@ -253,13 +253,13 @@ fn scroll_cursor_survives_reopen() {
         // Some changes only in the WAL, so recovery replays them.
         c.delete(&["p25"]).unwrap();
         c.upsert(points(30..35, 8)).unwrap();
-        let page = c.scroll(None, 10);
+        let page = c.scroll(None, 10).unwrap();
         assert_eq!(page.points.last().unwrap().id, "p17");
         page.next_cursor.unwrap()
     };
     let db = Database::open(dir.path()).unwrap();
     let c = db.collection("docs").unwrap();
-    let page = c.scroll(Some(&cursor), 100);
+    let page = c.scroll(Some(&cursor), 100).unwrap();
     let ids: Vec<String> = page.points.into_iter().map(|p| p.id).collect();
     let mut expected: Vec<String> = (0..35)
         .map(|i| format!("p{i}"))

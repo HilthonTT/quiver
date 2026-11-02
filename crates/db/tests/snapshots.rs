@@ -264,3 +264,48 @@ fn uuid_v4() -> String {
         &h[20..32]
     )
 }
+
+#[test]
+fn failed_replacing_restore_keeps_the_existing_collection() {
+    let dir = tempfile::tempdir().unwrap();
+    let snaps = dir.path().join("snapshots");
+    let disk = Database::open_with(
+        dir.path().join("disk"),
+        DbOptions {
+            snapshot_dir: Some(snaps.clone()),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    disk.create_collection("docs", CollectionConfig::new(2).on_disk(true))
+        .unwrap()
+        .upsert([Point::new("a", vec![1.0, 0.0])])
+        .unwrap();
+    let snap = disk.create_snapshot("docs").unwrap();
+
+    // An in-memory database cannot hold on-disk vectors, so the restore
+    // fails, and must do so before deleting the collection it replaces.
+    let mem = Database::new(
+        None,
+        DbOptions {
+            storage: StorageKind::Memory,
+            snapshot_dir: Some(snaps),
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    mem.create_collection("docs", CollectionConfig::new(2))
+        .unwrap()
+        .upsert([Point::new("keep", vec![0.0, 1.0])])
+        .unwrap();
+    let restored = mem.restore_snapshot(
+        &snap.manifest.id,
+        RestoreOptions {
+            name: None,
+            replace: true,
+        },
+    );
+    assert!(restored.is_err());
+    let docs = mem.collection("docs").expect("the existing collection survives");
+    assert!(docs.get("keep").is_some());
+}

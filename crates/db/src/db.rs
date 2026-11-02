@@ -535,9 +535,15 @@ impl Database {
         let loaded = self.snapshots()?.load(id)?;
         let name = opts.name.unwrap_or(loaded.manifest.collection);
         validate_name(&name)?;
-        // Verify the index before an existing collection is deleted for it.
+        // Verify everything that can fail before an existing collection is
+        // deleted for it: the index, and what creating the collection checks.
         let indexes =
             Collection::snapshot_indexes(&loaded.manifest.config, &loaded.store, loaded.index.as_deref())?;
+        Collection::check_creatable(
+            &loaded.manifest.config,
+            &loaded.manifest.field_indexes,
+            self.env.storage,
+        )?;
 
         let mut catalog = self.catalog.write();
         if catalog.aliases.contains_key(&name) {

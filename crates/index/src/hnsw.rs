@@ -151,8 +151,13 @@ impl HnswIndex {
             };
             if c.slot == to && self.adopt(to, list[i], layer) {
                 list[i] = to;
-            } else if !self.adopt(list[i], c.slot, layer) && list.contains(&to) {
-                self.adopt(to, c.slot, layer);
+            } else if !self.adopt(list[i], c.slot, layer)
+                && !(list.contains(&to) && self.adopt(to, c.slot, layer))
+                && list.len() < max
+            {
+                // Nobody else had room for this duplicate, and this edge may
+                // have been its only way in: keep it, as pruning left space.
+                list.push(c.slot);
             }
         }
         self.links[from as usize][layer] = list;
@@ -579,6 +584,31 @@ mod tests {
             lost.len(),
             &lost[..lost.len().min(5)]
         );
+    }
+
+    #[test]
+    fn every_copy_stays_reachable_when_all_vectors_are_identical() {
+        for m in [2, 4, 16] {
+            let mut store = VectorColumn::new(3);
+            let mut hnsw = HnswIndex::new(
+                HnswParams {
+                    m,
+                    ..HnswParams::default()
+                },
+                Metric::Euclidean,
+            );
+            for i in 0..1_500u32 {
+                store.push(&[1.0, 2.0, 3.0]);
+                hnsw.add(i, &store);
+            }
+            let lost = (0..1_500u32)
+                .filter(|&s| {
+                    hnsw.search(&[1.0, 2.0, 3.0], 1, Some(64), &store, &|x| x == s)
+                        .is_empty()
+                })
+                .count();
+            assert_eq!(lost, 0, "m = {m}");
+        }
     }
 
     #[test]

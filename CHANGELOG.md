@@ -24,6 +24,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - The keys file refuses unknown fields, so that a misspelt `collections` cannot grant a key every collection.
+- `Collection::scroll` returns `Result<ScrollPage>`: it fails with `CollectionNotFound` on a dropped, renamed or replaced
+  handle instead of panicking.
+
+### Fixed
+
+- A corrupt length field in the middle of the WAL no longer truncates the log and silently drops every later record;
+  recovery reports corruption instead.
+- A restore with `replace: true` that fails (on-disk vectors in an in-memory database, invalid field indexes) no longer
+  deletes the collection it was to replace: those checks run first.
+- Snapshot archives with entries other than the manifest and the data, or with the data before the manifest, are refused
+  instead of decompressing the extra entries at any size.
+- HNSW: when every vector is identical, some copies could become unreachable (45 of 1,500 at the default `m`).
+- k-d tree with cosine over `float16` vectors missed true neighbours: the pruning bound now allows for the rounded norm.
+- `$elemMatch` accepts `$and`, `$or` and `$not` over operators on scalar elements (`{"$or": [{"$lt": 2}, {"$gt": 10}]}`),
+  as documented.
+- Creating or dropping a field index bumps the collection's generation, so the snapshot scheduler snapshots the change.
 
 - **Grouped search**: `POST /collections/{name}/search/groups` (gRPC `SearchGroups`, `Collection::search_groups`) returns the
   best `groups` values of a metadata field `group_by`, each with up to `group_size` hits, for a vector, an id or a sparse

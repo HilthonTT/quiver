@@ -2,7 +2,7 @@ use std::io::Write;
 
 use quiver_storage::VectorColumn;
 use quiver_storage::codec::{Reader, WriteExt};
-use quiver_types::{Error, KdTreeParams, Metric, Result};
+use quiver_types::{Datatype, Error, KdTreeParams, Metric, Result};
 
 use crate::{Accept, Neighbor, TopK};
 
@@ -12,6 +12,10 @@ const MIN_INSERTS_BETWEEN_REBUILDS: usize = 32;
 /// Absorbs f32 rounding in `1 - dot(a, b)`, which can fall slightly below the
 /// exact `diff² / 2` plane bound (or below zero) for near-parallel vectors.
 const COSINE_BOUND_SLACK: f32 = 1e-6;
+/// Extra slack for float16 columns: normalised vectors rounded to halves
+/// are not quite unit length, and `1 - cos` can undershoot `diff² / 2` by
+/// up to `(‖b‖² - 1) / 2`, about 2^-11.
+const COSINE_F16_SLACK: f32 = 1e-3;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Node {
@@ -30,12 +34,12 @@ pub struct KdTreeIndex {
     inserts_since_rebuild: usize,
 }
 
-fn plane_bound(metric: Metric, diff: f32) -> f32 {
+fn plane_bound(metric: Metric, diff: f32, cosine_slack: f32) -> f32 {
     match metric {
         Metric::Euclidean | Metric::Manhattan => diff.abs(),
         // Unit vectors: 1 - cos = ‖a - b‖² / 2 ≥ diff² / 2. The computed
-        // distance can undershoot that by f32 rounding, so leave some slack.
-        Metric::Cosine => diff * diff / 2.0 - COSINE_BOUND_SLACK,
+        // distance can undershoot that by rounding, so leave some slack.
+        Metric::Cosine => diff * diff / 2.0 - cosine_slack,
         // Far-side points differ from the query on this axis (unless the
         // query sits exactly on the plane).
         Metric::Hamming => {
@@ -159,6 +163,10 @@ impl KdTreeIndex {
         // (node, lower bound on the distance of anything in its subtree).
         // Not 0.0: rounding can make computed cosine distances negative.
         let mut stack: Vec<(u32, f32)> = vec![(self.root, f32::NEG_INFINITY)];
+        let cosine_slack = match store.datatype() {
+            Datatype::Float16 => COSINE_BOUND_SLACK + COSINE_F16_SLACK,
+            _ => COSINE_BOUND_SLACK,
+        };
         while let Some((cur, bound)) = stack.pop() {
             if bound > top.worst() {
                 continue;
@@ -179,7 +187,7 @@ impl KdTreeIndex {
             };
             // Push the far side first so the near side is explored first.
             if far != NIL {
-                stack.push((far, bound.max(plane_bound(self.metric, diff))));
+                stack.push((far, bound.max(plane_bound(self.metric, diff, cosine_slack))));
             }
             if near != NIL {
                 stack.push((near, bound));
@@ -331,6 +339,42 @@ mod tests {
                 let expected = flat.search(query, 10, &store, &|_| true);
                 let got = tree.search(query, 10, &store, &|_| true);
                 assert_eq!(distances(&got), distances(&expected), "{metric:?} query {q}");
+            }
+        }
+    }
+
+    #[test]
+    fn cosine_over_float16_vectors_matches_brute_force() {
+        use quiver_storage::ColumnSpec;
+        use quiver_types::Datatype;
+
+        for (seed, dim, n) in [(1u64, 2usize, 20_000usize), (3, 3, 50_000), (4, 4, 20_000)] {
+            let raw = random_store(n, dim, seed);
+            let spec = ColumnSpec {
+                datatype: Datatype::Float16,
+                ..ColumnSpec::new(dim)
+            };
+            let mut store = VectorColumn::create(spec, None, "t").unwrap();
+            for s in 0..n as u32 {
+                let mut v = raw.vector(s).to_vec();
+                if !Metric::Cosine.prepare(&mut v) {
+                    v = vec![1.0; dim];
+                    Metric::Cosine.prepare(&mut v);
+                }
+                Datatype::Float16.store(&mut v).unwrap();
+                store.push(&v);
+            }
+            let tree = build(&store, Metric::Cosine);
+            let flat = FlatIndex::new(Metric::Cosine);
+            let queries = random_store(200, dim, seed + 100);
+            for q in 0..200 {
+                let mut query = queries.vector(q).to_vec();
+                if !Metric::Cosine.prepare(&mut query) {
+                    continue;
+                }
+                let expected = flat.search(&query, 10, &store, &|_| true);
+                let got = tree.search(&query, 10, &store, &|_| true);
+                assert_eq!(distances(&got), distances(&expected), "dim {dim} query {q}");
             }
         }
     }

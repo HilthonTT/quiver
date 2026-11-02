@@ -155,18 +155,28 @@ fn engine_dir(dir: &Path, kind: StorageKind) -> PathBuf {
 }
 
 impl Collection {
-    pub(crate) fn create(name: &str, config: CollectionConfig, dir: Option<&Path>, env: Env) -> Result<Self> {
+    /// The checks `create` (with `field_indexes`) makes before touching
+    /// anything, so a restore can make them before it replaces a collection.
+    pub(crate) fn check_creatable(
+        config: &CollectionConfig,
+        field_indexes: &[String],
+        storage: StorageKind,
+    ) -> Result<()> {
         config.validate()?;
-        let storage = env.storage;
         if config.uses_disk() && !storage.is_durable() {
             return Err(Error::invalid(
                 "vectors can only be kept on disk with a durable storage engine",
             ));
         }
+        FieldIndexes::validate(&with_expiry_field(config, field_indexes.to_vec()))
+    }
+
+    pub(crate) fn create(name: &str, config: CollectionConfig, dir: Option<&Path>, env: Env) -> Result<Self> {
+        let storage = env.storage;
+        Self::check_creatable(&config, &[], storage)?;
 
         let meta_dir = dir.filter(|_| storage.is_durable()).map(Path::to_path_buf);
         let field_indexes = with_expiry_field(&config, Vec::new());
-        FieldIndexes::validate(&field_indexes)?;
         let engine = match (storage.is_durable(), dir) {
             (true, Some(dir)) => {
                 // A leftover directory (e.g. from an interrupted drop) must not
@@ -284,8 +294,8 @@ impl Collection {
         dir: Option<&Path>,
         env: Env,
     ) -> Result<Self> {
+        Self::check_creatable(&config, field_indexes, env.storage)?;
         let field_indexes = with_expiry_field(&config, field_indexes.to_vec());
-        FieldIndexes::validate(&field_indexes)?;
         let collection = Self::create(name, config, dir, env)?;
         {
             let mut inner = collection.inner.write();
@@ -568,6 +578,8 @@ impl Collection {
             inner.fields = previous;
             return Err(e);
         }
+        // Snapshots record field indexes; let the scheduler see the change.
+        self.bump();
         tracing::info!(collection = %self.name, field, "created field index");
         Ok(())
     }
@@ -591,6 +603,8 @@ impl Collection {
             inner.fields = previous;
             return Err(e);
         }
+        // Snapshots record field indexes; let the scheduler see the change.
+        self.bump();
         tracing::info!(collection = %self.name, field, "dropped field index");
         Ok(true)
     }
@@ -778,10 +792,12 @@ impl Collection {
     /// if `None`), in ascending byte-wise id order. Paging by id rather than
     /// position means deletes and updates between pages never cause points
     /// to be skipped or repeated.
-    pub fn scroll(&self, cursor: Option<&str>, limit: usize) -> ScrollPage {
+    ///
+    /// Fails only once the collection is dropped, renamed or replaced.
+    pub fn scroll(&self, cursor: Option<&str>, limit: usize) -> Result<ScrollPage> {
         let mut opts = ScrollOptions::new(limit);
         opts.cursor = cursor.map(str::to_owned);
-        self.scroll_with(&opts).expect("id-ordered scrolls cannot fail")
+        self.scroll_with(&opts)
     }
 
     pub fn scroll_with(&self, opts: &ScrollOptions) -> Result<ScrollPage> {

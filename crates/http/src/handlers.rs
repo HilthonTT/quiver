@@ -434,7 +434,7 @@ pub async fn scroll_points(
     }
     let c = collection(&db, &name)?;
     let (cursor, limit) = (q.cursor, q.limit);
-    let page = blocking(move || Ok(c.scroll(cursor.as_deref(), limit))).await?;
+    let page = blocking(move || c.scroll(cursor.as_deref(), limit)).await?;
     let points: Vec<Value> = page
         .points
         .into_iter()

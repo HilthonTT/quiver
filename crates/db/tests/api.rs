@@ -132,19 +132,23 @@ fn scroll_pages_through_points_in_id_order() {
     c.upsert([9, 3, 0, 7, 1, 8, 2, 6, 4, 5].map(|i| Point::new(i.to_string(), vec![i as f32, 0.0])))
         .unwrap();
     c.delete(&["0"]).unwrap();
-    let page = c.scroll(Some("2"), 3);
+    let page = c.scroll(Some("2"), 3).unwrap();
     let ids: Vec<String> = page.points.into_iter().map(|p| p.id).collect();
     assert_eq!(ids, ["3", "4", "5"]);
     assert_eq!(page.next_cursor.as_deref(), Some("5"));
 
-    let first = c.scroll(None, 2);
+    let first = c.scroll(None, 2).unwrap();
     assert_eq!(first.points[0].id, "1");
     // The last page hands out no cursor, even when it is exactly full.
-    let last = c.scroll(Some("6"), 3);
+    let last = c.scroll(Some("6"), 3).unwrap();
     assert_eq!(last.points.len(), 3);
     assert_eq!(last.next_cursor, None);
-    assert!(c.scroll(Some("9"), 3).points.is_empty());
-    assert_eq!(c.scroll(None, 0).next_cursor, None, "limit 0 never loops");
+    assert!(c.scroll(Some("9"), 3).unwrap().points.is_empty());
+    assert_eq!(
+        c.scroll(None, 0).unwrap().next_cursor,
+        None,
+        "limit 0 never loops"
+    );
 }
 
 /// Pages through `c` `limit` at a time, calling `between` with the page
@@ -152,7 +156,7 @@ fn scroll_pages_through_points_in_id_order() {
 fn scroll_all(c: &quiver_db::Collection, limit: usize, mut between: impl FnMut(usize, &str)) -> Vec<String> {
     let (mut seen, mut cursor, mut page_no) = (Vec::<String>::new(), None::<String>, 0);
     loop {
-        let page = c.scroll(cursor.as_deref(), limit);
+        let page = c.scroll(cursor.as_deref(), limit).unwrap();
         seen.extend(page.points.into_iter().map(|p| p.id));
         between(page_no, seen.last().map_or("", String::as_str));
         page_no += 1;
@@ -593,4 +597,31 @@ fn max_distance_drops_far_hits() {
         .search_by_id("x5", 10, &SearchOptions::default().max_distance(1.0))
         .unwrap();
     assert_eq!(ids(&hits).len(), 2);
+}
+
+#[test]
+fn field_index_changes_bump_the_generation() {
+    let c = Database::in_memory()
+        .create_collection("c", CollectionConfig::new(2))
+        .unwrap();
+    c.upsert([Point::new("x", vec![1.0, 0.0]).with_metadata(json!({"g": 1}))])
+        .unwrap();
+    let before = c.generation();
+    c.create_field_index("g").unwrap();
+    let created = c.generation();
+    assert!(created > before, "snapshot scheduler sees the new index");
+    assert!(c.drop_field_index("g").unwrap());
+    assert!(
+        c.generation() > created,
+        "snapshot scheduler sees the dropped index"
+    );
+}
+
+#[test]
+fn scrolling_a_dropped_collection_is_an_error_not_a_panic() {
+    let db = Database::in_memory();
+    let c = db.create_collection("a", CollectionConfig::new(2)).unwrap();
+    c.upsert([Point::new("x", vec![1.0, 0.0])]).unwrap();
+    db.drop_collection("a").unwrap();
+    assert!(matches!(c.scroll(None, 10), Err(Error::CollectionNotFound(_))));
 }

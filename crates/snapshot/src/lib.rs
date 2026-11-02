@@ -190,10 +190,15 @@ fn check_manifest(manifest: &Manifest) -> Result<()> {
 pub fn read_manifest(path: &Path) -> Result<Manifest> {
     let mut archive = tar::Archive::new(GzDecoder::new(BufReader::new(File::open(path)?)));
 
-    for entry in archive.entries()? {
+    // The manifest is always the first entry (`walk_archive` insists on
+    // it), so nothing else is ever decompressed to find it.
+    if let Some(entry) = archive.entries()?.next() {
         let entry = entry?;
         if entry.path()?.as_os_str() == MANIFEST {
-            let manifest: Manifest = serde_json::from_reader(entry)?;
+            if entry.size() > MAX_MANIFEST_BYTES {
+                return Err(Error::Corrupt("snapshot manifest is implausibly large".into()));
+            }
+            let manifest: Manifest = serde_json::from_reader(entry.take(MAX_MANIFEST_BYTES))?;
             check_manifest(&manifest)?;
             return Ok(manifest);
         }
@@ -226,6 +231,9 @@ fn walk_archive(
                 if manifest.is_some() {
                     return Err(duplicate());
                 }
+                if seen_data {
+                    return Err(Error::Corrupt("snapshot manifest must be its first entry".into()));
+                }
                 if entry.size() > MAX_MANIFEST_BYTES {
                     return Err(Error::Corrupt("snapshot manifest is implausibly large".into()));
                 }
@@ -254,7 +262,12 @@ fn walk_archive(
                 seen_data = true;
                 on_data(m, &mut (&mut entry).take(m.data_bytes))?;
             }
-            _ => {}
+            // Skipping an entry still means decompressing it, at any size.
+            _ => {
+                return Err(Error::Corrupt(format!(
+                    "snapshot contains unexpected entry `{name}`"
+                )));
+            }
         }
     }
 
@@ -768,6 +781,48 @@ mod tests {
             1,
             "failed imports leave nothing behind"
         );
+    }
+
+    /// Repacks an archive's entries, with `extra` (name, size) entries of
+    /// zeros inserted at `at`.
+    fn repack(bytes: &[u8], at: usize, extra: (&str, u64)) -> Vec<u8> {
+        let mut archive = tar::Archive::new(GzDecoder::new(bytes));
+        let mut entries: Vec<(String, Vec<u8>)> = archive
+            .entries()
+            .unwrap()
+            .map(|e| {
+                let mut e = e.unwrap();
+                let name = e.path().unwrap().to_string_lossy().into_owned();
+                let mut data = Vec::new();
+                e.read_to_end(&mut data).unwrap();
+                (name, data)
+            })
+            .collect();
+        entries.insert(at, (extra.0.into(), vec![0; extra.1 as usize]));
+        let mut builder = tar::Builder::new(GzEncoder::new(Vec::new(), Compression::fast()));
+        for (name, data) in entries {
+            let mut header = tar::Header::new_gnu();
+            header.set_size(data.len() as u64);
+            header.set_mode(0o644);
+            header.set_cksum();
+            builder.append_data(&mut header, name, &data[..]).unwrap();
+        }
+        builder.into_inner().unwrap().finish().unwrap()
+    }
+
+    #[test]
+    fn archives_with_unexpected_entries_are_refused() {
+        let (_dir, a) = registry();
+        let info = a
+            .create("docs", &CollectionConfig::new(3), &store(3), None)
+            .unwrap();
+        let bytes = fs::read(a.path(&info.manifest.id).unwrap()).unwrap();
+        for at in 0..=2 {
+            let (_dir2, b) = registry();
+            let err = b.import(&repack(&bytes, at, ("junk", 1 << 16))[..]).unwrap_err();
+            assert!(matches!(err, Error::Corrupt(_)), "junk at {at}: {err}");
+            assert!(b.list(None).unwrap().is_empty());
+        }
     }
 
     #[test]
