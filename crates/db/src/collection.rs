@@ -49,7 +49,7 @@ const DISCOVER_MIN_CANDIDATES: usize = 100;
 
 static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(0);
 
-/// One page of [`Collection::scroll`].
+/// One page of [`Collection::scroll`](crate::Collection::scroll).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScrollPage {
     /// Points in ascending id order.

@@ -7,7 +7,7 @@ use rocksdb::{DB, Direction, IteratorMode, Options, WriteBatch, WriteOptions};
 use serde::{Deserialize, Serialize};
 
 use crate::codec::{Reader, WriteExt};
-use crate::{Op, Recovered, StorageEngine, StorageKind, StorageOptions, StoreSpec, VectorStore};
+use crate::{LogPosition, Op, Recovered, StorageEngine, StorageKind, StorageOptions, StoreSpec, VectorStore};
 
 const PREFIX: &[u8] = b"p/";
 /// Holds the last applied mark, outside the points' key range.
@@ -152,11 +152,10 @@ impl StorageEngine for RocksDbEngine {
             vector = Vec::with_capacity(dim);
         }
         let applied = match self.db.get(APPLIED_KEY).map_err(storage_err)? {
-            Some(v) => {
-                Some(u64::from_le_bytes(v.as_slice().try_into().map_err(|_| {
-                    Error::Corrupt("RocksDB applied mark is not 8 bytes".into())
-                })?))
-            }
+            Some(v) => Some(
+                LogPosition::from_bytes(&v)
+                    .ok_or_else(|| Error::Corrupt("RocksDB applied mark is not a log position".into()))?,
+            ),
             None => None,
         };
         Ok(Recovered {

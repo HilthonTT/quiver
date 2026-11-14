@@ -1,7 +1,7 @@
 //! Collections sharded across a cluster, as seen from any of its nodes.
 //!
 //! A [`ClusterBackend`] moves commands and reads to the shards' replicas;
-//! [`RemoteCollection`] splits each operation into per-shard parts and
+//! `RemoteCollection` splits each operation into per-shard parts and
 //! merges what the shards answer, so callers see one collection.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
