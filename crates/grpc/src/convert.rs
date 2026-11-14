@@ -23,6 +23,7 @@ pub(crate) fn status(err: Error) -> Status {
         }
         Error::Unsupported(_) => Status::unimplemented(msg),
         Error::Forbidden(_) => Status::permission_denied(msg),
+        Error::Unavailable(_) => Status::unavailable(msg),
         _ => {
             tracing::error!(error = %msg, "internal error");
             Status::internal(msg)

@@ -9,8 +9,8 @@ use quiver_index::{Index, Neighbor, TopK};
 use quiver_snapshot::{SnapshotInfo, SnapshotRegistry};
 use quiver_storage::column::remove_stale_disk_files;
 use quiver_storage::{
-    Mutation, Op, Recovered, StorageEngine, StorageKind, StorageOptions, StoreSpec, VectorColumn,
-    VectorStore, open_engine, state,
+    LogPosition, Mutation, Op, Recovered, StorageEngine, StorageKind, StorageOptions, StoreSpec,
+    VectorColumn, VectorStore, open_engine, state,
 };
 use quiver_types::{
     CollectionConfig, CollectionInfo, CollectionUpdate, ContextPair, Direction, Error, Example, FacetCount,
@@ -25,6 +25,7 @@ use crate::expiry;
 use crate::fields::FieldIndexes;
 use crate::grouping::{self, Facets, Key};
 use crate::indexes::Indexes;
+use crate::replication::{Command, Outcome, Write};
 
 /// Compact once at least this many slots are tombstoned...
 const COMPACT_MIN_TOMBSTONES: usize = 1_024;
@@ -49,7 +50,7 @@ const DISCOVER_MIN_CANDIDATES: usize = 100;
 static NEXT_INSTANCE: AtomicU64 = AtomicU64::new(0);
 
 /// One page of [`Collection::scroll`].
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScrollPage {
     /// Points in ascending id order.
     pub points: Vec<Point>,
@@ -81,6 +82,9 @@ struct Inner {
     indexes: Indexes,
     fields: FieldIndexes,
     engine: Box<dyn StorageEngine>,
+    /// The last replicated log entry applied, for collections that are
+    /// replicas of a cluster's shard.
+    applied: Option<LogPosition>,
 }
 
 impl Inner {
@@ -129,8 +133,10 @@ pub(crate) fn with_expiry_field(config: &CollectionConfig, mut names: Vec<String
     names
 }
 
+/// A collection whose data this process holds. [`crate::Collection`] wraps
+/// it, or a collection sharded across a cluster.
 #[derive(Debug)]
-pub struct Collection {
+pub(crate) struct LocalCollection {
     name: String,
     storage: StorageKind,
     /// Holds `collection.json`; `None` for collections that are not persisted.
@@ -154,7 +160,7 @@ fn engine_dir(dir: &Path, kind: StorageKind) -> PathBuf {
     }
 }
 
-impl Collection {
+impl LocalCollection {
     /// The checks `create` (with `field_indexes`) makes before touching
     /// anything, so a restore can make them before it replaces a collection.
     pub(crate) fn check_creatable(
@@ -209,6 +215,7 @@ impl Collection {
                 config,
                 store,
                 engine,
+                applied: None,
             },
         ))
     }
@@ -230,8 +237,12 @@ impl Collection {
             env.storage_options,
         )?;
 
-        let Recovered { store, index, replay } =
-            engine.recover(&StoreSpec::for_config(&meta.config, Some(dir)))?;
+        let Recovered {
+            store,
+            index,
+            replay,
+            applied,
+        } = engine.recover(&StoreSpec::for_config(&meta.config, Some(dir)))?;
         let indexes = Indexes::from_bytes(index.as_deref(), &meta.config, &store)?;
 
         FieldIndexes::validate(&meta.field_indexes)?;
@@ -241,6 +252,7 @@ impl Collection {
             indexes,
             fields: FieldIndexes::default(),
             engine,
+            applied,
         };
         let replayed = replay.len();
         for m in replay {
@@ -249,6 +261,7 @@ impl Collection {
                 Mutation::Delete { ids } => {
                     apply_delete(&mut inner, &ids);
                 }
+                Mutation::Applied { at } => inner.applied = inner.applied.max(Some(at)),
             }
         }
         let field_indexes = with_expiry_field(&inner.config, meta.field_indexes);
@@ -375,6 +388,7 @@ impl Collection {
             indexes: inner.indexes.clone(),
             fields: std::mem::take(&mut inner.fields),
             engine: std::mem::replace(&mut inner.engine, placeholder()?),
+            applied: inner.applied,
         };
         Ok(Self::from_parts(name, meta_dir, self.env.clone(), parts))
     }
@@ -633,7 +647,11 @@ impl Collection {
     }
 
     pub fn upsert(&self, points: impl IntoIterator<Item = Point>) -> Result<usize> {
-        let mut points: Vec<Point> = points.into_iter().collect();
+        self.upsert_at(points.into_iter().collect(), expiry::now())
+    }
+
+    /// [`Self::upsert`], stamping default expiry times as of `now`.
+    fn upsert_at(&self, mut points: Vec<Point>, now: f64) -> Result<usize> {
         // What validation depends on (dimensions, metrics, the sets of
         // vectors) never changes, so the config may be read up front.
         let config = self.inner.read().config.clone();
@@ -649,7 +667,6 @@ impl Collection {
         self.ensure_open()?;
         // Under the lock: expiry settings can change.
         if let Some(e) = &inner.config.expiry {
-            let now = expiry::now();
             for p in &mut points {
                 let metadata = expiry::stamp(e, &p.id, p.metadata.take(), now)?;
                 p.metadata = checked_metadata(&p.id, metadata)?;
@@ -664,18 +681,22 @@ impl Collection {
 
     pub fn delete<S: AsRef<str>>(&self, ids: &[S]) -> Result<usize> {
         let ids: Vec<String> = ids.iter().map(|s| s.as_ref().to_owned()).collect();
+        self.delete_at(&ids, expiry::now())
+    }
+
+    /// [`Self::delete`], counting points that had not expired by `now`.
+    fn delete_at(&self, ids: &[String], now: f64) -> Result<usize> {
         let mut inner = self.inner.write();
         self.ensure_open()?;
         if !ids.iter().any(|id| inner.store.slot_of(id).is_some()) {
             return Ok(0);
         }
         // Expired points go too, but were already gone as far as callers know.
-        let now = expiry::now();
         let mut visible: Vec<u32> = ids.iter().filter_map(|id| inner.visible_slot(id, now)).collect();
         visible.sort_unstable();
         visible.dedup();
-        inner.engine.log(Op::Delete { ids: &ids })?;
-        apply_delete(&mut inner, &ids);
+        inner.engine.log(Op::Delete { ids })?;
+        apply_delete(&mut inner, ids);
         self.bump();
         self.maintain(&mut inner)?;
         Ok(visible.len())
@@ -683,9 +704,13 @@ impl Collection {
 
     /// Deletes every point whose metadata matches `filter`; returns how many.
     pub fn delete_where(&self, filter: &Filter) -> Result<usize> {
+        self.delete_where_at(filter, expiry::now())
+    }
+
+    fn delete_where_at(&self, filter: &Filter, now: f64) -> Result<usize> {
         let mut inner = self.inner.write();
         self.ensure_open()?;
-        let ids: Vec<String> = matching(&inner, filter, expiry::now())
+        let ids: Vec<String> = matching(&inner, filter, now)
             .map(|slot| inner.store.id(slot).to_owned())
             .collect();
         if ids.is_empty() {
@@ -719,10 +744,19 @@ impl Collection {
         metadata: Value,
         mode: MetadataMode,
     ) -> Result<usize> {
+        self.update_metadata_at(selector, metadata, mode, expiry::now())
+    }
+
+    fn update_metadata_at(
+        &self,
+        selector: &PointSelector,
+        metadata: Value,
+        mode: MetadataMode,
+        now: f64,
+    ) -> Result<usize> {
         let mut inner = self.inner.write();
         self.ensure_open()?;
         let store = &inner.store;
-        let now = expiry::now();
         let mut slots: Vec<u32> = match selector {
             PointSelector::Ids(ids) => ids.iter().filter_map(|id| inner.visible_slot(id, now)).collect(),
             PointSelector::Filter(f) => matching(&inner, f, now).collect(),
@@ -1269,14 +1303,18 @@ impl Collection {
     /// Deletes the points that have expired; returns how many. Reads never
     /// see expired points anyway; this frees the space they take.
     pub fn purge_expired(&self) -> Result<usize> {
+        self.purge_expired_at(expiry::now())
+    }
+
+    fn purge_expired_at(&self, now: f64) -> Result<usize> {
         // Look first, so sweeps that find nothing never block writers.
-        if self.inner.read().expired_slots(expiry::now()).is_empty() {
+        if self.inner.read().expired_slots(now).is_empty() {
             return Ok(0);
         }
         let mut inner = self.inner.write();
         self.ensure_open()?;
         let ids: Vec<String> = inner
-            .expired_slots(expiry::now())
+            .expired_slots(now)
             .into_iter()
             .map(|slot| inner.store.id(slot).to_owned())
             .collect();
@@ -1320,6 +1358,80 @@ impl Collection {
             &inner.store,
             Some(&inner.indexes.to_bytes()),
             state::Columns::Inline,
+        )?;
+        Ok(())
+    }
+
+    /// The last replicated log entry this collection applied, if any.
+    pub fn applied(&self) -> Option<LogPosition> {
+        self.inner.read().applied
+    }
+
+    /// Applies one entry of a shard's replicated log, as of the time the
+    /// entry carries, and records that every entry up to `index` is applied.
+    ///
+    /// Every replica applying the same entries in the same order ends in the
+    /// same state. An `Err` that is not [`Error::is_fatal`] changed nothing
+    /// but still counts as applied: every replica fails the same way.
+    pub fn apply(&self, at: LogPosition, write: &Write) -> Result<Outcome> {
+        let now = write.now;
+        let result = match &write.command {
+            Command::Upsert { points } => self.upsert_at(points.clone(), now).map(Outcome::Count),
+            Command::Delete { ids } => self.delete_at(ids, now).map(Outcome::Count),
+            Command::DeleteWhere { filter } => self.delete_where_at(filter, now).map(Outcome::Count),
+            Command::UpdateMetadata {
+                selector,
+                metadata,
+                mode,
+            } => self
+                .update_metadata_at(selector, metadata.clone(), *mode, now)
+                .map(Outcome::Count),
+            Command::PurgeExpired => self.purge_expired_at(now).map(Outcome::Count),
+            Command::Update { update } => self.update(update).map(|_| Outcome::Done),
+            Command::CreateFieldIndex { field } => self.create_field_index(field).map(|()| Outcome::Done),
+            Command::DropFieldIndex { field } => self.drop_field_index(field).map(Outcome::Changed),
+            Command::Noop => Ok(Outcome::Done),
+        };
+        if let Err(e) = &result
+            && e.is_fatal()
+        {
+            return result;
+        }
+        // Logged apart from the change itself: a crash in between applies
+        // this one entry again, and applying any command twice in a row
+        // leaves the same state as applying it once.
+        self.mark_applied(at)?;
+        result
+    }
+
+    /// Records that log entries up to the one at `at` are applied.
+    pub fn mark_applied(&self, at: LogPosition) -> Result<()> {
+        let mut inner = self.inner.write();
+        self.ensure_open()?;
+        if inner.applied.is_some_and(|a| a.index >= at.index) {
+            return Ok(());
+        }
+        inner.engine.log(Op::Applied { at })?;
+        inner.applied = Some(at);
+        Ok(())
+    }
+
+    /// Writes the collection to a snapshot archive at `path`, as
+    /// [`quiver_snapshot::read_archive`] loads it.
+    pub fn export_archive(&self, path: &Path) -> Result<()> {
+        let inner = self.read()?;
+        let id = quiver_types::new_id();
+        quiver_snapshot::write_archive(
+            path,
+            &id,
+            &self.name,
+            &inner.config,
+            &inner.fields.names(),
+            &inner.store,
+            Some(&inner.indexes.to_bytes()),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| d.as_millis() as u64),
         )?;
         Ok(())
     }
@@ -1488,7 +1600,7 @@ fn search_sparse(
     found
 }
 
-fn fuse(fusion: Fusion, ranked: &[(f32, Vec<Neighbor>)]) -> Vec<(u32, f64)> {
+pub(crate) fn fuse(fusion: Fusion, ranked: &[(f32, Vec<Neighbor>)]) -> Vec<(u32, f64)> {
     let mut scores: HashMap<u32, f64> = HashMap::new();
     for (weight, found) in ranked {
         let scores_of = || found.iter().map(|n| -f64::from(n.dist));
@@ -1542,7 +1654,7 @@ fn group_neighbours(
     groups
 }
 
-fn parse_order_cursor(cursor: &str) -> Result<(Value, String)> {
+pub(crate) fn parse_order_cursor(cursor: &str) -> Result<(Value, String)> {
     let invalid = || Error::invalid("invalid cursor for an ordered scroll");
     let value: Value = serde_json::from_str(cursor).map_err(|_| invalid())?;
     match value {
@@ -1670,7 +1782,7 @@ fn live_matching<'a>(inner: &'a Inner, filter: &'a Filter) -> Box<dyn Iterator<I
 }
 
 /// Checks a point against `config`, normalising its vectors in place.
-fn validate_point(config: &CollectionConfig, p: &mut Point) -> Result<()> {
+pub(crate) fn validate_point(config: &CollectionConfig, p: &mut Point) -> Result<()> {
     if p.id.is_empty() || p.id.len() > MAX_ID_LEN {
         return Err(Error::invalid(format!(
             "point ids must be 1..={MAX_ID_LEN} bytes"
@@ -1704,7 +1816,7 @@ fn validate_point(config: &CollectionConfig, p: &mut Point) -> Result<()> {
 }
 
 /// Checks a dense vector against its settings, normalising it for cosine.
-fn validate_vector(config: &VectorConfig, v: &mut [f32]) -> Result<()> {
+pub(crate) fn validate_vector(config: &VectorConfig, v: &mut [f32]) -> Result<()> {
     if v.len() != config.dimension {
         return Err(Error::DimensionMismatch {
             expected: config.dimension,

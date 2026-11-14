@@ -13,7 +13,7 @@ pub(crate) enum Key {
 }
 
 impl Key {
-    fn of(v: &Value) -> Option<Self> {
+    pub(crate) fn of(v: &Value) -> Option<Self> {
         Some(match v {
             Value::Bool(b) => Key::Bool(*b),
             Value::String(s) => Key::Str(s.clone()),

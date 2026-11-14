@@ -172,9 +172,8 @@ pub async fn create_collection(
         expiry: req.expiry,
     };
     let info = blocking(move || {
-        Ok(db
-            .create_collection_with_fields(&req.name, config, &req.field_indexes)?
-            .info())
+        db.create_collection_with_fields(&req.name, config, &req.field_indexes)?
+            .try_info()
     })
     .await?;
     tracing::info!(collection = %info.name, dimension = info.config.dimension, "created collection");
@@ -186,7 +185,7 @@ pub async fn get_collection(
     Path(name): Path<String>,
 ) -> ApiResult<Json<CollectionInfo>> {
     let c = collection(&db, &name)?;
-    Ok(Json(blocking(move || Ok(c.info())).await?))
+    Ok(Json(blocking(move || c.try_info()).await?))
 }
 
 /// Changes index, quantization, on-disk or expiry settings; may rebuild indexes.
@@ -214,7 +213,7 @@ pub async fn rename_collection(
     Json(req): Json<RenameRequest>,
 ) -> ApiResult<Json<CollectionInfo>> {
     db.authorize_name(&access, &req.name)?;
-    let info = blocking(move || Ok(db.rename_collection(&name, &req.name)?.info())).await?;
+    let info = blocking(move || db.rename_collection(&name, &req.name)?.try_info()).await?;
     Ok(Json(info))
 }
 
@@ -268,7 +267,7 @@ pub async fn compact_collection(
     Path(name): Path<String>,
 ) -> ApiResult<Json<CollectionInfo>> {
     let c = collection(&db, &name)?;
-    let info = blocking(move || c.compact().map(|()| c.info())).await?;
+    let info = blocking(move || c.compact().and_then(|()| c.try_info())).await?;
     Ok(Json(info))
 }
 
@@ -285,7 +284,7 @@ pub async fn create_field_index(
     Json(req): Json<FieldIndexRequest>,
 ) -> ApiResult<Json<CollectionInfo>> {
     let c = collection(&db, &name)?;
-    let info = blocking(move || c.create_field_index(&req.field).map(|()| c.info())).await?;
+    let info = blocking(move || c.create_field_index(&req.field).and_then(|()| c.try_info())).await?;
     Ok(Json(info))
 }
 
@@ -294,7 +293,8 @@ pub async fn drop_field_index(
     Path((name, field)): Path<(String, String)>,
 ) -> ApiResult<Json<CollectionInfo>> {
     let c = collection(&db, &name)?;
-    let (dropped, info) = blocking(move || c.drop_field_index(&field).map(|d| (d, c.info()))).await?;
+    let (dropped, info) =
+        blocking(move || c.drop_field_index(&field).and_then(|d| Ok((d, c.try_info()?)))).await?;
     if !dropped {
         return Err(ApiError::not_found("this field has no index"));
     }
@@ -404,7 +404,7 @@ pub async fn get_point(
     let c = collection(&db, &name)?;
     let point = {
         let id = id.clone();
-        blocking(move || Ok(c.get(&id))).await?
+        blocking(move || c.try_get(&id)).await?
     };
     let point = point.ok_or_else(|| ApiError::point_not_found(&id))?;
     Ok(Json(present(point, q.with_vectors)))
@@ -418,7 +418,7 @@ pub async fn lookup_points(
     check_ids(&req.ids)?;
     let c = collection(&db, &name)?;
     let with_vectors = req.with_vectors;
-    let points = blocking(move || Ok(c.get_many(&req.ids))).await?;
+    let points = blocking(move || c.try_get_many(&req.ids)).await?;
     let points: Vec<Value> = points.into_iter().map(|p| present(p, with_vectors)).collect();
     Ok(Json(json!({ "points": points })))
 }
@@ -560,7 +560,7 @@ pub async fn count_points(
 ) -> ApiResult<Json<Value>> {
     let filter = parse_filter(req.filter.as_ref())?;
     let c = collection(&db, &name)?;
-    let count = blocking(move || Ok(c.count(filter.as_ref()))).await?;
+    let count = blocking(move || c.try_count(filter.as_ref())).await?;
     Ok(Json(json!({ "count": count })))
 }
 

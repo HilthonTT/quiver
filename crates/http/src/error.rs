@@ -93,6 +93,7 @@ impl From<quiver_db::Error> for ApiError {
             E::InvalidFilter(_) => (StatusCode::BAD_REQUEST, "invalid_filter"),
             E::Unsupported(_) => (StatusCode::NOT_IMPLEMENTED, "unsupported"),
             E::Forbidden(_) => (StatusCode::FORBIDDEN, "forbidden"),
+            E::Unavailable(_) => (StatusCode::SERVICE_UNAVAILABLE, "unavailable"),
             _ => {
                 tracing::error!(error = %err, "internal error");
                 (StatusCode::INTERNAL_SERVER_ERROR, "internal")
