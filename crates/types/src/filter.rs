@@ -1,10 +1,15 @@
 use std::cmp::Ordering;
 
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 use serde_json::{Map, Number, Value};
 
 use crate::error::{Error, Result};
 
-#[derive(Debug, Clone, PartialEq)]
+/// A parsed metadata filter.
+///
+/// It serializes in an internal form for Quiver nodes to pass between them;
+/// clients write filters in the MongoDB-style syntax [`Filter::parse`] reads.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Filter {
     /// All sub-filters must match.
     And(Vec<Filter>),
@@ -21,7 +26,7 @@ pub enum Filter {
     },
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum Condition {
     /// Equal to (`$eq`, or a bare value).
     Eq(Value),
@@ -87,13 +92,26 @@ impl Pattern {
     }
 }
 
+impl Serialize for Pattern {
+    fn serialize<S: Serializer>(&self, s: S) -> std::result::Result<S::Ok, S::Error> {
+        s.serialize_str(self.as_str())
+    }
+}
+
+impl<'de> Deserialize<'de> for Pattern {
+    fn deserialize<D: Deserializer<'de>>(d: D) -> std::result::Result<Self, D::Error> {
+        let pattern = String::deserialize(d)?;
+        Pattern::new(&pattern).map_err(serde::de::Error::custom)
+    }
+}
+
 impl PartialEq for Pattern {
     fn eq(&self, other: &Self) -> bool {
         self.as_str() == other.as_str()
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct GeoPoint {
     pub lat: f64,
     pub lon: f64,

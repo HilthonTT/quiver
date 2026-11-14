@@ -183,7 +183,7 @@ pub fn new_id() -> String {
     uuid::Uuid::new_v4().to_string()
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SearchOptions {
     /// Which named vector to search (the main one if `None`).
     pub using: Option<String>,
@@ -261,7 +261,7 @@ impl SearchOptions {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum SearchTarget {
     Vector(Vec<f32>),
     Id(String),
@@ -329,7 +329,7 @@ impl OrderBy {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ScrollOptions {
     pub cursor: Option<String>,
     pub limit: usize,
@@ -381,7 +381,7 @@ pub struct ContextPair {
 }
 
 /// Which points an operation applies to.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PointSelector {
     /// These ids; ids that do not exist are skipped.
     Ids(Vec<String>),
@@ -442,7 +442,7 @@ pub struct SearchHit {
 }
 
 /// What one part of a [`HybridQuery`] searches with.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum QueryVector {
     /// A dense vector, against the main vector or a named one.
     Dense { vector: Vec<f32>, using: Option<String> },
@@ -451,7 +451,7 @@ pub enum QueryVector {
 }
 
 /// One search whose ranking a [`HybridQuery`] fuses with the others.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Prefetch {
     pub query: QueryVector,
     /// How many of this search's best hits take part in the fusion.
@@ -502,7 +502,7 @@ impl Default for Fusion {
 }
 
 /// Several searches, e.g. one dense and one sparse, fused into one ranking.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct HybridQuery {
     pub prefetch: Vec<Prefetch>,
     pub fusion: Fusion,

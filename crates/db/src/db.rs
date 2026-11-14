@@ -9,9 +9,11 @@ use quiver_storage::{StorageKind, StorageOptions, state};
 use quiver_types::auth::Access;
 use quiver_types::{CollectionConfig, CollectionInfo, CollectionUpdate, Error, Result, validate_name};
 
-use crate::collection::{Collection, Env, META_FILE, with_expiry_field};
+use crate::Collection;
+use crate::collection::{Env, LocalCollection, META_FILE, with_expiry_field};
 use crate::fields::FieldIndexes;
 use crate::metrics::Metrics;
+use crate::remote::{ClusterBackend, ClusterCatalog, RemoteCollection};
 
 const COLLECTIONS_DIR: &str = "collections";
 const SNAPSHOTS_DIR: &str = "snapshots";
@@ -80,6 +82,8 @@ pub struct Database {
     env: Env,
     catalog: RwLock<Catalog>,
     metrics: Metrics,
+    /// Set for a database whose collections live on a cluster's nodes.
+    cluster: Option<Arc<dyn ClusterBackend>>,
     /// Held for the lifetime of the database to keep other processes out.
     _lock: Option<File>,
 }
@@ -155,8 +159,8 @@ impl Database {
                 {
                     continue;
                 }
-                let collection = Collection::open(&name, &entry.path(), env.clone())?;
-                collections.insert(name, Arc::new(collection));
+                let collection = LocalCollection::open(&name, &entry.path(), env.clone())?;
+                collections.insert(name, Arc::new(Collection::local(collection)));
             }
             aliases = read_aliases(root)?;
             aliases.retain(|alias, target| {
@@ -175,8 +179,56 @@ impl Database {
             env,
             catalog: RwLock::new(Catalog { collections, aliases }),
             metrics: Metrics::default(),
+            cluster: None,
             _lock: lock,
         })
+    }
+
+    /// A database whose collections are sharded across a cluster's nodes,
+    /// which `backend` reaches. It keeps nothing in this process: every
+    /// operation goes through the cluster. Snapshots are not available.
+    pub fn distributed(backend: Arc<dyn ClusterBackend>) -> Self {
+        let options = DbOptions {
+            storage: backend.storage(),
+            ..DbOptions::default()
+        };
+        Self {
+            root: None,
+            env: Env {
+                storage: options.storage,
+                storage_options: StorageOptions::default(),
+                snapshots: None,
+                snapshot_keep: options.snapshot_keep,
+            },
+            options,
+            catalog: RwLock::default(),
+            metrics: Metrics::default(),
+            cluster: Some(backend),
+            _lock: None,
+        }
+    }
+
+    /// Whether this database's collections live on a cluster's nodes.
+    pub fn is_distributed(&self) -> bool {
+        self.cluster.is_some()
+    }
+
+    fn remote(
+        &self,
+        backend: &Arc<dyn ClusterBackend>,
+        name: String,
+        sharded: crate::ShardedCollection,
+    ) -> Arc<Collection> {
+        Arc::new(Collection::remote(RemoteCollection::new(
+            name,
+            sharded,
+            Arc::clone(backend),
+        )))
+    }
+
+    /// The cluster's catalog, for a distributed database.
+    fn cluster_catalog(&self) -> Option<Result<ClusterCatalog>> {
+        self.cluster.as_ref().map(|b| b.catalog())
     }
 
     pub fn path(&self) -> Option<&Path> {
@@ -198,16 +250,21 @@ impl Database {
 
     pub fn create_collection(&self, name: &str, config: CollectionConfig) -> Result<Arc<Collection>> {
         validate_name(name)?;
+        if let Some(backend) = &self.cluster {
+            LocalCollection::check_creatable(&config, &[], backend.storage())?;
+            backend.create_collection(name, &config, &[])?;
+            return self.collection(name);
+        }
 
         let mut catalog = self.catalog.write();
         catalog.ensure_free(name)?;
         let dir = self.collection_dir(name);
-        let collection = Arc::new(Collection::create(
+        let collection = Arc::new(Collection::local(LocalCollection::create(
             name,
             config,
             dir.as_deref(),
             self.env.clone(),
-        )?);
+        )?));
         catalog
             .collections
             .insert(name.to_owned(), Arc::clone(&collection));
@@ -222,6 +279,12 @@ impl Database {
         field_indexes: &[String],
     ) -> Result<Arc<Collection>> {
         FieldIndexes::validate(&with_expiry_field(&config, field_indexes.to_vec()))?;
+        if let Some(backend) = &self.cluster {
+            validate_name(name)?;
+            LocalCollection::check_creatable(&config, field_indexes, backend.storage())?;
+            backend.create_collection(name, &config, field_indexes)?;
+            return self.collection(name);
+        }
         let collection = self.create_collection(name, config)?;
         for field in field_indexes {
             collection.create_field_index(field)?;
@@ -247,6 +310,12 @@ impl Database {
 
     /// The collection called `name`, or the one the alias `name` points to.
     pub fn collection(&self, name: &str) -> Result<Arc<Collection>> {
+        if let Some(backend) = &self.cluster {
+            return match backend.resolve(name)? {
+                Some((canonical, sharded)) => Ok(self.remote(backend, canonical, sharded)),
+                None => Err(Error::CollectionNotFound(name.to_owned())),
+            };
+        }
         self.catalog
             .read()
             .get(name)
@@ -255,21 +324,32 @@ impl Database {
     }
 
     pub fn collections(&self) -> Vec<Arc<Collection>> {
+        if let Some(backend) = &self.cluster {
+            return match backend.catalog() {
+                Ok(catalog) => catalog
+                    .collections
+                    .into_iter()
+                    .map(|(name, sharded)| self.remote(backend, name, sharded))
+                    .collect(),
+                Err(e) => {
+                    tracing::warn!(error = %e, "cannot read the cluster's catalog");
+                    Vec::new()
+                }
+            };
+        }
         self.catalog.read().collections.values().cloned().collect()
     }
 
     pub fn list_collections(&self) -> Vec<CollectionInfo> {
-        self.catalog
-            .read()
-            .collections
-            .values()
-            .map(|c| c.info())
-            .collect()
+        self.collections().iter().map(|c| c.info()).collect()
     }
 
     /// Drops a collection, by its own name (not an alias), and every alias
     /// pointing to it.
     pub fn drop_collection(&self, name: &str) -> Result<()> {
+        if let Some(backend) = &self.cluster {
+            return backend.drop_collection(name);
+        }
         let mut catalog = self.catalog.write();
         if catalog.aliases.contains_key(name) {
             return Err(Error::invalid(format!(
@@ -297,6 +377,10 @@ impl Database {
     /// follow it; snapshots keep the name they were taken under.
     pub fn rename_collection(&self, from: &str, to: &str) -> Result<Arc<Collection>> {
         validate_name(to)?;
+        if let Some(backend) = &self.cluster {
+            backend.rename_collection(from, to)?;
+            return self.collection(to);
+        }
         let mut catalog = self.catalog.write();
         if catalog.aliases.contains_key(from) {
             return Err(Error::invalid(format!(
@@ -312,10 +396,11 @@ impl Database {
             return Ok(old);
         }
         catalog.ensure_free(to)?;
-        let renamed = match old.relocate(to, self.collection_dir(to).as_deref()) {
-            Ok(renamed) => Arc::new(renamed),
+        let local = old.as_local().expect("a local database holds local collections");
+        let renamed = match local.relocate(to, self.collection_dir(to).as_deref()) {
+            Ok(renamed) => Arc::new(Collection::local(renamed)),
             Err(e) => {
-                if old.is_closed() {
+                if local.is_closed() {
                     // Unusable until the database is reopened.
                     catalog.collections.remove(from);
                 }
@@ -340,7 +425,31 @@ impl Database {
 
     /// Every alias, with the collection it points to.
     pub fn aliases(&self) -> BTreeMap<String, String> {
-        self.catalog.read().aliases.clone()
+        match self.cluster_catalog() {
+            Some(Ok(catalog)) => catalog.aliases,
+            Some(Err(e)) => {
+                tracing::warn!(error = %e, "cannot read the cluster's catalog");
+                BTreeMap::new()
+            }
+            None => self.catalog.read().aliases.clone(),
+        }
+    }
+
+    /// Names of the collections, and the aliases pointing to them.
+    fn names(&self) -> Result<(Vec<String>, BTreeMap<String, String>)> {
+        match self.cluster_catalog() {
+            Some(catalog) => {
+                let catalog = catalog?;
+                Ok((catalog.collections.into_keys().collect(), catalog.aliases))
+            }
+            None => {
+                let catalog = self.catalog.read();
+                Ok((
+                    catalog.collections.keys().cloned().collect(),
+                    catalog.aliases.clone(),
+                ))
+            }
+        }
     }
 
     /// Fails with [`Error::Forbidden`] unless `access` may use the collection
@@ -352,8 +461,8 @@ impl Database {
         if !access.is_scoped() {
             return Ok(());
         }
-        let catalog = self.catalog.read();
-        let effective = match (catalog.collections.contains_key(name), catalog.aliases.get(name)) {
+        let (collections, aliases) = self.names()?;
+        let effective = match (collections.iter().any(|c| c == name), aliases.get(name)) {
             (false, Some(target)) => target.as_str(),
             _ => name,
         };
@@ -383,7 +492,7 @@ impl Database {
             return Ok(());
         }
         self.authorize_name(access, alias)?;
-        if let Some(target) = self.catalog.read().aliases.get(alias)
+        if let Some(target) = self.names()?.1.get(alias)
             && !access.covers(target)
         {
             return Err(Error::Forbidden(alias.to_owned()));
@@ -393,12 +502,10 @@ impl Database {
 
     /// The collections `access` may see.
     pub fn list_collections_for(&self, access: &Access) -> Vec<CollectionInfo> {
-        self.catalog
-            .read()
-            .collections
+        self.collections()
             .iter()
-            .filter(|(name, _)| access.covers(name))
-            .map(|(_, c)| c.info())
+            .filter(|c| access.covers(c.name()))
+            .map(|c| c.info())
             .collect()
     }
 
@@ -424,6 +531,9 @@ impl Database {
     /// or atomically moving it from the collection it pointed at before.
     pub fn set_alias(&self, alias: &str, collection: &str) -> Result<()> {
         validate_name(alias)?;
+        if let Some(backend) = &self.cluster {
+            return backend.set_alias(alias, collection);
+        }
         let mut catalog = self.catalog.write();
         if catalog.collections.contains_key(alias) {
             return Err(Error::CollectionExists(alias.to_owned()));
@@ -450,6 +560,9 @@ impl Database {
 
     /// Removes an alias; the collection it points to stays.
     pub fn delete_alias(&self, alias: &str) -> Result<()> {
+        if let Some(backend) = &self.cluster {
+            return backend.delete_alias(alias);
+        }
         let mut catalog = self.catalog.write();
         let target = catalog
             .aliases
@@ -477,7 +590,9 @@ impl Database {
     fn remove_files(&self, name: &str, collection: Arc<Collection>) -> Result<()> {
         // Other threads may still hold this handle; stop them from writing
         // into a directory a new collection may soon reuse.
-        collection.close();
+        if let Some(local) = collection.as_local() {
+            local.close();
+        }
         // Close our handles first; Windows refuses to delete open files.
         drop(collection);
         if let Some(dir) = self.collection_dir(name)
@@ -503,6 +618,11 @@ impl Database {
     }
 
     pub fn snapshots(&self) -> Result<&SnapshotRegistry> {
+        if self.is_distributed() {
+            return Err(Error::Unsupported(
+                "snapshots are not available in cluster mode yet".into(),
+            ));
+        }
         self.env
             .snapshots
             .as_deref()
@@ -533,13 +653,54 @@ impl Database {
 
     pub fn restore_snapshot(&self, id: &str, opts: RestoreOptions) -> Result<Arc<Collection>> {
         let loaded = self.snapshots()?.load(id)?;
+        let collection = self.restore_loaded(loaded, opts)?;
+        tracing::info!(snapshot = id, collection = %collection.name(), points = collection.len(), "restored snapshot");
+        Ok(collection)
+    }
+
+    /// Replaces (or creates) the collection `name` with the contents of the
+    /// archive at `path`, as [`Collection::export_archive`] writes it, and
+    /// records that log entries up to `applied` are applied to it. This is
+    /// how a shard's replica installs a snapshot of its replicated log.
+    pub fn install_archive(
+        &self,
+        name: &str,
+        path: &Path,
+        applied: Option<crate::LogPosition>,
+    ) -> Result<Arc<Collection>> {
+        if self.is_distributed() {
+            return Err(Error::Unsupported("archives install into local databases".into()));
+        }
+        let loaded = quiver_snapshot::read_archive(path)?;
+        let collection = self.restore_loaded(
+            loaded,
+            RestoreOptions {
+                name: Some(name.to_owned()),
+                replace: true,
+            },
+        )?;
+        if let Some(at) = applied {
+            collection.mark_applied(at)?;
+        }
+        collection.flush()?;
+        Ok(collection)
+    }
+
+    fn restore_loaded(
+        &self,
+        loaded: quiver_snapshot::Loaded,
+        opts: RestoreOptions,
+    ) -> Result<Arc<Collection>> {
         let name = opts.name.unwrap_or(loaded.manifest.collection);
         validate_name(&name)?;
         // Verify everything that can fail before an existing collection is
         // deleted for it: the index, and what creating the collection checks.
-        let indexes =
-            Collection::snapshot_indexes(&loaded.manifest.config, &loaded.store, loaded.index.as_deref())?;
-        Collection::check_creatable(
+        let indexes = LocalCollection::snapshot_indexes(
+            &loaded.manifest.config,
+            &loaded.store,
+            loaded.index.as_deref(),
+        )?;
+        LocalCollection::check_creatable(
             &loaded.manifest.config,
             &loaded.manifest.field_indexes,
             self.env.storage,
@@ -557,7 +718,7 @@ impl Database {
             self.remove_files(&name, existing)?;
         }
         let dir = self.collection_dir(&name);
-        let collection = Arc::new(Collection::restore(
+        let collection = Arc::new(Collection::local(LocalCollection::restore(
             &name,
             loaded.manifest.config,
             &loaded.manifest.field_indexes,
@@ -565,9 +726,8 @@ impl Database {
             indexes,
             dir.as_deref(),
             self.env.clone(),
-        )?);
+        )?));
         catalog.collections.insert(name.clone(), Arc::clone(&collection));
-        tracing::info!(snapshot = id, collection = %name, points = collection.len(), "restored snapshot");
         Ok(collection)
     }
 }

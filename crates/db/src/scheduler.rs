@@ -110,7 +110,9 @@ pub(crate) fn snapshot_changed(db: &Database, seen: &mut HashMap<String, (u64, u
     let collections = db.collections();
     seen.retain(|name, _| collections.iter().any(|c| c.name() == name));
     for c in collections {
-        let version = c.version();
+        let Some(version) = c.as_local().map(|l| l.version()) else {
+            continue;
+        };
         if seen.get(c.name()) == Some(&version) {
             continue;
         }

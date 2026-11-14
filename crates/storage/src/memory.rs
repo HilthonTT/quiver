@@ -6,6 +6,9 @@ use crate::{Op, Recovered, StorageEngine, StorageKind, StoreSpec, VectorStore};
 #[derive(Debug, Default)]
 pub struct MemoryEngine;
 
+// Applied marks need no keeping either: after a restart the collection is
+// empty, which is the state before the first replicated entry.
+
 impl StorageEngine for MemoryEngine {
     fn kind(&self) -> StorageKind {
         StorageKind::Memory

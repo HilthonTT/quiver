@@ -42,6 +42,11 @@ pub enum Error {
     #[error("corrupt data: {0}")]
     Corrupt(String),
 
+    /// A cluster could not serve the request right now: no leader, or the
+    /// nodes holding the data cannot be reached. Retrying may succeed.
+    #[error("unavailable: {0}")]
+    Unavailable(String),
+
     #[error("storage error: {0}")]
     Storage(String),
 
@@ -55,5 +60,13 @@ pub enum Error {
 impl Error {
     pub fn invalid(msg: impl Into<String>) -> Self {
         Self::InvalidArgument(msg.into())
+    }
+
+    /// Whether this error means data could not be read or written, rather
+    /// than that a request was refused. A replica that hits one while
+    /// applying replicated changes can no longer be trusted to match the
+    /// others.
+    pub fn is_fatal(&self) -> bool {
+        matches!(self, Self::Io(_) | Self::Storage(_) | Self::Corrupt(_))
     }
 }

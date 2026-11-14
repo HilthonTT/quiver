@@ -20,12 +20,50 @@ pub use memory::MemoryEngine;
 pub use rocks::RocksDbEngine;
 pub use store::{StoreSpec, VectorStore};
 
+/// The position of an entry in a replicated log: its index, and the term
+/// and node of the leader that wrote it. Ordered by index first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+pub struct LogPosition {
+    pub index: u64,
+    pub term: u64,
+    pub node: u64,
+}
+
+impl LogPosition {
+    pub(crate) fn to_bytes(self) -> [u8; 24] {
+        let mut out = [0; 24];
+        out[..8].copy_from_slice(&self.index.to_le_bytes());
+        out[8..16].copy_from_slice(&self.term.to_le_bytes());
+        out[16..].copy_from_slice(&self.node.to_le_bytes());
+        out
+    }
+
+    pub(crate) fn from_bytes(b: &[u8]) -> Option<Self> {
+        let word = |i: usize| Some(u64::from_le_bytes(b.get(i * 8..i * 8 + 8)?.try_into().ok()?));
+        (b.len() == 24).then_some(())?;
+        Some(Self {
+            index: word(0)?,
+            term: word(1)?,
+            node: word(2)?,
+        })
+    }
+}
+
 /// A mutation, as handed to [`StorageEngine::log`].
 #[derive(Debug, Clone, Copy, Serialize)]
 #[serde(tag = "op", rename_all = "snake_case")]
 pub enum Op<'a> {
-    Upsert { points: &'a [Point] },
-    Delete { ids: &'a [String] },
+    Upsert {
+        points: &'a [Point],
+    },
+    Delete {
+        ids: &'a [String],
+    },
+    /// Marks every change logged so far as the effect of the replicated log
+    /// up to and including the entry at `at`. Changes nothing by itself.
+    Applied {
+        at: LogPosition,
+    },
 }
 
 /// An owned mutation, as read back from a log.
@@ -34,13 +72,17 @@ pub enum Op<'a> {
 pub enum Mutation {
     Upsert { points: Vec<Point> },
     Delete { ids: Vec<String> },
+    Applied { at: LogPosition },
 }
 
 #[derive(Debug)]
 pub struct Recovered {
     pub store: VectorStore,
     pub index: Option<Vec<u8>>,
+    /// Upserts and deletes to apply on top of `store`, in order.
     pub replay: Vec<Mutation>,
+    /// The last [`Op::Applied`] position persisted, if any was ever logged.
+    pub applied: Option<LogPosition>,
 }
 
 impl Recovered {
@@ -49,6 +91,7 @@ impl Recovered {
             store: VectorStore::with_spec(spec)?,
             index: None,
             replay: Vec::new(),
+            applied: None,
         })
     }
 }
@@ -59,6 +102,10 @@ impl Recovered {
 /// [`recover`](Self::recover) once on open, [`log`](Self::log) before applying
 /// each mutation in memory, and [`checkpoint`](Self::checkpoint) whenever
 /// [`needs_checkpoint`](Self::needs_checkpoint) says so (and on flush).
+///
+/// [`Op::Applied`] marks must survive checkpoints and imports: the last one
+/// logged is what [`Recovered::applied`] reports after a restart, and it must
+/// never claim changes that were not persisted with it.
 pub trait StorageEngine: Send + Sync + std::fmt::Debug {
     fn kind(&self) -> StorageKind;
 
@@ -196,6 +243,7 @@ mod tests {
                 Mutation::Delete { ids } => ids.iter().for_each(|id| {
                     store.remove(id);
                 }),
+                Mutation::Applied { .. } => {}
             }
         }
         assert_eq!(store.live(), 4);
@@ -203,6 +251,7 @@ mod tests {
         let p3 = store.slot_of("p3").unwrap();
         assert_eq!(*store.vector(p3), [3.0, 1.0]);
         assert_eq!(store.metadata(p3), Some(&json!({"i": 3})));
+        assert_eq!(rec.applied, None);
 
         // Import replaces everything.
         let mut fresh = VectorStore::new(2);
@@ -264,6 +313,66 @@ mod tests {
     #[test]
     fn rich_points_survive_rocksdb() {
         rich_points_contract(StorageKind::RocksDb);
+    }
+
+    /// The last applied mark survives restarts, checkpoints and imports.
+    fn at(index: u64) -> LogPosition {
+        LogPosition {
+            index,
+            term: 2,
+            node: 5,
+        }
+    }
+
+    fn applied_contract(kind: StorageKind) {
+        let dir = tempfile::tempdir().unwrap();
+        let open = || open_engine(kind, Some(dir.path()), StorageOptions::default()).unwrap();
+        let spec = StoreSpec::new(2);
+        {
+            let mut e = open();
+            e.recover(&spec).unwrap();
+            e.log(Op::Upsert { points: &points(2) }).unwrap();
+            e.log(Op::Applied { at: at(7) }).unwrap();
+            e.log(Op::Delete { ids: &["p0".into()] }).unwrap();
+            e.log(Op::Applied { at: at(8) }).unwrap();
+        }
+        let mut e = open();
+        let rec = e.recover(&spec).unwrap();
+        assert_eq!(rec.applied, Some(at(8)));
+        assert!(rec.replay.iter().all(|m| !matches!(m, Mutation::Applied { .. })));
+        let mut store = rec.store;
+        for m in rec.replay {
+            match m {
+                Mutation::Upsert { points } => points.into_iter().for_each(|p| {
+                    store.push_point(p);
+                }),
+                Mutation::Delete { ids } => ids.iter().for_each(|id| {
+                    store.remove(id);
+                }),
+                Mutation::Applied { .. } => unreachable!(),
+            }
+        }
+        e.checkpoint(&store, b"").unwrap();
+        drop(e);
+        let mut e = open();
+        let rec = e.recover(&spec).unwrap();
+        assert_eq!(rec.applied, Some(at(8)));
+        assert_eq!(rec.store.live() + rec.replay.len(), 1);
+        e.log(Op::Applied { at: at(9) }).unwrap();
+        e.import(&VectorStore::new(2), b"").unwrap();
+        drop(e);
+        assert_eq!(open().recover(&spec).unwrap().applied, Some(at(9)));
+    }
+
+    #[test]
+    fn file_engine_keeps_applied_marks() {
+        applied_contract(StorageKind::File);
+    }
+
+    #[cfg(feature = "rocksdb")]
+    #[test]
+    fn rocksdb_keeps_applied_marks() {
+        applied_contract(StorageKind::RocksDb);
     }
 
     #[test]

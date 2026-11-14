@@ -341,9 +341,8 @@ impl pb::quiver_server::Quiver for QuiverService {
         let config = config_from_pb(&req)?;
         let info = self
             .blocking(move |db| {
-                Ok(db
-                    .create_collection_with_fields(&req.name, config, &req.field_indexes)?
-                    .info())
+                db.create_collection_with_fields(&req.name, config, &req.field_indexes)?
+                    .try_info()
             })
             .await?;
         Ok(Response::new(info_to_pb(info)))
@@ -353,7 +352,7 @@ impl pb::quiver_server::Quiver for QuiverService {
         let access = require(&req, Role::ReadOnly)?;
         let name = req.into_inner().name;
         self.allow(&access, &name)?;
-        let info = self.blocking(move |db| Ok(db.collection(&name)?.info())).await?;
+        let info = self.blocking(move |db| db.collection(&name)?.try_info()).await?;
         Ok(Response::new(info_to_pb(info)))
     }
 
@@ -384,7 +383,7 @@ impl pb::quiver_server::Quiver for QuiverService {
             .blocking(move |db| {
                 let c = db.collection(&name)?;
                 c.compact()?;
-                Ok(c.info())
+                c.try_info()
             })
             .await?;
         Ok(Response::new(info_to_pb(info)))
@@ -398,7 +397,7 @@ impl pb::quiver_server::Quiver for QuiverService {
             .blocking(move |db| {
                 let c = db.collection(&req.collection)?;
                 c.create_field_index(&req.field)?;
-                Ok(c.info())
+                c.try_info()
             })
             .await?;
         Ok(Response::new(info_to_pb(info)))
@@ -411,7 +410,7 @@ impl pb::quiver_server::Quiver for QuiverService {
         let (dropped, info) = self
             .blocking(move |db| {
                 let c = db.collection(&req.collection)?;
-                Ok((c.drop_field_index(&req.field)?, c.info()))
+                Ok((c.drop_field_index(&req.field)?, c.try_info()?))
             })
             .await?;
         if !dropped {
@@ -438,7 +437,7 @@ impl pb::quiver_server::Quiver for QuiverService {
         self.allow(&access, &req.name)?;
         self.db.authorize_name(&access, &req.new_name).map_err(status)?;
         let info = self
-            .blocking(move |db| Ok(db.rename_collection(&req.name, &req.new_name)?.info()))
+            .blocking(move |db| db.rename_collection(&req.name, &req.new_name)?.try_info())
             .await?;
         Ok(Response::new(info_to_pb(info)))
     }
@@ -498,7 +497,7 @@ impl pb::quiver_server::Quiver for QuiverService {
         check_ids(&req.ids)?;
         let with_vectors = req.with_vectors;
         let points = self
-            .blocking(move |db| Ok(db.collection(&req.collection)?.get_many(&req.ids)))
+            .blocking(move |db| db.collection(&req.collection)?.try_get_many(&req.ids))
             .await?
             .into_iter()
             .map(|p| point_to_pb(p, with_vectors))
@@ -581,7 +580,7 @@ impl pb::quiver_server::Quiver for QuiverService {
         self.allow(&access, &req.collection)?;
         let filter = filter_from_pb(&req.filter_json)?;
         let count = self
-            .blocking(move |db| Ok(db.collection(&req.collection)?.count(filter.as_ref())))
+            .blocking(move |db| db.collection(&req.collection)?.try_count(filter.as_ref()))
             .await?;
         Ok(Response::new(pb::CountResponse { count: count as u64 }))
     }
