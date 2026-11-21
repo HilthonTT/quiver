@@ -221,7 +221,15 @@ impl LocalCollection {
     }
 
     pub(crate) fn open(name: &str, dir: &Path, env: Env) -> Result<Self> {
-        let meta: CollectionMeta = serde_json::from_slice(&fs::read(dir.join(META_FILE))?)?;
+        let mut meta: CollectionMeta = serde_json::from_slice(&fs::read(dir.join(META_FILE))?)?;
+        // Saved before beam widths were capped: open it anyway, capped.
+        if meta.config.clamp_hnsw_ef() {
+            tracing::warn!(
+                collection = name,
+                max = quiver_types::MAX_EF,
+                "lowered hnsw ef_construction/ef_search to the maximum"
+            );
+        }
         meta.config.validate()?;
 
         if !meta.storage.is_available() {

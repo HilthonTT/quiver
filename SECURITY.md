@@ -31,7 +31,9 @@ Quiver is pre-1.0. Only the latest release and `main` receive security fixes.
   keys file; restrict its permissions, and those of the TLS private key. The data and snapshot directories hold all stored vectors and metadata.
 - **Leave `--cors` off** unless a browser application on another origin needs direct access.
 - **Size limits:** JSON bodies are capped at 64 MiB; lower it with `--max-body-mb` if your
-  workload allows. Snapshot uploads are capped at 16 GiB and need a read-write key.
+  workload allows. Snapshot uploads are capped at 16 GiB and need a read-write key, and an
+  uploaded archive's data may expand to at most 64 times its compressed size (or 256 MiB,
+  whichever is larger), so a small gzip cannot claim enough data to exhaust memory on restore.
 
 ## What is in scope
 

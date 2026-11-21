@@ -317,3 +317,35 @@ fn metadata_updates_and_filtered_deletes_survive_restart() {
         }
     }
 }
+
+#[test]
+fn collections_saved_with_oversized_beam_widths_still_open() {
+    let dir = tempfile::tempdir().unwrap();
+    {
+        let db = Database::open(dir.path()).unwrap();
+        let c = db.create_collection("docs", CollectionConfig::new(8)).unwrap();
+        c.upsert(points(0..50, 8)).unwrap();
+        c.flush().unwrap();
+    }
+    // As written before `ef_construction` and `ef_search` were capped.
+    let meta = dir.path().join("collections/docs/collection.json");
+    let mut json: serde_json::Value = serde_json::from_slice(&std::fs::read(&meta).unwrap()).unwrap();
+    assert_eq!(json["config"]["index"]["type"], "hnsw", "{json}");
+    let index = &mut json["config"]["index"];
+    index["ef_construction"] = json!(1u64 << 40);
+    index["ef_search"] = json!(1u64 << 40);
+    std::fs::write(&meta, serde_json::to_vec(&json).unwrap()).unwrap();
+
+    let db = Database::open(dir.path()).unwrap();
+    let c = db.collection("docs").unwrap();
+    let IndexConfig::Hnsw(p) = c.config().index else {
+        panic!("expected hnsw");
+    };
+    assert_eq!(
+        (p.ef_construction, p.ef_search),
+        (quiver_db::MAX_EF, quiver_db::MAX_EF)
+    );
+    // Inserting runs the capped beam rather than reserving 2^40 slots.
+    c.upsert(points(50..60, 8)).unwrap();
+    assert_eq!(c.search(&vec_for(55, 8), 1).unwrap()[0].id, "p55");
+}

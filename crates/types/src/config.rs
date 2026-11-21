@@ -25,6 +25,10 @@ pub const MAX_NAMED_VECTORS: usize = 16;
 pub const MAX_SPARSE_VECTORS: usize = 16;
 /// Longest default time to live: 100 years, in seconds.
 pub const MAX_TTL_SECS: u64 = 100 * 365 * 24 * 60 * 60;
+/// Largest HNSW `ef_construction` and `ef_search`. The beam width sizes
+/// per-search buffers, so an unbounded one lets a single request ask for
+/// more memory than exists and abort the process.
+pub const MAX_EF: usize = 65_536;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CollectionConfig {
@@ -121,6 +125,26 @@ impl CollectionConfig {
     pub fn with_sparse_vector(mut self, name: impl Into<String>, config: SparseVectorConfig) -> Self {
         self.sparse_vectors.insert(name.into(), config);
         self
+    }
+
+    /// Lowers HNSW beam widths above [`MAX_EF`] to it, for configurations
+    /// saved before that limit existed. Returns whether anything changed.
+    /// The beam width only steers searches and inserts, not the graph's
+    /// stored form, so a saved index stays valid.
+    pub fn clamp_hnsw_ef(&mut self) -> bool {
+        let clamp = |index: &mut IndexConfig| match index {
+            IndexConfig::Hnsw(p) if p.ef_construction > MAX_EF || p.ef_search > MAX_EF => {
+                p.ef_construction = p.ef_construction.min(MAX_EF);
+                p.ef_search = p.ef_search.min(MAX_EF);
+                true
+            }
+            _ => false,
+        };
+        let mut changed = clamp(&mut self.index);
+        for v in self.vectors.values_mut() {
+            changed |= clamp(&mut v.index);
+        }
+        changed
     }
 
     /// The main vector's settings.
@@ -708,10 +732,10 @@ impl HnswParams {
         if !(2..=256).contains(&self.m) {
             return Err(Error::invalid("hnsw.m must be between 2 and 256"));
         }
-        if self.ef_construction == 0 || self.ef_search == 0 {
-            return Err(Error::invalid(
-                "hnsw.ef_construction and hnsw.ef_search must be > 0",
-            ));
+        if !(1..=MAX_EF).contains(&self.ef_construction) || !(1..=MAX_EF).contains(&self.ef_search) {
+            return Err(Error::invalid(format!(
+                "hnsw.ef_construction and hnsw.ef_search must be between 1 and {MAX_EF}"
+            )));
         }
         Ok(())
     }
@@ -813,6 +837,30 @@ mod tests {
         assert_eq!(c, IndexConfig::Flat);
         let c: IndexConfig = serde_json::from_str(r#"{"type":"kd_tree"}"#).unwrap();
         assert_eq!(c, IndexConfig::KdTree(KdTreeParams::default()));
+    }
+
+    #[test]
+    fn hnsw_beam_widths_are_bounded() {
+        let hnsw = |ef_construction, ef_search| {
+            CollectionConfig::new(3).index(IndexConfig::Hnsw(HnswParams {
+                ef_construction,
+                ef_search,
+                ..Default::default()
+            }))
+        };
+        assert!(hnsw(MAX_EF, MAX_EF).validate().is_ok());
+        for (c, s) in [
+            (0, 64),
+            (128, 0),
+            (MAX_EF + 1, 64),
+            (128, MAX_EF + 1),
+            (usize::MAX, 64),
+        ] {
+            assert!(
+                hnsw(c, s).validate().is_err(),
+                "ef_construction {c}, ef_search {s}"
+            );
+        }
     }
 
     #[test]

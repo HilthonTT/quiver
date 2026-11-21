@@ -209,12 +209,22 @@ impl KeyStore {
     }
 }
 
-/// Compares secrets without leaking the mismatch position through timing.
-pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
+/// Compares the stored secret `expected` with the `presented` one without
+/// leaking, through timing, where they differ or how long `expected` is.
+///
+/// The work depends only on `presented`'s length, which the caller already
+/// knows: every presented byte is compared with a byte of `expected`
+/// (wrapping around), and a length mismatch is folded into the result
+/// instead of returning early.
+pub fn constant_time_eq(expected: &[u8], presented: &[u8]) -> bool {
+    // A stand-in so an empty secret needs no branch inside the loop; the
+    // length check below still rejects every non-empty presented value.
+    let stored: &[u8] = if expected.is_empty() { &[0] } else { expected };
+    let mut diff = (expected.len() ^ presented.len()) as u64;
+    for (i, &p) in presented.iter().enumerate() {
+        diff |= u64::from(stored[i % stored.len()] ^ p);
     }
-    a.iter().zip(b).fold(0u8, |acc, (x, y)| acc | (x ^ y)) == 0
+    std::hint::black_box(diff) == 0
 }
 
 #[cfg(test)]
@@ -319,5 +329,12 @@ mod tests {
         assert!(constant_time_eq(b"secret", b"secret"));
         assert!(!constant_time_eq(b"secret", b"secreT"));
         assert!(!constant_time_eq(b"secret", b"secrets"));
+        assert!(!constant_time_eq(b"secret", b"secre"));
+        // A prefix of a repeated secret must not pass for it.
+        assert!(!constant_time_eq(b"abab", b"ab"));
+        assert!(!constant_time_eq(b"ab", b"abab"));
+        assert!(!constant_time_eq(b"secret", b""));
+        assert!(!constant_time_eq(b"", b"x"));
+        assert!(constant_time_eq(b"", b""));
     }
 }

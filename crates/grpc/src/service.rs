@@ -976,9 +976,20 @@ impl pb::quiver_server::Quiver for QuiverService {
         // `import_staged` removes the staging file itself from here on.
         staging.0 = None;
         let db = Arc::clone(&self.db);
-        let imported = tokio::task::spawn_blocking(move || db.snapshots()?.import_staged(&path))
-            .await
-            .map_err(|e| Status::internal(format!("task failed: {e}")))?;
+        // The archive names its collection only once it has been read, so the
+        // scope is checked then, before the archive joins the registry: a
+        // refused one must never be listed, pruned against or restored.
+        let imported = tokio::task::spawn_blocking(move || {
+            db.snapshots()?.import_staged_checked(&path, |manifest| {
+                if access.covers(&manifest.collection) {
+                    Ok(())
+                } else {
+                    Err(quiver_db::Error::Forbidden(manifest.collection.clone()))
+                }
+            })
+        })
+        .await
+        .map_err(|e| Status::internal(format!("task failed: {e}")))?;
         // The archive came from the client: an unreadable one is its error.
         let info = imported.map_err(|e| match e {
             quiver_db::Error::Corrupt(_) | quiver_db::Error::Serde(_) | quiver_db::Error::Io(_) => {
@@ -986,12 +997,6 @@ impl pb::quiver_server::Quiver for QuiverService {
             }
             other => status(other),
         })?;
-        // The archive names its collection only once it has been read.
-        if !access.covers(&info.manifest.collection) {
-            let id = info.manifest.id.clone();
-            let _ = self.blocking(move |db| db.delete_snapshot(&id)).await;
-            return Err(status(quiver_db::Error::Forbidden(info.manifest.collection)));
-        }
         Ok(Response::new(snapshot_to_pb(info)))
     }
 }

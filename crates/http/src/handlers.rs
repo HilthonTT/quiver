@@ -1223,10 +1223,18 @@ pub async fn upload_snapshot(
     written?;
     // `import_staged` removes the staging file itself from here on.
     staging.0 = None;
-    let imported = {
-        let db = Arc::clone(&db);
-        tokio::task::spawn_blocking(move || db.snapshots()?.import_staged(&path))
-    }
+    // The archive names its collection only once it has been read, so the
+    // scope is checked then, before the archive joins the registry: a
+    // refused one must never be listed, pruned against or restored.
+    let imported = tokio::task::spawn_blocking(move || {
+        db.snapshots()?.import_staged_checked(&path, |manifest| {
+            if access.covers(&manifest.collection) {
+                Ok(())
+            } else {
+                Err(quiver_db::Error::Forbidden(manifest.collection.clone()))
+            }
+        })
+    })
     .await
     .map_err(|e| ApiError::internal(format!("task failed: {e}")))?;
     // The archive came from the client: an unreadable one is its error.
@@ -1236,12 +1244,6 @@ pub async fn upload_snapshot(
         }
         other => ApiError::from(other),
     })?;
-    // The archive names its collection only once it has been read.
-    if !access.covers(&info.manifest.collection) {
-        let id = info.manifest.id.clone();
-        let _ = blocking(move || db.delete_snapshot(&id)).await;
-        return Err(quiver_db::Error::Forbidden(info.manifest.collection).into());
-    }
     Ok((StatusCode::CREATED, Json(info)))
 }
 

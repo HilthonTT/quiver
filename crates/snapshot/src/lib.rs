@@ -25,6 +25,16 @@ const MAX_DATA_BYTES: u64 = 64 << 30;
 const PREALLOCATE_MAX: u64 = 64 << 20;
 /// Real manifests are well under a kilobyte.
 const MAX_MANIFEST_BYTES: u64 = 1 << 20;
+/// An imported archive's data may be at most this many times its compressed
+/// size (or [`EXPANSION_FLOOR`], whichever is larger). Restoring reads the
+/// data into memory, so without a bound a small gzip of zeros could claim
+/// [`MAX_DATA_BYTES`] and exhaust it. Real vectors barely compress (about
+/// 1.1× for random floats; metadata-heavy collections reach perhaps 10–20×),
+/// while gzip bombs expand about 1000×.
+const MAX_EXPANSION: u64 = 64;
+/// Archives may always expand to this much, however small: small
+/// collections can compress well and cost little memory either way.
+const EXPANSION_FLOOR: u64 = 256 << 20;
 /// Partial files untouched for this long are left over from a crash, not
 /// an upload or snapshot still in progress (those keep writing).
 const STALE_PARTIAL_AGE: Duration = Duration::from_secs(60 * 60);
@@ -187,6 +197,20 @@ fn check_manifest(manifest: &Manifest) -> Result<()> {
     manifest.config.validate()
 }
 
+/// Refuses an untrusted archive whose data expands implausibly far beyond
+/// its `archive_bytes` on disk; see [`MAX_EXPANSION`].
+fn check_expansion(manifest: &Manifest, archive_bytes: u64) -> Result<()> {
+    let allowed = archive_bytes.saturating_mul(MAX_EXPANSION).max(EXPANSION_FLOOR);
+    if manifest.data_bytes > allowed {
+        return Err(Error::Corrupt(format!(
+            "snapshot {} expands from {archive_bytes} to {} bytes, more than {MAX_EXPANSION}× \
+             (and beyond {EXPANSION_FLOOR} bytes); refusing it as a likely decompression bomb",
+            manifest.id, manifest.data_bytes
+        )));
+    }
+    Ok(())
+}
+
 pub fn read_manifest(path: &Path) -> Result<Manifest> {
     let mut archive = tar::Archive::new(GzDecoder::new(BufReader::new(File::open(path)?)));
 
@@ -198,7 +222,8 @@ pub fn read_manifest(path: &Path) -> Result<Manifest> {
             if entry.size() > MAX_MANIFEST_BYTES {
                 return Err(Error::Corrupt("snapshot manifest is implausibly large".into()));
             }
-            let manifest: Manifest = serde_json::from_reader(entry.take(MAX_MANIFEST_BYTES))?;
+            let mut manifest: Manifest = serde_json::from_reader(entry.take(MAX_MANIFEST_BYTES))?;
+            manifest.config.clamp_hnsw_ef();
             check_manifest(&manifest)?;
             return Ok(manifest);
         }
@@ -237,7 +262,9 @@ fn walk_archive(
                 if entry.size() > MAX_MANIFEST_BYTES {
                     return Err(Error::Corrupt("snapshot manifest is implausibly large".into()));
                 }
-                let parsed: Manifest = serde_json::from_reader((&mut entry).take(MAX_MANIFEST_BYTES))?;
+                let mut parsed: Manifest = serde_json::from_reader((&mut entry).take(MAX_MANIFEST_BYTES))?;
+                // Archives from before beam widths were capped stay restorable.
+                parsed.config.clamp_hnsw_ef();
                 check_manifest(&parsed)?;
                 manifest = Some(parsed);
             }
@@ -533,10 +560,26 @@ impl SnapshotRegistry {
     }
 
     pub fn import_staged(&self, staged: &Path) -> Result<SnapshotInfo> {
+        self.import_staged_checked(staged, |_| Ok(()))
+    }
+
+    /// Like [`Self::import_staged`], but `check` judges the verified manifest
+    /// first, and the archive is only added to the registry if it passes.
+    /// Use it to authorize an upload by the collection its archive names:
+    /// a refused archive is never visible to listings, retention or restores.
+    pub fn import_staged_checked(
+        &self,
+        staged: &Path,
+        check: impl FnOnce(&Manifest) -> Result<()>,
+    ) -> Result<SnapshotInfo> {
         let result = (|| {
             // Streams the data rather than decoding it, so memory stays flat
             // however far a (possibly hostile) upload decompresses.
+            // The manifest is the first entry, so this decompresses nothing
+            // else; `verify_archive` then holds the data to its declared size.
+            check_expansion(&read_manifest(staged)?, fs::metadata(staged)?.len())?;
             let manifest = verify_archive(staged)?;
+            check(&manifest)?;
             let target = self.path(&manifest.id)?;
             let _guard = self.lock();
             if target.exists() {
@@ -643,6 +686,71 @@ mod tests {
             reg.delete(&info.manifest.id),
             Err(Error::SnapshotNotFound(_))
         ));
+    }
+
+    #[test]
+    fn implausibly_expanding_archives_are_refused() {
+        let (_dir, reg) = registry();
+        let mut manifest = reg
+            .create("docs", &CollectionConfig::new(3), &store(1), None)
+            .unwrap()
+            .manifest;
+        // Anything up to the floor passes, however small the archive.
+        manifest.data_bytes = EXPANSION_FLOOR;
+        assert!(check_expansion(&manifest, 1).is_ok());
+        // Above it, the ratio decides.
+        manifest.data_bytes = 1 << 40;
+        assert!(check_expansion(&manifest, (1 << 40) / MAX_EXPANSION).is_ok());
+        assert!(matches!(
+            check_expansion(&manifest, (1 << 40) / MAX_EXPANSION - 1),
+            Err(Error::Corrupt(_))
+        ));
+        assert!(
+            check_expansion(&manifest, 16 << 20).is_err(),
+            "a 16 MiB gzip claiming 1 TiB"
+        );
+    }
+
+    #[test]
+    fn legacy_beam_widths_stay_restorable() {
+        let mut config =
+            CollectionConfig::new(3).index(quiver_types::IndexConfig::Hnsw(quiver_types::HnswParams {
+                ef_construction: 1 << 40,
+                ..Default::default()
+            }));
+        assert!(config.validate().is_err());
+        assert!(config.clamp_hnsw_ef());
+        assert!(config.validate().is_ok());
+        assert!(!config.clamp_hnsw_ef(), "nothing left to clamp");
+    }
+
+    #[test]
+    fn refused_imports_never_reach_the_registry() {
+        let (_dir, source) = registry();
+        let info = source
+            .create("tenant-b-docs", &CollectionConfig::new(3), &store(2), None)
+            .unwrap();
+        let archive = fs::read(source.path(&info.manifest.id).unwrap()).unwrap();
+
+        let (_dir, reg) = registry();
+        let staged = reg.staging_path();
+        fs::write(&staged, &archive).unwrap();
+        let refused = reg.import_staged_checked(&staged, |m| {
+            assert_eq!(m.collection, "tenant-b-docs");
+            Err(Error::Forbidden(m.collection.clone()))
+        });
+        assert!(matches!(refused, Err(Error::Forbidden(_))));
+        assert!(!staged.exists(), "the staging file is removed");
+        assert!(reg.list(None).unwrap().is_empty());
+        assert!(matches!(
+            reg.get(&info.manifest.id),
+            Err(Error::SnapshotNotFound(_))
+        ));
+
+        let staged = reg.staging_path();
+        fs::write(&staged, &archive).unwrap();
+        reg.import_staged_checked(&staged, |_| Ok(())).unwrap();
+        assert_eq!(reg.list(None).unwrap().len(), 1);
     }
 
     #[test]

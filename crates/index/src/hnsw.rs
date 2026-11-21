@@ -243,7 +243,9 @@ impl HnswIndex {
     ) -> Vec<Neighbor> {
         let mut visited = Visited::new(self.links.len());
         let mut candidates: BinaryHeap<Reverse<Neighbor>> = BinaryHeap::new();
-        let mut results: BinaryHeap<Neighbor> = BinaryHeap::with_capacity(ef + 1);
+        // Never more results than nodes, whatever `ef` asks for: inserts pass
+        // the collection's `ef_construction` here unclamped.
+        let mut results: BinaryHeap<Neighbor> = BinaryHeap::with_capacity(ef.min(self.links.len()) + 1);
 
         for &ep in entry_points {
             if visited.insert(ep.slot) {
